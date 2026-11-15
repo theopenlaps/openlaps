@@ -33,6 +33,9 @@ def main(argv=None):
     p.add_argument("--sin-satelite", action="store_true", help="no usar imagen Sentinel-2 en el suelo")
     p.add_argument("--sin-dosel", action="store_true", help="no usar altura de dosel (árboles reales)")
     p.add_argument("--sin-horizonte", action="store_true", help="no generar el relieve lejano")
+    p.add_argument("--tuneles", choices=["principales", "todos", "ninguno"], default="principales",
+                   help="qué túneles se construyen: principales = vías primarias para arriba (por defecto; los urbanos "
+                        "menores bajan en trinchera y su boca salía en medio de la calle), todos, ninguno")
     p.add_argument("--sin-catastro", action="store_true", help="España: no usar edificios ni plantas del Catastro")
     p.add_argument("--sin-overture", action="store_true", help="EE. UU.: no usar alturas de Overture Maps")
     p.add_argument("--sin-cc0", action="store_true", help="no descargar texturas fotográficas CC0 (ambientCG)")

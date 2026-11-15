@@ -183,7 +183,7 @@ def run(args, log=print):
 
     # ------------------------------------------------------------ carreteras
     log("4/7 Red de carreteras…")
-    net = roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log)
+    net = roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log, tuneles=getattr(args, "tuneles", "principales"))
     blds_poly_pre = unary_union([b["poly"] for b in blds]) if blds else None
     has_gr = any(b["tags"].get("barrier") == "guard_rail" for b in osm.get("barriers", []))
     rails = []
@@ -227,13 +227,16 @@ def run(args, log=print):
     agua.tallar()
     paths = []
     for w in osm["ways"]:
-        if w["tags"].get("highway") in C.PATHS:
+        # las veredas en túnel (pasillos y accesos del metro) van bajo tierra: no se pintan en la superficie
+        if w["tags"].get("highway") in C.PATHS and w["tags"].get("tunnel") in (None, "no") \
+                and int(float(w["tags"].get("layer", "0") or 0)) >= 0:
             x, y = proj.to_local([c[0] for c in w["coords"]], [c[1] for c in w["coords"]])
             paths.append((np.column_stack([x, y]), 1.3))
     paths += [(c, w) for c, w in cob.secos]     # cauces secos (ramblas, arroyos intermitentes)
     painter = T.GroundPainter(lc, proj, args.temporada, rd["road_polys"], paths, areas, blds_poly, water_poly, s2=s2,
                               ortho=orto)
     terr.build_mesh(scene, painter, tile_m=args.tesela, mpp=mpp)
+    plazas_peatonales(scene, osm, proj, terr, rd["road_polys"], blds_poly, log=log)
     agua.construir(scene)
 
     m = BR.build(scene, osm.get("barriers", []), proj, terr, rect, rd["road_union"])
@@ -311,7 +314,7 @@ def run(args, log=print):
         bio = io.BytesIO()
         thumb.save(bio, "PNG")
         map_lines = [e.at(np.arange(a, b, 2.0), 0.0)[:, :2] for e in net.edges for a, b in e.runs if b - a > 4]
-        info = {"name": args.titulo or name, "lat": proj.lat0, "lon": proj.lon0,
+        info = {"name": args.titulo or name, "lat": proj.lat0, "lon": proj.lon0, "epsg": proj.epsg,
                 "attribution": ATTRIBUTION.format(
                     s2_years=f" ({', '.join(sorted(rasters.S2_YEARS))})" if rasters.S2_YEARS else "") + "".join("- " + a + chr(10) for a in R.attribution),
                 "description": f"Generada con openlaps a partir de datos abiertos. {area_km2:.2f} km².",
@@ -330,6 +333,66 @@ def run(args, log=print):
 
 
 # --------------------------------------------------------------------------------------
+def plazas_peatonales(scene, osm, proj, terr, road_polys, blds_poly, log=print, paso=2.0):
+    """Plazas y áreas peatonales (highway=pedestrian + area=yes): una losa pavimentada que sigue el relieve.
+    Sin esto quedaban como terreno con la ortofoto, que de cerca parece un campo de tierra. Va 4 cm por encima
+    del terreno y sin colisión propia (se choca con el terreno, que ya está debajo)."""
+    from scipy.spatial import Delaunay
+
+    polis = []
+    for a in osm["areas"]:
+        t = a["tags"]
+        if t.get("highway") != "pedestrian" and t.get("area:highway") != "pedestrian":
+            continue
+        x, y = proj.to_local([c[0] for c in a["outer"]], [c[1] for c in a["outer"]])
+        huecos = []
+        for r in a.get("inners", []):
+            hx, hy = proj.to_local([c[0] for c in r], [c[1] for c in r])
+            huecos.append(list(zip(hx, hy)))
+        try:
+            pg = Polygon(list(zip(x, y)), huecos).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        mat = C.SURFACE_MAP.get(t.get("surface"), "banqueta")
+        if mat in ("asfalto", "terraceria"):
+            mat = "banqueta"
+        polis.append((pg, mat))
+    if not polis:
+        return
+    quitar = unary_union([p for p, _ in road_polys] + ([blds_poly.buffer(0.2)] if blds_poly is not None else []))
+    n_tri, area = 0, 0.0
+    for pg, mat in polis:
+        g = pg.difference(quitar)
+        for p in getattr(g, "geoms", [g]):
+            if p.geom_type != "Polygon" or p.area < 4.0:
+                continue
+            borde = []
+            for anillo in [p.exterior, *p.interiors]:
+                largo = anillo.length
+                borde += [anillo.interpolate(d).coords[0] for d in np.arange(0, largo, paso)]
+            x0, y0, x1, y1 = p.bounds
+            gx, gy = np.meshgrid(np.arange(x0 + paso / 2, x1, paso), np.arange(y0 + paso / 2, y1, paso))
+            dentro = shapely.contains_xy(p.buffer(-paso * 0.3), gx.ravel(), gy.ravel())
+            pts = np.vstack([np.array(borde), np.c_[gx.ravel()[dentro], gy.ravel()[dentro]]])
+            if len(pts) < 3:
+                continue
+            tri = Delaunay(pts).simplices
+            cen = pts[tri].mean(axis=1)
+            tri = tri[shapely.contains_xy(p, cen[:, 0], cen[:, 1])]
+            if not len(tri):
+                continue
+            z = terr.height(pts[:, 0], pts[:, 1]) + 0.04
+            pos = np.c_[pts, z]
+            # caras hacia arriba (antihorario visto desde arriba)
+            v = np.cross(pos[tri[:, 1]] - pos[tri[:, 0]], pos[tri[:, 2]] - pos[tri[:, 0]])
+            tri[v[:, 2] < 0] = tri[v[:, 2] < 0][:, ::-1]
+            escala = 3.0 if mat == "banqueta" else 2.0
+            scene.add("banqueta", mat, pos, pts / escala, tri)
+            n_tri += len(tri)
+            area += p.area
+    log(f"  plazas peatonales: {len(polis)} áreas, {area:,.0f} m² pavimentados ({n_tri:,} triángulos)")
+
+
 def _frame(poly, i):
     j0, j1 = max(0, i - 2), min(len(poly) - 1, i + 2)
     t = poly[j1, :2] - poly[j0, :2]
@@ -426,6 +489,8 @@ def _place_stage(scene, net, route, route_hw, legs, closed, log=print):
 def _place_free(scene, net, log=print):
     best, score = None, -1
     for e in net.edges:
+        if e.tunnel or e.bridge:  # una salida bajo tierra hace que AC deje el coche en la calle de encima
+            continue
         for a, b in net.ranges(e):
             sc = (b - a) * (1 + e.prio)
             if sc > score and b - a > 40:

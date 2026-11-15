@@ -15,8 +15,22 @@ DRIVABLE = {
     "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link",
 }
 
+# Calles peatonales: en los cascos antiguos son calles enteras (Preciados, Arenal…), así que entran a la red
+# como calle pavimentada a ras de suelo (sin rayas ni banquetas); si no, quedaban como terreno y las calles
+# que llegan a ellas terminaban en una caja de bordillos
+PAVED_PATHS = {"pedestrian"}
+NETWORK = DRIVABLE | PAVED_PATHS
+
 # Caminos a pie que solo se pintan en la textura del suelo (veredas)
-PATHS = {"footway", "path", "pedestrian", "steps", "cycleway", "bridleway"}
+PATHS = {"footway", "path", "steps", "cycleway", "bridleway"}
+
+# Vías en túnel que NO se construyen: rampas y pasillos de estacionamientos subterráneos (en el centro de una
+# ciudad hay decenas y cada una dejaba una boca de túnel en medio de la calle); los túneles de verdad
+# (de primary a residential) sí
+TUNNEL_SKIP_CLASSES = {"service", "track"}
+# con --tuneles principales (por defecto) solo se construyen los túneles de estas clases
+TUNNEL_MAIN_CLASSES = {"motorway", "trunk", "primary", "motorway_link", "trunk_link", "primary_link"}
+TUNNEL_SKIP_SERVICE = {"parking_aisle", "driveway", "parking", "drive-through"}
 
 # ancho de carril (m), carriles por defecto si es doble sentido, acotamiento (m),
 # velocidad de proyecto (km/h), sigma del suavizado vertical (m), prioridad
@@ -33,6 +47,7 @@ ROAD_CLASS = {
     "living_street": (2.75,  2,       0.00,  20, 8.0,  3),
     "service":       (3.00,  1,       0.00,  30, 8.0,  2),
     "track":         (3.20,  1,       0.00,  30, 9.0,  1),
+    "pedestrian":    (3.00,  2,       0.00,  20, 6.0,  0),
     "motorway_link": (3.75,  1,       1.50,  60, 25.0, 8),
     "trunk_link":    (3.75,  1,       1.00,  50, 20.0, 7),
     "primary_link":  (3.50,  1,       0.50,  50, 16.0, 6),

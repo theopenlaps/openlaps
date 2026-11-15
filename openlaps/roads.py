@@ -293,7 +293,8 @@ def _velocidad(v):
 
 
 class RoadNetwork:
-    def __init__(self, osm, proj, dem_z, urban_fn, area_rect, log=print):
+    def __init__(self, osm, proj, dem_z, urban_fn, area_rect, log=print, tuneles="principales"):
+        self.tuneles = tuneles        # "principales" | "todos" | "ninguno" (ver C.TUNNEL_MAIN_CLASSES)
         self.proj = proj
         self.dem_z = dem_z            # función (x, y) -> z del terreno sin tallar
         self.urban_fn = urban_fn      # función (x, y) -> bool
@@ -315,9 +316,26 @@ class RoadNetwork:
 
     # ---------------------------------------------------------------- 1. grafo
     def _build_graph(self, osm):
-        ways = [w for w in osm["ways"] if w["tags"].get("highway") in C.DRIVABLE
-                and w["tags"].get("access") not in ("private", "no")
-                and w["tags"].get("area") != "yes" and len(w["nodes"]) == len(w["coords"])]
+        def tunel_omitido(t):
+            """Túneles que no se construyen. Siempre: rampas y pasillos de estacionamiento. Con "principales"
+            (por defecto) solo quedan los de vías primarias para arriba: los urbanos menores (como el de la Plaza
+            Mayor) bajan en trinchera y el relieve no la tiene, así que su boca y su tapa salían en medio de la
+            calle. Con "ninguno", ninguno."""
+            if t.get("tunnel") in (None, "no", "building_passage"):
+                return False
+            if t.get("highway") in C.TUNNEL_SKIP_CLASSES or t.get("service") in C.TUNNEL_SKIP_SERVICE:
+                return True
+            if self.tuneles == "ninguno":
+                return True
+            return self.tuneles == "principales" and t.get("highway") not in C.TUNNEL_MAIN_CLASSES
+        candidatas = [w for w in osm["ways"] if w["tags"].get("highway") in C.NETWORK
+                      and w["tags"].get("access") not in ("private", "no")
+                      and w["tags"].get("area") != "yes" and len(w["nodes"]) == len(w["coords"])]
+        omitidas = [w for w in candidatas if tunel_omitido(w["tags"])]
+        ways = [w for w in candidatas if not tunel_omitido(w["tags"])]
+        bocas = {n for w in omitidas for n in (w["nodes"][0], w["nodes"][-1])}
+        if omitidas:
+            self.log(f"  {len(omitidas)} vías en túnel omitidas (túneles: {self.tuneles})")
         for w in ways:
             x, y = self.proj.to_local([c[0] for c in w["coords"]], [c[1] for c in w["coords"]])
             for nid, xx, yy in zip(w["nodes"], x, y):
@@ -350,7 +368,35 @@ class RoadNetwork:
             e.a, e.b = nodes[0], nodes[-1]
             edges.append(e)
         self.edges = self._merge_deg2(edges)
+        if bocas:
+            self._quitar_rampas(bocas)
         self.log(f"  red: {len(ways)} vías OSM -> {len(self.edges)} aristas")
+
+    def _quitar_rampas(self, bocas, largo_max=150.0):
+        """Quita las rampas que solo llevaban a un túnel omitido: tramos cortos que terminan, sin salida, en la
+        boca. Si no, quedaban cachitos de calle encajonados en bordillos."""
+        quitadas = 0
+        while True:
+            grado = {}
+            for e in self.edges:
+                grado[e.a] = grado.get(e.a, 0) + 1
+                grado[e.b] = grado.get(e.b, 0) + 1
+            fuera = []
+            for e in self.edges:
+                pts = np.array([self.node_xy[n] for n in e.nodes])
+                largo = float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+                muerto = (e.a in bocas and grado[e.a] == 1) or (e.b in bocas and grado[e.b] == 1)
+                if muerto and largo < largo_max:
+                    fuera.append(e)
+            if not fuera:
+                break
+            for e in fuera:
+                bocas |= {e.a, e.b}   # la rampa de antes de la rampa también puede quedar sin salida
+            ids = {id(e) for e in fuera}
+            self.edges = [e for e in self.edges if id(e) not in ids]
+            quitadas += len(fuera)
+        if quitadas:
+            self.log(f"  {quitadas} rampas sin salida hacia túneles omitidos quitadas")
 
     def _attrs(self, e):
         t = e.tags
@@ -369,6 +415,8 @@ class RoadNetwork:
             e.mat = C.SURFACE_MAP[surf]
         elif e.cls == "track":
             e.mat = "terraceria"
+        elif e.cls in C.PAVED_PATHS:
+            e.mat = "adoquin"   # calle peatonal sin dato: losa o adoquín, no asfalto
         else:
             e.mat = "asfalto"
         e.phys = C.PHYS_KEY[e.mat]
@@ -377,6 +425,9 @@ class RoadNetwork:
         e.layer = int(_num(t.get("layer"), 0) or 0)
         width = _num(t.get("width"))
         carriage = lanes * lane_w
+        if e.cls in C.PAVED_PATHS:
+            e.oneway = False
+            carriage = 6.0      # peatonal sin ancho en OSM: la de una calle de casco antiguo, de fachada a fachada
         if e.oneway and lanes == 1 and e.cls in ("residential", "unclassified", "tertiary", "living_street"):
             carriage = lane_w * 1.7   # calle de un sentido con cochera / estacionamiento
         e.hw = (width if width and 2.5 < width < 40 else carriage) / 2.0
@@ -421,7 +472,8 @@ class RoadNetwork:
     # ---------------------------------------------------------------- 2. planta
     def _geometry(self):
         rmin = {"motorway": 250, "trunk": 120, "primary": 60, "secondary": 40, "tertiary": 25,
-                "unclassified": 15, "residential": 6, "living_street": 4, "service": 4, "track": 8}
+                "unclassified": 15, "residential": 6, "living_street": 4, "service": 4, "track": 8,
+                "pedestrian": 3}
         for e in self.edges:
             pts = np.array([self.node_xy[n] for n in e.nodes])
             r = rmin.get(e.cls.replace("_link", ""), 10)

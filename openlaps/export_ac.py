@@ -294,6 +294,16 @@ def ext_config(scene, lat, lon):
     return "\n".join(out)
 
 
+def georef(info):
+    """Cómo pasar una posición de AC a coordenadas reales: UTM recentrado en (lat0, lon0)."""
+    lat, lon = float(info["lat"]), float(info["lon"])
+    epsg = info.get("epsg") or (32600 if lat >= 0 else 32700) + int((lon + 180) // 6) + 1
+    return {"lat0": lat, "lon0": lon, "epsg": int(epsg),
+            "ejes": "AC x = este - x0, AC y = altura sobre el nivel del mar (m), AC z = -(norte - y0); "
+                    "(x0, y0) = UTM de (lat0, lon0)",
+            "version": __version__}
+
+
 def write_track(scene, out_dir, track_id, info, map_lines, route=None, log=print):
     root = os.path.join(out_dir, track_id)
     for sub in ("", "ui", "data", "ai", "extension"):
@@ -343,6 +353,10 @@ def write_track(scene, out_dir, track_id, info, map_lines, route=None, log=print
           "author": "openlaps", "version": __version__, "url": URL}
     with open(os.path.join(root, "ui", "ui_track.json"), "w", encoding="utf-8") as f:
         json.dump(ui, f, ensure_ascii=False, indent=2)
+    # Georreferencia exacta (las geotags de ui_track.json van redondeadas a 5 decimales, ~1 m):
+    # sirve para que otras herramientas pasen una posición de AC a lat/lon.
+    with open(os.path.join(root, "openlaps_geo.json"), "w", encoding="utf-8") as f:
+        json.dump(georef(info), f, ensure_ascii=False, indent=2)
     if route is not None and info.get("ai_hw") is not None:
         with open(os.path.join(root, "ai", "fast_lane.ai"), "wb") as f:
             f.write(_ai_bytes(route, info["ai_hw"]))

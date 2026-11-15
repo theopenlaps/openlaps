@@ -45,3 +45,12 @@ def test_region_detection(lat, lon, code):
 def test_every_region_has_attribution_list():
     for r in regions.REGIONS.values():
         assert isinstance(r.attribution, list)
+
+
+def test_ac_georef_matches_projection():
+    from openlaps.export_ac import georef
+    for bb in (BBox.around(19.43, -99.13, 800), BBox.around(40.1405, -3.4226, 800), BBox.around(-33.9, 151.2, 500)):
+        proj = LocalProjection(bb)
+        g = georef({"lat": proj.lat0, "lon": proj.lon0})  # sin epsg: se deduce igual que LocalProjection
+        assert g["epsg"] == proj.epsg
+        assert (g["lat0"], g["lon0"]) == (proj.lat0, proj.lon0)

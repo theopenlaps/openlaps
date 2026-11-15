@@ -170,6 +170,9 @@ Todo es determinista: la misma entrada siempre da la misma pista.
   (`ksMultilayer_fresnel_nm`: base aérea, máscara y 4 detalles), mallas troceadas por celdas
   espaciales con distancia LOD por tipo, colisiones con material invisible, `ext_config.ini`
   (GrassFX, RainFX, luces nocturnas, sustitución por `ksTree`) y `cameras.ini`.
+- `openlaps_geo.json`: georreferencia exacta de la pista. Una posición de AC `(x, y, z)` es
+  UTM `(x0 + x, y0 − z)` en el EPSG indicado, con `(x0, y0)` = UTM de `(lat0, lon0)`, e `y` es la
+  altura sobre el nivel del mar. Sirve para dibujar el coche sobre un mapa real.
 
 ## Estado
 

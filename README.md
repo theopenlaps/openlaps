@@ -167,6 +167,9 @@ Everything is deterministic: the same input always gives the same track.
   (`ksMultilayer_fresnel_nm`: aerial base, mask and 4 detail layers), meshes split by spatial
   cells with per-type LOD distance, invisible collision materials, `ext_config.ini` (GrassFX,
   RainFX, night lights, `ksTree` replacement) and `cameras.ini`.
+- `openlaps_geo.json`: the track's exact georeference. An AC position `(x, y, z)` is UTM
+  `(x0 + x, y0 − z)` in the given EPSG, with `(x0, y0)` = UTM of `(lat0, lon0)`, and `y` is the
+  height above sea level. Useful for drawing the car on a real map.
 
 ## Status
 
