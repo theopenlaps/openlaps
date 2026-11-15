@@ -67,6 +67,24 @@ Opciones útiles: `--modo libre|tramo|circuito`, `--ruta "lat,lon;lat,lon"`, `--
 terreno), `--mpp` (resolución de la textura del suelo), `--sin-orto`, `--sin-satelite`,
 `--sin-dosel`, `--sin-horizonte`, `--sin-microsoft`, `--sin-catastro`, `--sin-cc0`.
 
+## App de escritorio (Windows)
+
+Para no tener que usar la línea de comandos: un mapa donde eliges la zona (o marcas un tramo o
+circuito), una vista previa de las calles al instante y un borrador 3D rápido antes de generar la
+pista completa, que se instala en Assetto Corsa con un clic. En español e inglés.
+
+- **Versión ligera** (recomendada): descarga `OpenLaps-<versión>-windows.zip` (~330 KB),
+  descomprímelo y abre `OpenLaps.exe`. La primera vez descarga Python y las librerías (~250 MB, en
+  `%LOCALAPPDATA%\OpenLaps`); las siguientes abre al momento. `OpenLaps.exe --reparar` reinstala ese
+  entorno. Necesita WebView2, que ya viene con Windows 11.
+- **Desde el código**: `python -m pip install -e .[gui]` y `python -m openlaps.gui`
+  (`--navegador` la abre en el navegador en vez de en su propia ventana).
+- **Compilar la versión ligera**: `powershell -ExecutionPolicy Bypass -File packaging\compilar_ligero.ps1`
+  (usa el `csc.exe` que trae Windows; sale en `dist\`).
+
+Mientras miras el mapa, la app ya va descargando los datos de la zona (OpenStreetMap, Catastro,
+Microsoft), que es lo que más tarda la primera vez; así el borrador sale en unos 25 s.
+
 ## Fuentes de datos (todas abiertas)
 
 | Dato | Fuente | Licencia |

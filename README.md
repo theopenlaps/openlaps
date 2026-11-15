@@ -69,6 +69,24 @@ Useful options: `--modo libre|tramo|circuito` (free / stage / circuit), `--ruta 
 `--res` (terrain mesh), `--mpp` (ground texture resolution), `--sin-orto`, `--sin-satelite`,
 `--sin-dosel`, `--sin-horizonte`, `--sin-microsoft`, `--sin-catastro`, `--sin-cc0`.
 
+## Desktop app (Windows)
+
+No command line needed: a map where you pick the area (or mark a stage or circuit), an instant
+street preview and a quick 3D draft before generating the full track, which installs into Assetto
+Corsa with one click. In English and Spanish.
+
+- **Lightweight build** (recommended): download `OpenLaps-<version>-windows.zip` (~330 KB), extract
+  it and open `OpenLaps.exe`. On first run it downloads Python and the libraries (~250 MB, into
+  `%LOCALAPPDATA%\OpenLaps`); after that it opens instantly. `OpenLaps.exe --repair` reinstalls that
+  environment. Requires WebView2, which ships with Windows 11.
+- **From source**: `python -m pip install -e .[gui]` and `python -m openlaps.gui`
+  (`--navegador` opens it in the browser instead of its own window).
+- **Build the lightweight package**: `powershell -ExecutionPolicy Bypass -File packaging\compilar_ligero.ps1`
+  (uses the `csc.exe` that ships with Windows; output goes to `dist\`).
+
+While you look at the map, the app is already downloading the area data (OpenStreetMap, Cadastre,
+Microsoft), which is the slow part the first time, so the draft comes out in about 25 s.
+
 ## Data sources (all open)
 
 | Data | Source | License |

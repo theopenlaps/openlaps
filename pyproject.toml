@@ -32,6 +32,8 @@ classifiers = [
 dev = ["pytest>=8", "ruff>=0.6"]
 # alturas de edificios de Overture Maps (EE. UU.); sin él la pista se genera sin esas alturas
 overture = ["pyarrow>=17"]
+# la app de escritorio para Windows (python -m openlaps.gui u openlaps-gui)
+gui = ["pywebview>=6.2"]
 
 [project.urls]
 Homepage = "https://github.com/theopenlaps/openlaps"
@@ -40,11 +42,17 @@ Issues = "https://github.com/theopenlaps/openlaps/issues"
 [project.scripts]
 openlaps = "openlaps.__main__:main"
 
+[project.gui-scripts]
+openlaps-gui = "openlaps.gui.app:main"
+
 [tool.setuptools.dynamic]
 version = { attr = "openlaps.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["openlaps*"]
+
+[tool.setuptools.package-data]
+"openlaps.gui" = ["web/*", "openlaps.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

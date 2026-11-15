@@ -4,7 +4,7 @@
 <title>Visor openlaps</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700&family=Saira+Semi+Condensed:wght@400;500;600&display=swap">
 <style>
 /* Concepto: tablero de manejo sobre la escena 3D a pantalla completa; el amarillo de raya central es el único acento. */
 :root {
@@ -17,8 +17,8 @@
   --rojo: #d9483b;
   --verde: #4caf6a;
   --vidrio: rgba(21, 23, 26, 0.78);
-  --f-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
-  --f-texto: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-display: "Saira Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --f-texto: "Saira Semi Condensed", system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
 }
 html, body { height: 100%; margin: 0; }
@@ -110,43 +110,47 @@ button[aria-pressed="true"] { background: var(--amarillo); color: var(--asfalto)
 }
 @media (hover: hover) and (pointer: fine) { .mandos { display: none; } }
 @media (prefers-reduced-motion: reduce) { .progreso div { transition: none; } }
+/* ?incrustado=1: dentro de la vista previa de la app de escritorio, sin lo que no cabe */
+.incrustado .barra, .incrustado .info, .incrustado .hud, .incrustado .mandos { display: none !important; }
+.incrustado .barra { padding: 6px; gap: 6px; }
+.incrustado .marca { display: none; }
 </style>
 
-<canvas id="lienzo" aria-label="Escena 3D de la pista"></canvas>
+<canvas id="lienzo" aria-label="Escena 3D de la pista" data-tx-a="escena"></canvas>
 
 <header class="barra">
   <div class="marca"><i aria-hidden="true"></i><span id="nombre">openlaps</span></div>
-  <button id="b-modo" aria-pressed="true" title="Cambiar entre manejar y vista libre (tecla V)">Manejar</button>
-  <button id="b-cam" title="Cámara de persecución o de cabina (tecla C)">Cámara</button>
-  <button id="b-reinicio" title="Volver a la salida (tecla R)">Salida</button>
-  <button id="b-calidad" aria-pressed="false" title="Sombras y más resolución (gasta más batería)">Alta</button>
-  <label class="boton" title="Abrir un archivo .glb generado con openlaps">Abrir .glb<input id="archivo" type="file" accept=".glb,model/gltf-binary"></label>
+  <button id="b-modo" aria-pressed="true" title="Cambiar entre conducir y vista libre (tecla V)" data-tx="conducir" data-tx-t="modo_t">Conducir</button>
+  <button id="b-cam" title="Cámara de persecución o de cabina (tecla C)" data-tx="camara" data-tx-t="camara_t">Cámara</button>
+  <button id="b-reinicio" title="Volver a la salida (tecla R)" data-tx="salida" data-tx-t="salida_t">Salida</button>
+  <button id="b-calidad" aria-pressed="false" title="Sombras y más resolución (gasta más batería)" data-tx="alta" data-tx-t="alta_t">Alta</button>
+  <label class="boton" title="Abrir un archivo .glb generado con OpenLaps" data-tx="abrir" data-tx-t="abrir_t">Abrir .glb<input id="archivo" type="file" accept=".glb,model/gltf-binary"></label>
 </header>
 
 <div class="hud" id="hud" hidden>
   <div class="vel"><span id="vel">0</span><small>km/h</small></div>
-  <div class="fila"><span>Cad.</span><b id="cad">—</b></div>
-  <div class="fila"><span>Superficie</span><b id="sup">—</b></div>
+  <div class="fila"><span data-tx="dist">Dist.</span><b id="cad">—</b></div>
+  <div class="fila"><span data-tx="superficie">Superficie</span><b id="sup">—</b></div>
   <div class="crono" id="crono" hidden>0:00.0</div>
 </div>
 <div class="info" id="info" hidden></div>
 
 <div class="mandos" id="mandos" hidden>
   <div class="grupo">
-    <div class="tecla" data-k="izq" aria-label="Izquierda"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
-    <div class="tecla" data-k="der" aria-label="Derecha"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
+    <div class="tecla" data-k="izq" aria-label="Izquierda" data-tx-a="izq"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+    <div class="tecla" data-k="der" aria-label="Derecha" data-tx-a="der"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
   </div>
   <div class="grupo">
-    <div class="tecla freno" data-k="freno">FRENO</div>
-    <div class="tecla acel" data-k="acel">ACEL</div>
+    <div class="tecla freno" data-k="freno" data-tx="freno">FRENO</div>
+    <div class="tecla acel" data-k="acel" data-tx="acel">ACEL</div>
   </div>
 </div>
 
 <div class="vacio" id="vacio">
   <div class="caja">
-    <h1 id="v-titulo">Cargando la pista…</h1>
+    <h1 id="v-titulo" data-tx="cargando">Cargando la pista…</h1>
     <div class="progreso"><div id="barra"></div></div>
-    <p id="v-texto">Las calles, el relieve y los edificios salen de datos abiertos (OpenStreetMap, Copernicus, INEGI, ESA WorldCover, Microsoft) y un algoritmo los convierte en una pista.</p>
+    <p id="v-texto" data-tx="intro">Las calles, el relieve y los edificios salen de datos abiertos (OpenStreetMap, Copernicus, ESA WorldCover y más) y un algoritmo los convierte en una pista.</p>
   </div>
 </div>
 
@@ -158,6 +162,39 @@ button[aria-pressed="true"] { background: var(--amarillo); color: var(--asfalto)
 } }
 </script>
 <script type="module">
+if (new URLSearchParams(location.search).has("incrustado")) document.documentElement.classList.add("incrustado");
+// ---------------------------------------------------------------- idioma (?lang=es|en; si no, el del navegador)
+const LANG = (new URLSearchParams(location.search).get("lang") || navigator.language || "es").toLowerCase().startsWith("es") ? "es" : "en";
+const TX = {
+  es: {
+    escena: "Escena 3D de la pista", conducir: "Conducir", libre: "Vista libre", modo_t: "Cambiar entre conducir y vista libre (tecla V)",
+    camara: "Cámara", camara_t: "Cámara de persecución o de cabina (tecla C)", salida: "Salida", salida_t: "Volver a la salida (tecla R)",
+    alta: "Alta", alta_t: "Sombras y más resolución (gasta más batería)", abrir: "Abrir .glb", abrir_t: "Abrir un archivo .glb generado con OpenLaps",
+    dist: "Dist.", superficie: "Superficie", izq: "Izquierda", der: "Derecha", freno: "FRENO", acel: "ACEL",
+    cargando: "Cargando la pista…", archivo: "Archivo: ",
+    intro: "Las calles, el relieve y los edificios salen de datos abiertos (OpenStreetMap, Copernicus, ESA WorldCover y más) y un algoritmo los convierte en una pista.",
+    no_abre: "No se pudo abrir la pista", ayuda_abrir: "Abre un archivo .glb generado con OpenLaps usando el botón “Abrir .glb”.",
+    abre_una: "Abre una pista generada", genera: "Genera una pista con OpenLaps y ábrela con el botón “Abrir .glb”.",
+    triangulos: "triángulos", cruza: "Cruza la salida",
+    sup: { ROAD: "Asfalto", MXCOBBLE: "Empedrado", LOOSE: "Tierra", MXDIRT: "Tierra", PAVEMENT: "Acera", GRASS: "Hierba / tierra" },
+  },
+  en: {
+    escena: "3D track scene", conducir: "Drive", libre: "Free view", modo_t: "Switch between driving and free view (V key)",
+    camara: "Camera", camara_t: "Chase or cockpit camera (C key)", salida: "Start", salida_t: "Back to the start (R key)",
+    alta: "High", alta_t: "Shadows and higher resolution (uses more battery)", abrir: "Open .glb", abrir_t: "Open a .glb file generated with OpenLaps",
+    dist: "Dist.", superficie: "Surface", izq: "Left", der: "Right", freno: "BRAKE", acel: "GAS",
+    cargando: "Loading the track…", archivo: "File: ",
+    intro: "Streets, terrain and buildings come from open data (OpenStreetMap, Copernicus, ESA WorldCover and more) and an algorithm turns them into a track.",
+    no_abre: "Couldn't open the track", ayuda_abrir: "Open a .glb file generated with OpenLaps using the “Open .glb” button.",
+    abre_una: "Open a generated track", genera: "Generate a track with OpenLaps and open it with the “Open .glb” button.",
+    triangulos: "triangles", cruza: "Cross the start line",
+    sup: { ROAD: "Asphalt", MXCOBBLE: "Cobblestone", LOOSE: "Dirt", MXDIRT: "Dirt", PAVEMENT: "Sidewalk", GRASS: "Grass / dirt" },
+  },
+}[LANG];
+document.documentElement.lang = LANG;
+for (const el of document.querySelectorAll("[data-tx]")) el.firstChild.nodeValue = TX[el.dataset.tx];
+for (const el of document.querySelectorAll("[data-tx-t]")) el.title = TX[el.dataset.txT];
+for (const el of document.querySelectorAll("[data-tx-a]")) el.setAttribute("aria-label", TX[el.dataset.txA]);
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -167,7 +204,7 @@ THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const $ = (id) => document.getElementById(id);
-const SUPERFICIES = { ROAD: "Asfalto", MXCOBBLE: "Empedrado", LOOSE: "Terracería", MXDIRT: "Terracería", PAVEMENT: "Banqueta", GRASS: "Pasto / tierra" };
+const SUPERFICIES = TX.sup;
 const VMAX = { ROAD: 50, MXCOBBLE: 30, LOOSE: 33, MXDIRT: 33, PAVEMENT: 25, GRASS: 16 };   // m/s según superficie
 const AGARRE = { ROAD: 1.0, MXCOBBLE: 0.85, LOOSE: 0.72, MXDIRT: 0.7, PAVEMENT: 0.9, GRASS: 0.5 };
 
@@ -294,8 +331,8 @@ function fmtTiempo(s) {
 const loader = new GLTFLoader();
 function cargar(url, nombre) {
   $("vacio").hidden = false;
-  $("v-titulo").textContent = "Cargando la pista…";
-  $("v-texto").textContent = nombre ? `Archivo: ${nombre}` : $("v-texto").textContent;
+  $("v-titulo").textContent = TX.cargando;
+  $("v-texto").textContent = nombre ? `${TX.archivo}${nombre}` : $("v-texto").textContent;
   loader.load(url, (gltf) => {
     try { montar(gltf); } catch (e) { fallo(e); }
   }, (ev) => {
@@ -304,8 +341,8 @@ function cargar(url, nombre) {
 }
 function fallo(err) {
   $("vacio").hidden = false;
-  $("v-titulo").textContent = "No se pudo abrir la pista";
-  $("v-texto").innerHTML = `<span class="aviso">${(err && err.message) || err}</span><br>Abre un archivo .glb generado con <code>python -m openlaps … </code> usando el botón “Abrir .glb”.`;
+  $("v-titulo").textContent = TX.no_abre;
+  $("v-texto").innerHTML = `<span class="aviso">${(err && err.message) || err}</span><br>${TX.ayuda_abrir}`;
 }
 
 function montar(gltf) {
@@ -356,7 +393,7 @@ function montar(gltf) {
   scene.fog.far = Math.max(1200, Math.max(tam.x, tam.z) * 1.2);
   orbit.target.copy(centro);
   camera.position.copy(centro).add(new THREE.Vector3(-tam.x * 0.45, Math.max(tam.x, tam.z) * 0.45, tam.z * 0.45));
-  $("info").textContent = `${(tam.x / 1000).toFixed(2)} × ${(tam.z / 1000).toFixed(2)} km · ${Math.round(tris).toLocaleString("es-MX")} triángulos`;
+  $("info").textContent = `${(tam.x / 1000).toFixed(2)} × ${(tam.z / 1000).toFixed(2)} km · ${Math.round(tris).toLocaleString(LANG)} ${TX.triangulos}`;
   $("info").hidden = false;
   $("vacio").hidden = true;
   colocarEnSalida();
@@ -366,6 +403,13 @@ function montar(gltf) {
   const q = new URLSearchParams(location.search);
   const v3 = (k) => { const a = (q.get(k) || "").split(",").map(Number); return a.length === 3 && a.every(Number.isFinite) ? new THREE.Vector3(...a) : null; };
   const pc = v3("cam"), pm = v3("mira");
+  if (q.get("vista") === "libre") modo(false);
+  // en la miniatura de la app: la cámara gira despacio alrededor de la pista (si tocas, se para)
+  if (q.has("incrustado")) {
+    orbit.autoRotate = true;
+    orbit.autoRotateSpeed = 0.7;
+    orbit.addEventListener("start", () => { orbit.autoRotate = false; });
+  }
   if (pc && pm) {
     modo(false);
     camera.position.copy(pc);
@@ -383,7 +427,7 @@ $("archivo").addEventListener("change", (e) => {
 function modo(manejar) {
   st.manejar = manejar;
   $("b-modo").setAttribute("aria-pressed", String(manejar));
-  $("b-modo").textContent = manejar ? "Manejar" : "Vista libre";
+  $("b-modo").textContent = manejar ? TX.conducir : TX.libre;
   orbit.enabled = !manejar;
   coche.visible = manejar || st.v !== 0;
   $("hud").hidden = !manejar;
@@ -474,7 +518,7 @@ function fisica(dt) {
       cr.t = ahora - cr.t0;
       if (st.iRuta >= st.iFin && cr.t > 3) { cr.estado = "fin"; $("crono").classList.add("fin"); }
     }
-    $("crono").textContent = cr.estado === "listo" ? "Cruza la salida" : fmtTiempo(cr.t);
+    $("crono").textContent = cr.estado === "listo" ? TX.cruza : fmtTiempo(cr.t);
   }
   $("vel").textContent = Math.round(Math.abs(st.v) * 3.6);
   $("sup").textContent = SUPERFICIES[st.superficie] || st.superficie;
@@ -538,8 +582,8 @@ fetch(porDefecto, { method: "HEAD" }).then((r) => {
   if (r.ok) cargar(porDefecto);
   else return cargarPartes();
 }).catch(() => cargarPartes()).catch(() => {
-  $("v-titulo").textContent = "Abre una pista generada";
+  $("v-titulo").textContent = TX.abre_una;
   $("barra").parentElement.hidden = true;
-  $("v-texto").innerHTML = "Genera una escena con <code>python -m openlaps --centro 18.9853,-99.0995 --tam 800 --nombre tepoztlan</code> y ábrela con el botón “Abrir .glb”, o sirve la carpeta del proyecto y entra a <code>viewer/?glb=../salida/tepoztlan.glb</code>.";
+  $("v-texto").textContent = TX.genera;
 });
 </script>

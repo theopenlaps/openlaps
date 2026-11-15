@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenLaps</title>
+<link rel="icon" href="icono.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700&family=Saira+Semi+Condensed:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="marca"><img src="icono.png" alt="" width="30" height="30">OpenLaps</div>
+  <div class="buscador" data-buscador>
+    <svg class="lupa" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+    <input type="search" data-i18n-ph="top.buscar" data-i18n-aria="top.buscar_aria" autocomplete="off" spellcheck="false">
+    <ul class="resultados" role="listbox" hidden></ul>
+  </div>
+  <div class="top-acciones">
+    <button class="boton fantasma" id="b-guiado" data-i18n="top.guiado" data-i18n-title="top.guiado_title"></button>
+    <button class="boton fantasma" id="b-pistas"><span data-i18n="top.pistas"></span> <span class="contador" id="n-pistas" hidden></span></button>
+    <button class="boton fantasma icono" id="b-ajustes" data-i18n-aria="top.ajustes" data-i18n-title="top.ajustes">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </div>
+  <div class="ventana-ctl" hidden>
+    <button data-ventana="minimizar" data-i18n-aria="ventana.minimizar" data-i18n-title="ventana.minimizar"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5.5h10"/></svg></button>
+    <button data-ventana="maximizar" data-i18n-aria="ventana.maximizar" data-i18n-title="ventana.maximizar"><svg viewBox="0 0 10 10" aria-hidden="true"><path class="max" d="M.5.5h9v9h-9z"/><path class="rest" d="M.5 2.5h7v7h-7zM2.5 2.5V.5h7v7h-2"/></svg></button>
+    <button data-ventana="cerrar" class="cerrar-ventana" data-i18n-aria="ventana.cerrar" data-i18n-title="ventana.cerrar"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M.5.5l9 9M9.5.5l-9 9"/></svg></button>
+  </div>
+</header>
+<div class="bordes" hidden><i data-borde="n"></i><i data-borde="s"></i><i data-borde="w"></i><i data-borde="e"></i><i data-borde="nw"></i><i data-borde="ne"></i><i data-borde="sw"></i><i data-borde="se"></i></div>
+
+<main id="mapa" data-i18n-aria="mapa.aria"></main>
+
+<div class="capas" role="group" data-i18n-aria="capa.grupo">
+  <button data-capa="mapa" aria-pressed="true" data-i18n="capa.mapa"></button>
+  <button data-capa="satelite" aria-pressed="false" data-i18n="capa.satelite"></button>
+  <span class="sep" aria-hidden="true"></span>
+  <button id="b-osm" aria-pressed="true" data-i18n="capa.osm" data-i18n-title="capa.osm_t"></button>
+</div>
+
+<!-- ============================================================ panel normal -->
+<aside class="panel" id="panel-experto" data-i18n-aria="panel.aria">
+  <div class="campo">
+    <span class="etiqueta" data-i18n="campo.tipo"></span>
+    <div class="segmentos" data-grupo="modo">
+      <button data-valor="libre" data-i18n="modo.libre"></button>
+      <button data-valor="tramo" data-i18n="modo.tramo"></button>
+      <button data-valor="circuito" data-i18n="modo.circuito"></button>
+    </div>
+  </div>
+
+  <div class="campo" data-solo="libre">
+    <label class="etiqueta" for="tam-a"><span data-i18n="campo.tam"></span> <b data-mostrar="tam"></b></label>
+    <input type="range" id="tam-a" min="200" max="3000" step="50" data-campo="tam">
+    <p class="ayuda" data-i18n="ayuda.zona"></p>
+  </div>
+
+  <div class="campo" data-solo="ruta">
+    <span class="etiqueta"><span data-i18n="campo.ruta"></span> <b data-mostrar="ruta"></b></span>
+    <p class="ayuda" data-mostrar="ayuda-ruta"></p>
+    <div class="fila-botones">
+      <button class="boton chico" data-accion="deshacer-punto" data-i18n="boton.quitar_ultimo"></button>
+      <button class="boton chico" data-accion="borrar-ruta" data-i18n="boton.borrar_ruta"></button>
+    </div>
+  </div>
+
+  <div class="campo">
+    <span class="etiqueta" data-i18n="campo.calidad"></span>
+    <div class="segmentos" data-grupo="calidad">
+      <button data-valor="rapida" data-i18n="calidad.rapida"></button>
+      <button data-valor="normal" data-i18n="calidad.normal"></button>
+      <button data-valor="detallada" data-i18n="calidad.detallada"></button>
+    </div>
+  </div>
+
+  <div class="campo">
+    <label class="etiqueta" for="nombre-a" data-i18n="campo.nombre"></label>
+    <input type="text" id="nombre-a" data-campo="nombre" maxlength="40">
+    <p class="ayuda" data-mostrar="nombre-aviso"></p>
+  </div>
+
+  <label class="casilla"><input type="checkbox" data-campo="ac"> <span data-i18n="campo.ac"></span></label>
+
+  <dl class="resumen" data-resumen></dl>
+
+  <details class="avanzado">
+    <summary data-i18n="avanzado"></summary>
+    <div class="campo">
+      <label class="etiqueta" for="temporada" data-i18n="campo.temporada"></label>
+      <select id="temporada" data-campo="temporada"><option value="seca" data-i18n="temporada.seca"></option><option value="lluvias" data-i18n="temporada.lluvias"></option></select>
+    </div>
+    <div class="campo">
+      <label class="etiqueta" for="region" data-i18n="campo.region"></label>
+      <select id="region" data-campo="region">
+        <option value="auto" data-i18n="region.auto"></option><option value="es" data-i18n="region.es"></option>
+        <option value="fr" data-i18n="region.fr"></option><option value="eu" data-i18n="region.eu"></option>
+        <option value="us" data-i18n="region.us"></option><option value="mx" data-i18n="region.mx"></option>
+        <option value="generic" data-i18n="region.generic"></option>
+      </select>
+    </div>
+    <div class="campo">
+      <label class="etiqueta" for="veg"><span data-i18n="campo.vegetacion"></span> <b data-mostrar="vegetacion"></b></label>
+      <input type="range" id="veg" min="0" max="1.5" step="0.1" data-campo="vegetacion">
+    </div>
+    <div class="campo">
+      <span class="etiqueta" data-i18n="campo.fuentes"></span>
+      <label class="casilla"><input type="checkbox" data-usar="orto"> <span data-i18n="fuente.orto"></span></label>
+      <label class="casilla"><input type="checkbox" data-usar="satelite"> <span data-i18n="fuente.satelite"></span></label>
+      <label class="casilla"><input type="checkbox" data-usar="dosel"> <span data-i18n="fuente.dosel"></span></label>
+      <label class="casilla"><input type="checkbox" data-usar="horizonte"> <span data-i18n="fuente.horizonte"></span></label>
+      <label class="casilla"><input type="checkbox" data-usar="microsoft"> <span data-i18n="fuente.microsoft"></span></label>
+      <label class="casilla"><input type="checkbox" data-usar="catastro"> <span data-i18n="fuente.catastro"></span></label>
+      <label class="casilla"><input type="checkbox" data-usar="overture"> <span data-i18n="fuente.overture"></span></label>
+      <label class="casilla"><input type="checkbox" data-usar="cc0"> <span data-i18n="fuente.cc0"></span></label>
+    </div>
+    <div class="campo">
+      <span class="etiqueta" data-i18n="campo.dem"></span>
+      <div class="fila-botones">
+        <button class="boton chico" data-accion="elegir-dem" data-i18n="boton.elegir_tif"></button>
+        <button class="boton chico" data-accion="quitar-dem" data-mostrar-si="dem" data-i18n="boton.quitar"></button>
+      </div>
+      <p class="ayuda" data-mostrar="dem"></p>
+    </div>
+  </details>
+</aside>
+
+<!-- ============================================================ asistente -->
+<aside class="panel asistente" id="panel-asistente" data-i18n-aria="asis.aria" hidden>
+  <div class="asis-cabeza">
+    <ol class="pasos" data-i18n-aria="asis.pasos">
+      <li data-paso-ind="1" data-i18n="asis.p1"></li><li data-paso-ind="2" data-i18n="asis.p2"></li>
+      <li data-paso-ind="3" data-i18n="asis.p3"></li><li data-paso-ind="4" data-i18n="asis.p4"></li>
+    </ol>
+    <button class="enlace" data-accion="cerrar-asistente" data-i18n="asis.saltar"></button>
+  </div>
+
+  <section data-paso="1">
+    <h2 data-i18n="asis.t1"></h2>
+    <p class="ayuda" data-i18n="asis.d1"></p>
+    <div class="buscador grande" data-buscador>
+      <svg class="lupa" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+      <input type="search" data-i18n-ph="asis.buscar_ph" data-i18n-aria="top.buscar_aria" autocomplete="off" spellcheck="false">
+      <ul class="resultados" role="listbox" hidden></ul>
+    </div>
+    <p class="elegido" data-mostrar="lugar"></p>
+    <div class="ideas">
+      <span class="etiqueta" data-i18n="asis.ideas"></span>
+      <button class="chip" data-ir="37.8008,-122.4095,San Francisco">San Francisco</button>
+      <button class="chip" data-ir="43.9330,7.1700,Col de Turini">Col de Turini</button>
+      <button class="chip" data-ir="40.1405,-3.4226,Chinchón">Chinchón</button>
+      <button class="chip" data-ir="43.7384,7.4246,Monaco">Monaco</button>
+      <button class="chip" data-ir="45.9850,9.2600,Bellagio">Bellagio</button>
+      <button class="chip" data-ir="18.9853,-99.0995,Tepoztlán">Tepoztlán</button>
+    </div>
+  </section>
+
+  <section data-paso="2" hidden>
+    <h2 data-i18n="asis.t2"></h2>
+    <div class="tarjetas" data-grupo="modo">
+      <button data-valor="libre"><svg viewBox="0 0 120 60" aria-hidden="true"><path class="calle" d="M0 22 L120 19 M0 44 L120 41 M38 0 L42 60 M82 0 L78 60"/><rect class="sel" x="22" y="8" width="76" height="44"/></svg><b data-i18n="tipo.libre"></b><span data-i18n="tipo.libre_d"></span></button>
+      <button data-valor="tramo"><svg viewBox="0 0 120 60" aria-hidden="true"><path class="ruta" d="M8 52 C 30 12 54 54 76 22 S 104 12 112 8"/><circle class="ini" cx="8" cy="52" r="5"/><circle class="fin" cx="112" cy="8" r="5"/></svg><b data-i18n="tipo.tramo"></b><span data-i18n="tipo.tramo_d"></span></button>
+      <button data-valor="circuito"><svg viewBox="0 0 120 60" aria-hidden="true"><path class="ruta" d="M30 12 L92 10 Q108 10 106 28 L100 46 Q97 51 84 50 L30 47 Q16 46 18 30 Q20 12 30 12Z"/></svg><b data-i18n="tipo.circuito"></b><span data-i18n="tipo.circuito_d"></span></button>
+    </div>
+  </section>
+
+  <section data-paso="3" hidden>
+    <div data-solo="libre">
+      <h2 data-i18n="asis.t3z"></h2>
+      <p class="ayuda" data-i18n="asis.d3z"></p>
+      <label class="etiqueta" for="tam-b"><span data-i18n="campo.tam"></span> <b data-mostrar="tam"></b></label>
+      <input type="range" id="tam-b" min="200" max="3000" step="50" data-campo="tam">
+      <p class="ayuda" data-i18n="asis.d3z2"></p>
+    </div>
+    <div data-solo="ruta">
+      <h2 data-i18n="asis.t3r"></h2>
+      <p class="ayuda" data-mostrar="ayuda-ruta"></p>
+      <p class="elegido" data-mostrar="ruta"></p>
+      <div class="fila-botones">
+        <button class="boton chico" data-accion="deshacer-punto" data-i18n="boton.quitar_ultimo"></button>
+        <button class="boton chico" data-accion="borrar-ruta" data-i18n="boton.borrar_ruta"></button>
+      </div>
+    </div>
+  </section>
+
+  <section data-paso="4" hidden>
+    <h2 data-i18n="asis.t4"></h2>
+    <span class="etiqueta" data-i18n="campo.calidad"></span>
+    <div class="opciones-calidad" data-grupo="calidad">
+      <button data-valor="rapida"><b data-i18n="calidad.rapida"></b><span data-i18n="calidad.rapida_d"></span></button>
+      <button data-valor="normal"><b data-i18n="calidad.normal"></b><span data-i18n="calidad.normal_d"></span></button>
+      <button data-valor="detallada"><b data-i18n="calidad.detallada"></b><span data-i18n="calidad.detallada_d"></span></button>
+    </div>
+    <label class="etiqueta" for="nombre-b" data-i18n="campo.nombre"></label>
+    <input type="text" id="nombre-b" data-campo="nombre" maxlength="40">
+    <p class="ayuda" data-mostrar="nombre-aviso"></p>
+    <label class="casilla"><input type="checkbox" data-campo="ac"> <span data-i18n="campo.ac"></span></label>
+    <dl class="resumen" data-resumen></dl>
+  </section>
+
+  <p class="error-paso" data-error-paso hidden></p>
+  <div class="asis-pie">
+    <button class="boton" data-accion="paso-atras" data-i18n="asis.atras"></button>
+    <button class="boton primario" data-accion="paso-siguiente" data-i18n="asis.siguiente"></button>
+  </div>
+</aside>
+
+<!-- ============================================================ vista previa -->
+<section class="vista" id="vista" data-i18n-aria="vista.aria">
+  <div class="vista-cabeza">
+    <b data-i18n="vista.titulo"></b>
+    <label class="casilla chica" data-i18n-title="vista.auto_t"><input type="checkbox" id="auto-3d" checked> <span data-i18n="vista.auto"></span></label>
+  </div>
+  <div class="vista-datos" id="vista-datos"></div>
+  <div class="vista-3d" id="vista-3d">
+    <div class="vista-vacia" id="vista-vacia">
+      <p id="vista-vacia-texto"></p>
+      <button class="boton" data-accion="borrador" id="b-borrador"><span data-i18n="accion.borrador"></span> <small>≈ 25 s</small></button>
+    </div>
+    <iframe id="vista-iframe" data-i18n-title="vista.iframe" hidden></iframe>
+    <div class="vista-estado" id="vista-estado" hidden>
+      <span id="ve-texto"></span>
+      <div class="progreso" id="ve-prog"><div id="ve-barra"></div></div>
+      <div class="fila-botones">
+        <button class="boton chico" data-accion="borrador" id="ve-boton" data-i18n="vista.actualizar"></button>
+        <button class="enlace" data-accion="registro-borrador" id="ve-registro" data-i18n="accion.ver_registro"></button>
+      </div>
+    </div>
+    <button class="boton chico flotante" id="b-ampliar" data-accion="ampliar-borrador" data-i18n="vista.ampliar" hidden></button>
+  </div>
+</section>
+
+<!-- ============================================================ barra de acciones -->
+<footer class="acciones" id="acciones">
+  <div class="acciones-listo" id="acc-listo">
+    <button class="boton primario grande" data-accion="generar" data-i18n="accion.generar"></button>
+  </div>
+  <div class="acciones-progreso" id="acc-progreso" hidden>
+    <div class="prog-texto"><span id="prog-titulo"></span><span id="prog-tiempo"></span></div>
+    <div class="progreso"><div id="prog-barra"></div></div>
+    <div class="prog-botones">
+      <button class="enlace" data-accion="ver-registro" data-i18n="accion.ver_registro"></button>
+      <button class="boton chico" data-accion="cancelar" data-i18n="accion.cancelar"></button>
+    </div>
+  </div>
+</footer>
+
+<!-- ============================================================ resultado -->
+<section class="resultado" id="resultado" hidden aria-live="polite">
+  <button class="cerrar" data-accion="cerrar-resultado" data-i18n-aria="res.cerrar">×</button>
+  <img id="res-img" data-i18n-alt="res.img" alt="">
+  <div class="res-cuerpo">
+    <h2 id="res-titulo"></h2>
+    <p class="ayuda" id="res-datos"></p>
+    <div class="fila-botones">
+      <button class="boton primario" data-accion="manejar-resultado" data-i18n="res.conducir"></button>
+      <button class="boton" data-accion="instalar-resultado" id="res-ac"></button>
+      <button class="boton" data-accion="carpeta-resultado" data-i18n="res.carpeta"></button>
+    </div>
+    <p class="ayuda" id="res-mensaje"></p>
+  </div>
+</section>
+
+<!-- ============================================================ cajones -->
+<aside class="cajon" id="cajon-pistas" hidden data-i18n-aria="top.pistas">
+  <div class="cajon-cabeza"><h2 data-i18n="top.pistas"></h2><button class="cerrar" data-accion="cerrar-cajon" data-i18n-aria="res.cerrar">×</button></div>
+  <ul class="lista-pistas" id="lista-pistas"></ul>
+</aside>
+
+<aside class="cajon" id="cajon-ajustes" hidden data-i18n-aria="top.ajustes">
+  <div class="cajon-cabeza"><h2 data-i18n="top.ajustes"></h2><button class="cerrar" data-accion="cerrar-cajon" data-i18n-aria="res.cerrar">×</button></div>
+  <div class="campo">
+    <label class="etiqueta" for="aj-idioma" data-i18n="aj.idioma"></label>
+    <select id="aj-idioma"><option value="es">Español</option><option value="en">English</option></select>
+  </div>
+  <div class="campo">
+    <span class="etiqueta" data-i18n="aj.salida"></span>
+    <p class="ruta-archivo" id="aj-salida"></p>
+    <div class="fila-botones"><button class="boton chico" data-accion="cambiar-salida" data-i18n="aj.cambiar"></button><button class="boton chico" data-accion="abrir-salida" data-i18n="aj.abrir"></button></div>
+  </div>
+  <div class="campo">
+    <span class="etiqueta" data-i18n="aj.ac"></span>
+    <p class="ruta-archivo" id="aj-ac"></p>
+    <div class="fila-botones"><button class="boton chico" data-accion="cambiar-ac" data-i18n="aj.elegir_carpeta"></button></div>
+  </div>
+  <div class="campo">
+    <span class="etiqueta" data-i18n="aj.asistente"></span>
+    <div class="fila-botones"><button class="boton chico" data-accion="abrir-asistente" data-i18n="aj.abrir_asistente"></button></div>
+  </div>
+  <div class="campo acerca">
+    <span class="etiqueta" data-i18n="aj.acerca"></span>
+    <p>OpenLaps <span id="aj-version"></span> · <span data-i18n="aj.acerca_t"></span></p>
+    <button class="enlace" data-enlace="https://github.com/theopenlaps/openlaps">github.com/theopenlaps/openlaps</button>
+  </div>
+</aside>
+
+<div class="modal" id="modal-registro" hidden>
+  <div class="modal-caja">
+    <div class="cajon-cabeza"><h2 data-i18n="registro"></h2><button class="cerrar" data-accion="cerrar-registro" data-i18n-aria="res.cerrar">×</button></div>
+    <pre id="registro"></pre>
+  </div>
+</div>
+
+<div class="visor-completo" id="visor-completo" hidden>
+  <iframe id="visor-iframe" data-i18n-title="visor.iframe"></iframe>
+  <button class="boton cerrar-visor" data-accion="cerrar-visor" data-i18n="visor.volver"></button>
+</div>
+
+<div class="aviso" id="aviso" role="status" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
