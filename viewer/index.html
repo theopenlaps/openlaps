@@ -22,6 +22,9 @@
   color-scheme: dark;
 }
 html, body { height: 100%; margin: 0; }
+/* los bloques con display propio (grid, flex) ignoraban el atributo hidden: el aviso de
+   "Cargando la pista…" se quedaba encima de la escena ya cargada */
+[hidden] { display: none !important; }
 body { background: var(--asfalto); color: var(--texto); font: 15px/1.45 var(--f-texto); overflow: hidden; }
 #lienzo { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 
@@ -358,6 +361,17 @@ function montar(gltf) {
   $("vacio").hidden = true;
   colocarEnSalida();
   modo(true);
+  // ?cam=x,y,z&mira=x,y,z (coordenadas del .glb): abre en vista libre mirando ese punto, para
+  // revisar un sitio concreto (lo usan las herramientas de comprobación)
+  const q = new URLSearchParams(location.search);
+  const v3 = (k) => { const a = (q.get(k) || "").split(",").map(Number); return a.length === 3 && a.every(Number.isFinite) ? new THREE.Vector3(...a) : null; };
+  const pc = v3("cam"), pm = v3("mira");
+  if (pc && pm) {
+    modo(false);
+    camera.position.copy(pc);
+    orbit.target.copy(pm);
+    orbit.update();
+  }
 }
 
 $("archivo").addEventListener("change", (e) => {

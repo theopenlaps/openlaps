@@ -15,6 +15,7 @@ def query(bbox):
     return f"""[out:json][timeout:180];
 (
   way["highway"]({b});
+  way["railway"~"^(tram|light_rail)$"]({b});
   way["building"]({b});
   relation["building"]["type"="multipolygon"]({b});
   way["landuse"]({b});
@@ -87,8 +88,9 @@ def parse(data):
     areas: lista de dict(tags, outer=[(lon,lat)...], inners=[[...]])
     nodes: lista de dict(id, tags, lon, lat)
     barriers: lista de dict(tags, coords) con guardarraíles, muros y barreras dibujados en OSM
+    coast: lista de líneas de costa [(lon,lat)...] (natural=coastline: tierra a la izquierda, mar a la derecha)
     """
-    ways, areas, nodes, barriers, power = [], [], [], [], []
+    ways, areas, nodes, barriers, power, coast, rails = [], [], [], [], [], [], []
     for el in data["elements"]:
         t = el.get("type")
         tags = el.get("tags", {})
@@ -107,6 +109,10 @@ def parse(data):
                 ways.append(w)
             elif "barrier" in tags:
                 barriers.append({"tags": tags, "coords": coords})
+            elif tags.get("railway") in ("tram", "light_rail"):
+                rails.append({"tags": tags, "coords": coords})
+            elif tags.get("natural") == "coastline":
+                coast.append(coords)
             elif tags.get("power") in ("line", "minor_line"):
                 power.append({"tags": tags, "coords": coords, "nodes": el.get("nodes", [])})
             elif is_area:
@@ -121,4 +127,4 @@ def parse(data):
             inner_rings = _join_rings(inners)
             for ring in _join_rings(outers):
                 areas.append({"tags": tags, "outer": ring, "inners": inner_rings})
-    return {"ways": ways, "areas": areas, "nodes": nodes, "barriers": barriers, "power": power}
+    return {"ways": ways, "areas": areas, "nodes": nodes, "barriers": barriers, "power": power, "coast": coast, "rails": rails}

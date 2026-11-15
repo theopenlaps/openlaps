@@ -1,8 +1,11 @@
 """Texturas generadas por algoritmo (sin fotos ni IA): ruido, Voronoi y dibujo vectorial."""
 import io
+import json
 import math
+import os
 
 import numpy as np
+from numba import njit
 from PIL import Image, ImageDraw, ImageFilter
 
 from .dds import normal_map
@@ -10,10 +13,37 @@ from .dds import normal_map
 RNG = np.random.default_rng(1234)
 
 
+class PngPerezoso:
+    """Textura que se guarda como imagen y solo se codifica a PNG si alguien pide los bytes.
+
+    Casi todas acaban como JPEG en el .glb o como DDS en el KN5 (se leen como imagen), así que
+    codificarlas todas a PNG con compresión máxima nada más crearlas era tiempo perdido."""
+    __slots__ = ("img", "_b")
+
+    def __init__(self, img):
+        self.img = img
+        self._b = None
+
+    def bytes(self):
+        if self._b is None:
+            b = io.BytesIO()
+            self.img.save(b, "PNG", optimize=True)
+            self._b = b.getvalue()
+        return self._b
+
+
 def png(img):
-    b = io.BytesIO()
-    img.save(b, "PNG", optimize=True)
-    return b.getvalue()
+    return PngPerezoso(img)
+
+
+def tex_image(v):
+    """Imagen PIL de una entrada de scene.textures (PNG perezoso o bytes)."""
+    return v.img if isinstance(v, PngPerezoso) else Image.open(io.BytesIO(v))
+
+
+def tex_bytes(v):
+    """Bytes PNG de una entrada de scene.textures."""
+    return v.bytes() if isinstance(v, PngPerezoso) else v
 
 
 def tile_noise(n, scale, rng, octaves=4):
@@ -58,6 +88,39 @@ def concrete(n=512, rng=RNG, joint=True):
         d.line([(0, 0), (n, 0)], fill=(95, 95, 92), width=3)
         d.line([(0, 0), (0, n)], fill=(95, 95, 92), width=3)
     return img
+
+
+def tunnel_ceiling(n=512, rng=RNG):
+    """Techo de túnel: hormigón liso, solo variación suave (sin grano por píxel, que de lejos se
+    veía como arena) y juntas de encofrado tenues cada 2 m. Cubre 8 m x 8 m."""
+    nz = tile_noise(n, 4, rng, 3)
+    v = 118 + 16 * (nz - 0.5)
+    a = np.stack([v * 0.98, v, v * 1.02], -1)
+    paso = n // 4
+    for k in range(0, n, paso):
+        a[k:k + 2, :] *= 0.9
+        a[:, k:k + 2] *= 0.93
+    img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
+    return img.filter(ImageFilter.GaussianBlur(1.2))
+
+
+def tunnel_wall(n=512, rng=RNG, alto=7.4, suelo=1.6):
+    """Muro de túnel: hormigón claro en paneles de 4 m con juntas, y una franja más oscura de
+    suciedad a la altura de las ruedas. Una sola textura cubre toda la altura del muro (`alto`, de
+    los que `suelo` quedan bajo la calzada); horizontalmente se repite cada 4 m."""
+    w, h = n, n
+    nz = tile_noise(n, 4, rng, 3)
+    v = 176 + 14 * (nz - 0.5)
+    a = np.stack([v, v * 0.99, v * 0.96], -1)
+    fila_suelo = int(h * (alto - suelo) / alto)
+    fila_mancha = int(h * (alto - suelo - 1.1) / alto)
+    t = np.clip((np.arange(h) - fila_mancha) / max(fila_suelo - fila_mancha, 1), 0, 1)[:, None, None]
+    a *= 1.0 - 0.35 * t                                   # suciedad: más oscura cerca del suelo
+    a[fila_suelo:] *= 0.6
+    a[:, :3] *= 0.75                                      # junta entre paneles
+    a[int(h * 0.08):int(h * 0.08) + 2] *= 0.85           # junta horizontal alta
+    img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
+    return img.filter(ImageFilter.GaussianBlur(0.8))
 
 
 def delineator_tex(style="plain", n=128):
@@ -214,6 +277,102 @@ def facade(color, n=512, rng=RNG, door=False, base=None, style="mx"):
     return img
 
 
+def facade_us(color, n=512, rng=RNG, shutters=None):
+    """Casa de EE. UU.: revestimiento de tablillas horizontales (clapboard/vinyl, ~15 cm) y ventana
+    de guillotina con marco blanco; a veces contraventanas oscuras. 4 m x 3 m."""
+    w, h = n, int(n * 0.75)
+    px = w / 4.0
+    nz = tile_noise(n, 8, rng, 3)[:h, :w]
+    img = _rgb(color, 0.05, nz)
+    d = ImageDraw.Draw(img)
+    paso = max(4, int(0.15 * px))
+    sombra = tuple(int(c * 0.78) for c in color)
+    luz = tuple(min(255, int(c * 1.06)) for c in color)
+    for y in range(0, h, paso):
+        d.line([(0, y), (w, y)], fill=sombra, width=2)
+        d.line([(0, y + 2), (w, y + 2)], fill=luz, width=1)
+    x0, x1 = int(1.55 * px), int(2.45 * px)
+    y0, y1 = int(h - 2.35 * px), int(h - 0.9 * px)
+    d.rectangle([x0 - 9, y0 - 9, x1 + 9, y1 + 12], fill=(244, 244, 240))
+    d.rectangle([x0, y0, x1, y1], fill=(48, 58, 68))
+    ym = (y0 + y1) // 2
+    d.rectangle([x0 + 5, y0 + 5, x1 - 5, ym - 3], fill=(84, 98, 112))
+    d.rectangle([x0, ym - 3, x1, ym + 3], fill=(244, 244, 240))
+    if shutters is None:
+        shutters = rng.random() < 0.4
+    if shutters:
+        sc = [(40, 44, 48), (52, 70, 58), (70, 40, 36)][int(rng.integers(0, 3))]
+        sw = int(0.38 * px)
+        for sx0 in (x0 - 9 - sw - 4, x1 + 13):
+            d.rectangle([sx0, y0 - 6, sx0 + sw, y1 + 6], fill=sc)
+    return img
+
+
+def facade_ciudad(color, n=512, rng=RNG):
+    """Edificio urbano de ladrillo o piedra (EE. UU., 3-7 plantas): dos ventanas por cada 4 m con
+    dintel y alféizar claros, sin contraventanas. 4 m x 3 m."""
+    w, h = n, int(n * 0.75)
+    px = w / 4.0
+    nz = tile_noise(n, 16, rng, 3)[:h, :w]
+    img = _rgb(color, 0.12, nz)
+    d = ImageDraw.Draw(img)
+    junta = tuple(int(c * 0.8) for c in color)
+    for y in range(0, h, max(3, int(0.075 * px))):          # hiladas de ladrillo
+        d.line([(0, y), (w, y)], fill=junta, width=1)
+    claro = (214, 208, 196)
+    for cx in (1.0, 3.0):
+        x0, x1 = int((cx - 0.5) * px), int((cx + 0.5) * px)
+        y0, y1 = int(h - 2.5 * px), int(h - 0.9 * px)
+        d.rectangle([x0 - 6, y0 - 14, x1 + 6, y0 - 2], fill=claro)       # dintel
+        d.rectangle([x0 - 6, y1, x1 + 6, y1 + 8], fill=claro)            # alféizar
+        d.rectangle([x0, y0, x1, y1], fill=(40, 48, 58))
+        d.rectangle([x0 + 5, y0 + 5, x1 - 5, (y0 + y1) // 2 - 2], fill=(76, 90, 104))
+        d.line([((x0 + x1) // 2, y0), ((x0 + x1) // 2, y1)], fill=(200, 196, 188), width=3)
+    return img
+
+
+def facade_torre(tint, n=512, rng=RNG):
+    """Torre de oficinas: muro cortina de vidrio con montantes cada 1.33 m y antepecho opaco en cada
+    forjado, con reflejo degradado. 4 m x 3 m (una planta)."""
+    w, h = n, int(n * 0.75)
+    px = w / 4.0
+    g = np.linspace(0.85, 1.15, h)[:, None, None]
+    base = np.array(tint, np.float32)[None, None, :] * g * np.ones((h, w, 1), np.float32)
+    nz = tile_noise(n, 4, rng, 2)[:h, :w]
+    base *= (0.93 + 0.14 * nz)[..., None]
+    img = Image.fromarray(np.clip(base, 0, 255).astype(np.uint8))
+    d = ImageDraw.Draw(img)
+    marco = tuple(int(c * 0.55) for c in tint)
+    antepecho = tuple(int(c * 0.7) for c in tint)
+    d.rectangle([0, h - int(0.85 * px), w, h], fill=antepecho)
+    d.line([(0, h - int(0.85 * px)), (w, h - int(0.85 * px))], fill=marco, width=4)
+    d.line([(0, h - 2), (w, h - 2)], fill=marco, width=4)
+    for k in range(4):
+        x = int(k * w / 3)
+        d.line([(x, 0), (x, h)], fill=marco, width=5)
+    return img
+
+
+def shingles(color, n=256, rng=RNG):
+    """Tela asfáltica (tejados de EE. UU.) vista desde arriba: hileras escalonadas de lengüetas con
+    gránulo fino y juntas oscuras. 2 m x 2 m."""
+    nz = tile_noise(n, 32, rng, 3)
+    a = np.asarray(_rgb(color, 0.18, nz), np.float32)
+    rows = 14
+    rh = n // rows
+    out = a.copy()
+    tab = n // 6
+    for r in range(rows):
+        y0 = r * rh
+        off = (tab // 2) * (r % 2)
+        f = 0.9 + 0.2 * rng.random()
+        out[y0:y0 + rh] *= f
+        out[y0 + rh - 2:y0 + rh] *= 0.55                     # sombra bajo la hilera
+        for x in range(off, n + tab, tab):
+            out[y0:y0 + rh, max(0, x - 1):min(n, x + 1)] *= 0.7
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+
+
 def roof(kind, n=256, rng=RNG):
     if kind == "rojo":       # impermeabilizante rojo terracota
         nz = tile_noise(n, 6, rng, 4)
@@ -359,9 +518,19 @@ def sign_alto(n=256):
 
 
 def sign_speed(v, n=256):
-    """SR-9 velocidad máxima: círculo blanco con anillo rojo, cifra negra y "km/h"."""
+    """SR-9 velocidad máxima: círculo blanco con anillo rojo, cifra negra y "km/h". En EE. UU.,
+    R2-1: rectángulo blanco con borde negro, "SPEED LIMIT" y la cifra en mph (sin unidades)."""
+    from .regions import active
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
+    if active().speed_unit == "mph":
+        mph = int(round(v / 1.609344 / 5.0) * 5)
+        d.rectangle([n * 0.12, n * 0.02, n * 0.88, n * 0.98], fill=(245, 245, 245, 255), outline=(20, 20, 20, 255),
+                    width=int(n * 0.03))
+        d.text((n / 2, n * 0.20), "SPEED", fill=(20, 20, 20, 255), anchor="mm", font=_font(int(n * 0.14)))
+        d.text((n / 2, n * 0.36), "LIMIT", fill=(20, 20, 20, 255), anchor="mm", font=_font(int(n * 0.14)))
+        d.text((n / 2, n * 0.70), str(mph), fill=(20, 20, 20, 255), anchor="mm", font=_font(int(n * 0.36)))
+        return img
     d.rectangle([n * 0.12, n * 0.02, n * 0.88, n * 0.98], fill=(245, 245, 245, 255), outline=(30, 30, 30, 255), width=4)
     d.ellipse([n * 0.18, n * 0.08, n * 0.82, n * 0.72], fill=(196, 30, 36, 255))
     d.ellipse([n * 0.25, n * 0.15, n * 0.75, n * 0.65], fill=(245, 245, 245, 255))
@@ -542,6 +711,14 @@ def register_all(scene, season="seca", cc0=None):
     S.material("muro", t, normal=nm(t, m, 1.5))
     S.material("agua", tex("agua.png", paint((44, 78, 96), 64, rng)), specular=1.5, spec_exp=200.0, ambient=0.3, diffuse=0.15)
     S.material("puente", tex("puente.png", concrete(256, rng, joint=False)))
+    img = tunnel_ceiling(512, rng)
+    t = tex("tunel_techo.png", img)
+    # el techo mira hacia abajo y solo le llegaba la luz del suelo (salía negro): algo de luz propia,
+    # como la del alumbrado de un túnel
+    S.material("tunel_techo", t, ambient=0.5, diffuse=0.5, specular=0.05, spec_exp=8.0, emissive=0.35)
+    img = tunnel_wall(512, rng)
+    t = tex("tunel_pared.png", img)
+    S.material("tunel_pared", t, normal=nm(t, img, 0.8), ambient=0.5, diffuse=0.55, specular=0.1, spec_exp=12.0)
     img = voronoi_stones(256, cells=90, rng=rng, mortar=(142, 134, 120),
                          palette=[(158, 146, 126), (146, 136, 116), (166, 154, 134), (138, 128, 110)])
     t = tex("muro_piedra.png", img)
@@ -560,7 +737,7 @@ def register_all(scene, season="seca", cc0=None):
     plaster = cc0.get("aplanado", (None, None))[0]
     from .regions import active
     R = active()
-    style = "mx" if R.roof == "flat" else "eu"
+    style = R.facade_style or ("mx" if R.roof == "flat" else "eu")
     for k, col in enumerate(NAVE_COLORS):
         img = nave_panel(col, 512, rng)
         t = tex(f"nave_{k}.png", img)
@@ -569,11 +746,23 @@ def register_all(scene, season="seca", cc0=None):
     t = tex("chapa.png", img)
     S.material("chapa", t, normal=nm(t, img, 1.5), ambient=0.45, diffuse=0.5, specular=0.15, spec_exp=25.0)
     for k, col in enumerate(R.roof_colors):
-        img = roof_tiles(col, 256, rng)
+        img = shingles(col, 256, rng) if R.roof_kind == "shingles" else roof_tiles(col, 256, rng)
         t = tex(f"tejado_{k}.png", img)
         S.material(f"tejado_{k}", t, normal=nm(t, img, 2.0), specular=0.05, spec_exp=10.0, ambient=0.45, diffuse=0.55)
+    if R.tower_floors:
+        # torres de oficinas: vidrio azulado, gris, verdoso y bronce
+        for k, tint in enumerate(((96, 128, 150), (120, 128, 136), (104, 132, 124), (138, 120, 100))):
+            img = facade_torre(tint, 512, rng)
+            t = tex(f"torre_{k}.png", img)
+            S.material(f"torre_{k}", t, normal=nm(t, img, 0.6), ambient=0.5, diffuse=0.5, specular=0.5, spec_exp=60.0)
+    if R.flat_from_floors and R.facade_style == "us":
+        # edificios urbanos medianos: ladrillo rojo, ladrillo pardo, piedra clara, revoco gris
+        for k, col in enumerate(((150, 76, 58), (128, 92, 70), (204, 192, 170), (160, 160, 156))):
+            img = facade_ciudad(col, 512, rng)
+            t = tex(f"ciudad_{k}.png", img)
+            S.material(f"ciudad_{k}", t, normal=nm(t, img, 1.2), ambient=0.5, diffuse=0.55, specular=0.05, spec_exp=10.0)
     for i, col in enumerate(R.facade_colors):
-        img = facade(col, 512, rng, base=plaster, style=style)
+        img = facade_us(col, 512, rng) if style == "us" else facade(col, 512, rng, base=plaster, style=style)
         t = tex(f"fachada_{i}.png", img)
         n = nm(t, img, 1.2)
         S.material(f"fachada_{i}", t, normal=n, ambient=0.5, diffuse=0.55, specular=0.06, spec_exp=10.0)
@@ -590,6 +779,7 @@ def register_all(scene, season="seca", cc0=None):
     S.material("lona_salida", tex("lona_salida.png", banner("SALIDA")), ambient=0.6, diffuse=0.5)
     S.material("lona_meta", tex("lona_meta.png", banner("META")), ambient=0.6, diffuse=0.5)
     S.material("valla", tex("valla.png", paint((210, 60, 40), 64, rng)))
+    S.material("riel", tex("riel.png", paint((96, 94, 92), 64, rng)), specular=0.6, spec_exp=40.0, ambient=0.45, diffuse=0.5)
     # arcén: grava clara en Europa, terracería en México
     S.material("orilla", tex("orilla.png", edge_fade(256, (132, 122, 90) if _act().code != "mx" else (122, 106, 86))),
                blend=True, ambient=0.4, diffuse=0.4, specular=0.0)
@@ -649,7 +839,7 @@ def facade_material(scene, rgb, style="eu", cc0_plaster=None):
     name = "fachada_c%02x%02x%02x" % q
     if name not in scene.materials:
         rng = np.random.default_rng(sum(q))
-        img = facade(q, 512, rng, base=cc0_plaster, style=style)
+        img = facade_us(q, 512, rng) if style == "us" else facade(q, 512, rng, base=cc0_plaster, style=style)
         t = f"{name}.png"
         scene.textures[t] = png(img)
         scene.images[t] = img
@@ -782,23 +972,44 @@ def chapa_techo(n=256, rng=RNG):
 ASPHALT_VREP = 4.0   # la textura macro cubre el ancho (u) por 4 anchos de largo (v)
 
 
-def _pnoise(rng, U, V, cells_u, cells_v, octaves):
-    """Ruido de valor periódico en v (y en u si se quiere), suma de octavas, centrado en 0."""
+@njit(cache=True)
+def _pnoise_octava(acc, U, V, g, cu, cv, amp):
+    """Una octava del ruido de valor: interpolación suavizada de la rejilla `g`, sumada a `acc`.
+    Mismas operaciones y en el mismo orden que la versión con numpy (resultado idéntico bit a bit)."""
     h, w = U.shape
-    acc = np.zeros((h, w), np.float32)
+    for i in range(h):
+        for j in range(w):
+            x = U[i, j] * cu
+            y = V[i, j] * cv
+            x0 = int(np.floor(x))
+            y0 = int(np.floor(y))
+            fx = x - x0
+            fy = y - y0
+            fx = fx * fx * (3 - 2 * fx)
+            fy = fy * fy * (3 - 2 * fy)
+            x1 = min(x0 + 1, cu)
+            y1 = min(y0 + 1, cv)
+            r0 = y0 % (cv + 1)
+            r1 = y1 % (cv + 1)
+            a = np.float64(g[r0, x0]) * (1 - fx) + np.float64(g[r0, x1]) * fx
+            b = np.float64(g[r1, x0]) * (1 - fx) + np.float64(g[r1, x1]) * fx
+            acc[i, j] = np.float32(np.float64(acc[i, j]) + (a * (1 - fy) + b * fy - 0.5) * amp)
+
+
+def _pnoise(rng, U, V, cells_u, cells_v, octaves):
+    """Ruido de valor periódico en v (y en u si se quiere), suma de octavas, centrado en 0.
+
+    El bucle por píxel va en numba: con numpy (cuatro lecturas con índices sobre arrays de 1
+    millón de píxeles por octava) las texturas de asfalto se llevaban la mitad de la generación."""
+    U = np.ascontiguousarray(U, np.float64)
+    V = np.ascontiguousarray(V, np.float64)
+    acc = np.zeros(U.shape, np.float32)
     amp = 1.0
     for o in range(octaves):
         cu, cv = int(cells_u * 2 ** o), int(cells_v * 2 ** o)
         g = rng.random((cv + 1, cu + 1)).astype(np.float32)
         g[-1, :] = g[0, :]
-        x, y = U * cu, V * cv
-        x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
-        fx, fy = x - x0, y - y0
-        fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
-        x1, y1 = np.minimum(x0 + 1, cu), np.minimum(y0 + 1, cv)
-        a = g[y0 % (cv + 1), x0] * (1 - fx) + g[y0 % (cv + 1), x1] * fx
-        b = g[y1 % (cv + 1), x0] * (1 - fx) + g[y1 % (cv + 1), x1] * fx
-        acc += (a * (1 - fy) + b * fy - 0.5) * amp
+        _pnoise_octava(acc, U, V, g, cu, cv, amp)
         amp *= 0.5
     return acc
 
@@ -886,6 +1097,34 @@ def asphalt_detail2(photo, squash=4, n=1024, variant=0):
     return Image.fromarray(np.clip(np.stack([a, a, a], -1), 0, 255).astype(np.uint8), "RGB")
 
 
+def _en_cache(fn):
+    """Guarda en ~/.cache/openlaps la imagen que genera `fn` para unos argumentos dados. La clave
+    incluye el código de las funciones de ruido, así que si cambia el algoritmo se regenera."""
+    import functools
+    import hashlib
+    import inspect
+
+    @functools.wraps(fn)
+    def wrap(*a, **kw):
+        from .sources.cache import cache_path
+        src = "".join(inspect.getsource(f) for f in (fn, _warped, _pnoise, _pnoise_octava.py_func))
+        key = json.dumps([fn.__name__, a, sorted(kw.items()), hashlib.sha1(src.encode()).hexdigest()])
+        path = cache_path(key, ".tex.png")
+        if os.path.exists(path):
+            try:
+                img = Image.open(path)
+                img.load()
+                return img
+            except Exception:  # noqa: BLE001
+                os.remove(path)
+        img = fn(*a, **kw)
+        img.save(path + ".part.png", compress_level=1)
+        os.replace(path + ".part.png", path)
+        return img
+    return wrap
+
+
+@_en_cache
 def asphalt_mask(seed=0, w=256, h=1024):
     """Máscara RGBA del multicapa: reparte las 4 capas de grano con ruido suave (rompe el mosaico)."""
     rng = np.random.default_rng(900 + seed)
@@ -909,6 +1148,7 @@ def _warped(rng, U, V, cu, cv, octaves, warp=0.35):
     return _pnoise(rng, U2, V2, cu, cv, octaves)
 
 
+@_en_cache
 def asphalt_macro3(lanes=2, tone=116.0, seed=0, plain=False, w=512, h=2048):
     """Calzada a escala grande con aspecto real: todo con formas orgánicas, nada geométrico.
 

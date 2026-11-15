@@ -12,7 +12,7 @@ import struct
 import numpy as np
 from PIL import Image, ImageDraw
 
-from . import CREDIT, URL, __version__, dds, regions
+from . import CREDIT, URL, __version__, dds, regions, textures
 from .export_glb import to_yup, mesh_name
 
 
@@ -76,7 +76,7 @@ def _dds_name(n):
 def _image(scene, name):
     if name in scene.images:
         return scene.images[name]
-    return Image.open(io.BytesIO(scene.textures[name]))
+    return textures.tex_image(scene.textures[name])
 
 
 SHADER = {"plain": "ksPerPixel", "blend": "ksPerPixel", "invisible": "ksPerPixel", "at": "ksPerPixelAT",

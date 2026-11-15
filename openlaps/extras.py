@@ -280,7 +280,7 @@ def _num_speed(v):
         return None
     n = int(m.group(1))
     if m.group(2):
-        n = int(round(n * 1.609 / 10) * 10)
+        n = int(round(n * 1.609344))     # exacto: la señal en mph se vuelve a calcular de aquí
     return n if 10 <= n <= 130 else None
 
 

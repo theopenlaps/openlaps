@@ -15,6 +15,9 @@
 import math
 
 import numpy as np
+import shapely
+from shapely.ops import unary_union
+from numba import njit
 from PIL import Image, ImageDraw, ImageFilter
 from scipy.ndimage import gaussian_filter, grey_opening, map_coordinates
 from scipy.spatial import cKDTree
@@ -135,13 +138,126 @@ class Terrain:
         affected = e < blend
         z = np.where(affected, znew, z0)
         self.Z = z.reshape(self.Z.shape)
-        if tunnel_pts is not None and len(tunnel_pts):
-            tt = cKDTree(tunnel_pts[:, :2])
-            d2, j2 = tt.query(flat, distance_upper_bound=float(tunnel_pts[:, 3].max()) + 1)
-            ok = np.isfinite(d2)
-            j2 = np.where(ok, j2, 0)
-            near = ok & (d2 < tunnel_pts[j2, 3]) & (self.Z.ravel() - tunnel_pts[j2, 2] < 7.0)
-            self.hole = near.reshape(self.Z.shape)
+
+    def z_plano(self, Zg, x, y):
+        """Altura exacta de la malla del terreno (los mismos triángulos que build_mesh) en (x, y)."""
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        fx_ = (x - self.gx[0]) / self.res
+        fy_ = (y - self.gy[0]) / self.res
+        i = np.clip(np.floor(fx_).astype(int), 0, len(self.gx) - 2)
+        j = np.clip(np.floor(fy_).astype(int), 0, len(self.gy) - 2)
+        fx, fy = fx_ - i, fy_ - j
+        za, zb = Zg[j, i], Zg[j, i + 1]
+        zc, zd = Zg[j + 1, i + 1], Zg[j + 1, i]
+        abc = za + fx * (zb - za) + fy * (zc - zb)       # triángulo (a, b, c): fx >= fy
+        acd = za + fy * (zd - za) + fx * (zc - zd)       # triángulo (a, c, d): fy > fx
+        return np.where(fx >= fy, abc, acd)
+
+    def cubrir_tuneles(self, huella, bocas, tunnel_pts, scene, alto=5.8, tierra=0.8):
+        """Terreno sobre los túneles, como en los juegos: un mapa de alturas no puede pasar por
+        encima de un hueco, así que se QUITAN los triángulos del terreno que tocan la huella del
+        túnel y se sustituyen por
+
+        - una tapa recortada exactamente en la línea de los muros, a la altura del terreno o, si
+          el terreno queda por debajo, encima del techo con `tierra` m de tierra;
+        - la parte de esos triángulos que cae fuera de la huella, a su altura original exacta
+          (empalma sin rendijas con el terreno de alrededor);
+        - un muro de contención en la línea de los muros donde la tapa queda más alta que el
+          terreno de fuera, y un muro frontal sobre la abertura en cada boca.
+
+        Así el salto entre el terreno sobre el túnel y una rampa baja de al lado es vertical, en
+        el muro. Antes la rejilla de 2 m lo hacía con pendientes bruscas: conos y "tiendas" de
+        terreno junto a las bocas, picos dentro del túnel o la losa del techo a la vista."""
+        self.parches = []
+        if huella is None or huella.is_empty or not len(tunnel_pts):
+            return
+        from shapely.geometry import LineString
+        from .roads import iter_polys, triangulate_polygon
+        tt = cKDTree(tunnel_pts[:, :2])
+
+        def z_techo(x, y):
+            # la cota más alta de los tramos cercanos (en un cruce de tubos a distinta altura,
+            # la media dejaba la tapa por debajo del techo del tubo más alto)
+            d, ii = tt.query(np.column_stack([np.ravel(x), np.ravel(y)]), k=min(8, len(tunnel_pts)))
+            d, ii = np.atleast_2d(d), np.atleast_2d(ii)
+            z = np.where(d < d[:, :1] + 6.0, tunnel_pts[ii, 2], -1e9)
+            return z.max(1) + alto
+
+        Z0 = self.Z.copy()
+        nx, ny = len(self.gx), len(self.gy)
+        if not hasattr(self, "quitar1"):
+            self.quitar1 = np.zeros((ny - 1, nx - 1), bool)
+            self.quitar2 = np.zeros((ny - 1, nx - 1), bool)
+        bx0, by0, bx1, by1 = huella.bounds
+        i0 = max(0, int((bx0 - self.gx[0]) / self.res) - 1)
+        i1 = min(nx - 2, int((bx1 - self.gx[0]) / self.res) + 1)
+        j0 = max(0, int((by0 - self.gy[0]) / self.res) - 1)
+        j1 = min(ny - 2, int((by1 - self.gy[0]) / self.res) + 1)
+        I, J = np.meshgrid(np.arange(i0, i1 + 1), np.arange(j0, j1 + 1))
+        I, J = I.ravel(), J.ravel()
+        xa, xb = self.gx[I], self.gx[I + 1]
+        ya, yb = self.gy[J], self.gy[J + 1]
+        shapely.prepare(huella)
+        tapa_tri, fuera_tri = [], []
+        for k, (pa, pb, pc) in enumerate((((xa, ya), (xb, ya), (xb, yb)),      # (a, b, c)
+                                          ((xa, ya), (xb, yb), (xa, yb)))):    # (a, c, d)
+            coords = np.stack([np.column_stack(pa), np.column_stack(pb), np.column_stack(pc), np.column_stack(pa)], 1)
+            tri = shapely.polygons(coords)
+            toca = shapely.intersects(huella, tri)
+            (self.quitar1 if k == 0 else self.quitar2)[J[toca], I[toca]] = True
+            dentro = toca & shapely.contains(huella, tri)
+            borde = toca & ~dentro
+            tapa_tri.append(coords[dentro, :3])
+            for g in tri[borde]:
+                for part, lista in ((g.intersection(huella), "tapa"), (g.difference(huella), "fuera")):
+                    for pp in iter_polys(part):
+                        if pp.area > 1e-4:
+                            v, f = triangulate_polygon(pp, 1e9)
+                            if len(f):
+                                (tapa_tri if lista == "tapa" else fuera_tri).append(v[f])
+        tapa = np.concatenate([t.reshape(-1, 3, 2) for t in tapa_tri if len(t)]) if tapa_tri else np.zeros((0, 3, 2))
+        fuera = np.concatenate([t.reshape(-1, 3, 2) for t in fuera_tri if len(t)]) if fuera_tri else np.zeros((0, 3, 2))
+        # alturas: la de la malla original (exacta) y, en la tapa, nunca por debajo del techo + tierra
+        if len(tapa):
+            v = tapa.reshape(-1, 2)
+            z = np.maximum(self.z_plano(Z0, v[:, 0], v[:, 1]), z_techo(v[:, 0], v[:, 1]) + 0.3 + tierra)
+            self.parches.append((np.column_stack([v, z]), np.arange(len(v)).reshape(-1, 3)))
+        if len(fuera):
+            v = fuera.reshape(-1, 2)
+            self.parches.append((np.column_stack([v, self.z_plano(Z0, v[:, 0], v[:, 1])]),
+                                 np.arange(len(v)).reshape(-1, 3)))
+        # muro de contención en la línea de los muros (y frontal sobre la abertura en las bocas)
+        bocas = [LineString(b[:, :2]) for b in bocas if len(b) >= 2]
+        boca_u = unary_union(bocas).buffer(0.5) if bocas else None
+        for pg in iter_polys(huella):
+            for ring in [pg.exterior] + list(pg.interiors):
+                r = np.asarray(shapely.segmentize(ring, 1.0).coords)[:, :2]
+                if len(r) < 2:
+                    continue
+                zb = self.z_plano(Z0, r[:, 0], r[:, 1])
+                zt = np.maximum(zb, z_techo(r[:, 0], r[:, 1]) + 0.3 + tierra)
+                if boca_u is not None:
+                    en_boca = shapely.contains_xy(boca_u, r[:, 0], r[:, 1])
+                    # en la boca el muro empieza en el techo: debajo está la abertura
+                    zb = np.where(en_boca, np.maximum(zb, z_techo(r[:, 0], r[:, 1])), zb)
+                alt = zt - zb
+                n = len(r)
+                pos = np.vstack([np.column_stack([r, zt]), np.column_stack([r, zb])])
+                k = np.arange(n - 1)
+                ok = (alt[:-1] > 0.05) | (alt[1:] > 0.05)
+                k = k[ok]
+                if not len(k):
+                    continue
+                f = np.concatenate([np.column_stack([k, k + n, k + n + 1]), np.column_stack([k, k + n + 1, k + 1])])
+                f = np.concatenate([f, f[:, ::-1]])          # las dos caras
+                d = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(r, axis=0), axis=1))])
+                uv = np.vstack([np.column_stack([d / 3.0, zt / 3.0]), np.column_stack([d / 3.0, zb / 3.0])])
+                scene.add("tunel", "muro", pos, uv, f, phys="WALL")
+        # la altura de consulta (árboles, edificios) sobre la tapa, la de la tapa
+        GX, GY = np.meshgrid(self.gx, self.gy)
+        sub = shapely.contains_xy(huella, GX, GY)
+        if sub.any():
+            self.Z[sub] = np.maximum(self.Z[sub], z_techo(GX[sub], GY[sub]) + 0.3 + tierra)
 
     def height(self, x, y):
         """Altura de la malla final (bilineal)."""
@@ -181,7 +297,10 @@ class Terrain:
                 c, d = idx[1:, 1:].ravel(), idx[1:, :-1].ravel()
                 faces = np.concatenate([np.column_stack([a, b, c]), np.column_stack([a, c, d])])
                 hv = H.ravel()
-                faces = faces[~(hv[faces].any(1))]
+                quita = hv[faces].any(1)
+                if hasattr(self, "quitar1"):
+                    quita |= np.concatenate([self.quitar1[j0:j1, i0:i1].ravel(), self.quitar2[j0:j1, i0:i1].ravel()])
+                faces = faces[~quita]
                 name = f"terreno_{ti:03d}"
                 tex = f"{name}.png"
                 img = painter.paint_tile(x0, y0, x1, y1, mpp, self)
@@ -197,25 +316,57 @@ class Terrain:
                                       "props": {"magicMult": 1.0, "fresnelC": 0.0, "fresnelEXP": 4.0, "fresnelMaxLevel": 0.0,
                                                 "detailNMMult": [0.0, 1.0, rep, 0, 0, 0, 0, 0, 0, 0]}})
                 scene.add("terreno", name, pos, uv, faces, normals=nrm, phys="GRASS")
+                # tapa y franja de los túneles que caen en esta tesela, con su misma textura
+                for ppos, pf in getattr(self, "parches", []):
+                    cen = ppos[pf].mean(1)
+                    en = (cen[:, 0] >= x0) & (cen[:, 0] <= x1) & (cen[:, 1] >= y0) & (cen[:, 1] <= y1)
+                    if en.any():
+                        fsel = pf[en]
+                        usados = np.unique(fsel)
+                        remap = np.full(len(ppos), -1)
+                        remap[usados] = np.arange(len(usados))
+                        q = ppos[usados]
+                        quv = np.column_stack([(q[:, 0] - x0) / (x1 - x0), (y1 - q[:, 1]) / (y1 - y0)])
+                        ff = remap[fsel]
+                        tri = q[ff]
+                        arriba = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])[:, 2] > 0
+                        ff[~arriba] = ff[~arriba][:, ::-1]
+                        scene.add("terreno", name, q, quv, ff, phys="GRASS")
                 ti += 1
         self.log(f"  terreno: {ti} teselas de {tile_m:.0f} m con textura horneada a {mpp} m/px")
 
 
 # --------------------------------------------------------------------------------------
-def _hash_noise(x, y, scale, seed=0):
-    """Ruido de valor continuo en coordenadas del mundo (empalma entre teselas)."""
-    xs, ys = x / scale, y / scale
-    xi, yi = np.floor(xs).astype(np.int64), np.floor(ys).astype(np.int64)
-    xf, yf = xs - xi, ys - yi
+@njit(cache=True)
+def _h(a, b, seed):
+    v = (a * 374761393 + b * 668265263 + seed * 2246822519) & 0xFFFFFFFF
+    v = ((v ^ (v >> 13)) * 1274126177) & 0xFFFFFFFF
+    return (v & 0xFFFF) / 65535.0
 
-    def h(a, b):
-        v = (a * 374761393 + b * 668265263 + seed * 2246822519) & 0xFFFFFFFF
-        v = ((v ^ (v >> 13)) * 1274126177) & 0xFFFFFFFF
-        return (v & 0xFFFF) / 65535.0
-    u = xf * xf * (3 - 2 * xf)
-    v = yf * yf * (3 - 2 * yf)
-    return (h(xi, yi) * (1 - u) * (1 - v) + h(xi + 1, yi) * u * (1 - v)
-            + h(xi, yi + 1) * (1 - u) * v + h(xi + 1, yi + 1) * u * v)
+
+@njit(cache=True)
+def _hash_noise_nb(x, y, scale, seed, out):
+    for k in range(x.size):
+        xs = x[k] / scale
+        ys = y[k] / scale
+        xi = np.int64(np.floor(xs))
+        yi = np.int64(np.floor(ys))
+        xf = xs - xi
+        yf = ys - yi
+        u = xf * xf * (3 - 2 * xf)
+        v = yf * yf * (3 - 2 * yf)
+        out[k] = (_h(xi, yi, seed) * (1 - u) * (1 - v) + _h(xi + 1, yi, seed) * u * (1 - v)
+                  + _h(xi, yi + 1, seed) * (1 - u) * v + _h(xi + 1, yi + 1, seed) * u * v)
+
+
+def _hash_noise(x, y, scale, seed=0):
+    """Ruido de valor continuo en coordenadas del mundo (empalma entre teselas). En numba: con
+    numpy (arrays enteros intermedios por cada esquina) el horneado del terreno tardaba ~10 s más."""
+    x = np.asarray(x, np.float64)
+    y = np.broadcast_to(np.asarray(y, np.float64), x.shape)
+    out = np.empty(x.size, np.float64)
+    _hash_noise_nb(np.ascontiguousarray(x).ravel(), np.ascontiguousarray(y).ravel(), float(scale), int(seed), out)
+    return out.reshape(x.shape)
 
 
 def fbm(x, y, base, octaves=4, seed=0):
@@ -239,6 +390,11 @@ class GroundPainter:
         self.proj = proj
         self.season = 0 if season == "seca" else 1
         self.road_polys = road_polys
+        # orilla de terracería bajo cada calle: se calcula una vez (antes, en cada tesela: ~35 000
+        # buffers en el centro de Madrid) y se busca por tesela con un índice espacial
+        self._orillas = [poly.buffer(1.4 if not e.urban else 0.6) for poly, e in road_polys]
+        self._orillas_idx = shapely.STRtree(self._orillas) if self._orillas else None
+        self._edif_sombra = buildings_poly.buffer(0.9) if buildings_poly is not None else None
         self.paths = paths            # lista de (coords Nx2, ancho)
         self.areas = areas            # lista de (polígono, color RGB)
         self.buildings = buildings_poly
@@ -329,14 +485,15 @@ class GroundPainter:
                 continue
             d.line(to_px(c), fill=(156, 132, 100, 230), width=max(1, int(width / mpp)), joint="curve")
         # orilla de terracería y sombra de contacto bajo las calles
-        for poly, e in self.road_polys:
-            if not poly.intersects(tb):
+        cerca = sorted(int(k) for k in self._orillas_idx.query(tb)) if self._orillas_idx is not None else []
+        for k in cerca:
+            if not self.road_polys[k][0].intersects(tb):
                 continue
-            g = poly.buffer(1.4 if not e.urban else 0.6).intersection(tb)
+            g = self._orillas[k].intersection(tb)
             for gg in _polys(g):
                 d.polygon(to_px(gg.exterior.coords), fill=(120, 104, 84, 210))
         if self.buildings is not None and self.buildings.intersects(tb):
-            for gg in _polys(self.buildings.buffer(0.9).intersection(tb)):
+            for gg in _polys(self._edif_sombra.intersection(tb)):
                 d.polygon(to_px(gg.exterior.coords), fill=(70, 62, 54, 150))
         return img.filter(ImageFilter.SMOOTH)
 

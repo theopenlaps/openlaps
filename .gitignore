@@ -8,6 +8,8 @@ salida*/
 
 # material de terceros que no se redistribuye
 recursos/
+# fotos de referencia descargadas con tools/referencias.py (licencias de sus autores)
+referencias/
 
 # cachés de herramientas
 .pytest_cache/

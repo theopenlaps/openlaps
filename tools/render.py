@@ -101,7 +101,8 @@ def raster(sx, sy, sw, uvw, shade, idx, tex, alpha, zbuf, cbuf, W, H, blend=Fals
                 cbuf[py, px, 2] = col[2] * s
 
 
-def render(meshes, texs, eye, target, W=960, H=540, fov=60.0, skip=()):
+def render(meshes, texs, eye, target, W=960, H=540, fov=60.0, skip=(), depth=False):
+    """fov es horizontal (grados). Con depth=True devuelve también la profundidad (1e18 = cielo)."""
     eye, target = np.asarray(eye, float), np.asarray(target, float)
     f = target - eye
     f /= np.linalg.norm(f)
@@ -131,7 +132,8 @@ def render(meshes, texs, eye, target, W=960, H=540, fov=60.0, skip=()):
     fog = np.clip((zbuf - 900) / 9000, 0, 0.45)[..., None]
     fog[zbuf > 1e17] = 0
     cbuf = cbuf * (1 - fog) + np.array([0.75, 0.82, 0.92]) * fog
-    return Image.fromarray((np.clip(cbuf, 0, 1) * 255).astype(np.uint8))
+    img = Image.fromarray((np.clip(cbuf, 0, 1) * 255).astype(np.uint8))
+    return (img, zbuf) if depth else img
 
 
 def main():

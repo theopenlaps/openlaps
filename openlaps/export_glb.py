@@ -15,12 +15,12 @@ def to_yup(p):
 def _compact(scene, name):
     """Texturas opacas en JPEG (5-10 veces más ligeras); las que tienen transparencia en PNG."""
     import io as _io
-    from PIL import Image as _Image
+    from .textures import tex_bytes, tex_image
     img = scene.images.get(name)
     if img is None:
-        img = _Image.open(_io.BytesIO(scene.textures[name]))
+        img = tex_image(scene.textures[name])
     if img.mode == "RGBA" and np.asarray(img)[..., 3].min() < 250:
-        return scene.textures[name], "image/png"
+        return tex_bytes(scene.textures[name]), "image/png"
     b = _io.BytesIO()
     img.convert("RGB").save(b, "JPEG", quality=84, optimize=True)
     return b.getvalue(), "image/jpeg"

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import shapely
@@ -12,10 +13,11 @@ from shapely.ops import unary_union
 
 from . import config as C
 from . import textures, roads, terrain as T, buildings as B, vegetation as V, extras as X, barriers as BR
+from . import cobertura as COB, agua as AG
 from . import roadside as RS
 from .geo import BBox, LocalProjection
 from .mesh import Scene
-from .sources import osm as OSM, rasters, msbuildings
+from .sources import osm as OSM, rasters, msbuildings, catastro, overture
 from . import export_glb, export_ac, regions
 
 ATTRIBUTION = """Atribuciones de datos de esta pista
@@ -55,59 +57,90 @@ def run(args, log=print):
     log(f"Área: {area_km2:.2f} km² centrada en {proj.lat0:.5f}, {proj.lon0:.5f} (UTM EPSG:{proj.epsg})")
 
     # ------------------------------------------------------------ datos
-    log("1/7 Descargando OpenStreetMap…")
-    osm = OSM.parse(OSM.download(bbox.padded(200), log=log))
-    log(f"  {len(osm['ways'])} vías, {len(osm['areas'])} áreas, {len(osm['nodes'])} nodos sueltos")
-    log("2/7 Relieve y cobertura de suelo…")
+    # Todas las descargas van en paralelo: son independientes y casi todo el tiempo es espera de
+    # red (Overpass, COG remotos, WMS, WFS). Una tras otra, la primera generación de una zona
+    # pasaba más de un minuto solo esperando.
+    log("1/7 Descargando datos (en paralelo)…")
+    pool = ThreadPoolExecutor(max_workers=8)
+
+    def intento(nombre, fn, *a, **kw):
+        try:
+            return fn(*a, **kw)
+        except Exception as e:  # noqa: BLE001
+            log(f"  aviso: sin {nombre} ({e})")
+            return None
+
     big = bbox.padded(450)
-    if args.dem:
-        dem = rasters.local_raster(args.dem, big)
-        dem_is_dtm = not args.dem_es_superficie
-        log(f"  MDE local: {args.dem} ({'terreno' if dem_is_dtm else 'superficie'})")
-    else:
-        dem = None
+
+    def relieve():
+        if args.dem:
+            log(f"  MDE local: {args.dem} ({'superficie' if args.dem_es_superficie else 'terreno'})")
+            return rasters.local_raster(args.dem, big), not args.dem_es_superficie
         if R.dem == "mdt05":
             try:
-                dem = rasters.mdt05(big, log=log)
-                dem_is_dtm = True
+                return rasters.mdt05(big, log=log), True
             except Exception as e:  # noqa: BLE001
                 log(f"  aviso: sin MDT05 ({e}); se usa Copernicus")
-        if dem is None:
-            dem = rasters.copernicus_dem(big, log=log)
-            dem_is_dtm = False
-            log("  Copernicus GLO-30 (superficie, se corrige a terreno)")
-    lc = rasters.worldcover(big, log=log)
-    s2 = chm = orto = None
-    if R.ortho and not args.sin_orto:
-        try:
-            orto = rasters.ortho(bbox.padded(60), R.ortho, mpp=0.25, log=log)
-        except Exception as e:  # noqa: BLE001
-            log(f"  aviso: sin ortofoto ({e})")
-    mpp = args.mpp or (0.25 if orto is not None else 0.5)
-    if not args.sin_satelite and orto is None:
-        try:
-            s2 = rasters.sentinel2(bbox.padded(60), args.temporada, log=log)
-        except Exception as e:  # noqa: BLE001
-            log(f"  aviso: sin Sentinel-2 ({e})")
-    if not args.sin_dosel:
-        try:
-            chm = rasters.canopy_height(bbox, log=log)
-        except Exception as e:  # noqa: BLE001
-            log(f"  aviso: sin altura de dosel ({e})")
-    ms = []
-    if not args.sin_microsoft:
-        try:
-            ms = msbuildings.download(bbox, log=log)
-        except Exception as e:  # noqa: BLE001
-            log(f"  aviso: sin edificios de Microsoft ({e})")
+        if R.dem == "3dep":
+            try:
+                return rasters.dem_3dep(big, log=log), True
+            except Exception as e:  # noqa: BLE001
+                log(f"  aviso: sin 3DEP ({e}); se usa Copernicus")
+        d = rasters.copernicus_dem(big, log=log)
+        log("  Copernicus GLO-30 (superficie, se corrige a terreno)")
+        return d, False
+
+    usar_orto = bool(R.ortho) and not args.sin_orto
+    f_osm = pool.submit(lambda: OSM.parse(OSM.download(bbox.padded(200), log=log)))
+    f_dem = pool.submit(relieve)
+    f_lc = pool.submit(rasters.worldcover, big, log=log)
+    f_orto = pool.submit(intento, "ortofoto", rasters.ortho, bbox.padded(60), R.ortho, mpp=R.ortho_mpp, log=log)         if usar_orto else None
+    f_s2 = pool.submit(intento, "Sentinel-2", rasters.sentinel2, bbox.padded(60), args.temporada, log=log)         if not args.sin_satelite and not usar_orto else None
+    f_ndwi = pool.submit(intento, "índice de agua NDWI", rasters.sentinel2_ndwi, bbox.padded(60), args.temporada,
+                         log=log) if not args.sin_satelite else None
+    f_chm = pool.submit(intento, "altura de dosel", rasters.canopy_height, bbox, log=log) if not args.sin_dosel else None
+    f_ms = pool.submit(intento, "edificios de Microsoft", msbuildings.download, bbox, log=log)         if not args.sin_microsoft else None
+    f_cat = pool.submit(intento, "Catastro", catastro.download, bbox, log=log)         if R.cadastre == "catastro" and not getattr(args, "sin_catastro", False) else None
+    f_ov = pool.submit(intento, "alturas de Overture", overture.download, bbox, log=log) \
+        if R.heights == "overture" and not getattr(args, "sin_overture", False) else None
+    # el relieve y la imagen del horizonte (5 km) se usan al final, pero se piden ya
+    far = bbox.padded(5000)
+    f_far_dem = pool.submit(rasters.copernicus_dem, far, log=log) if not args.sin_horizonte else None
+    f_far_s2 = pool.submit(intento, "Sentinel-2 del horizonte", rasters.sentinel2, far, args.temporada, log=log)         if not args.sin_horizonte and not args.sin_satelite else None
+
+    # mientras llegan los datos: texturas y materiales (cálculo puro, no depende de la zona salvo
+    # por el perfil regional, que ya está elegido)
+    scene = Scene()
+    cc0_tex = {}
+    if not args.sin_cc0:
+        from .sources import cc0 as CC0
+        cc0_tex = CC0.load_all(1024, log=log)
+    textures.register_all(scene, args.temporada, cc0_tex)
+    RS.register_materials(scene)
+
+    osm = f_osm.result()
+    log(f"  {len(osm['ways'])} vías, {len(osm['areas'])} áreas, {len(osm['nodes'])} nodos sueltos")
+    log("2/7 Relieve y cobertura de suelo…")
+    dem, dem_is_dtm = f_dem.result()
+    lc = f_lc.result()
+    orto = f_orto.result() if f_orto else None
+    s2 = f_s2.result() if f_s2 else None
+    if s2 is None and usar_orto and orto is None and not args.sin_satelite:
+        s2 = intento("Sentinel-2", rasters.sentinel2, bbox.padded(60), args.temporada, log=log)
+    mpp = args.mpp or (min(0.25, R.ortho_mpp) if orto is not None else 0.5)
+    ndwi = f_ndwi.result() if f_ndwi else None
+    chm = f_chm.result() if f_chm else None
+    ms = (f_ms.result() if f_ms else None) or []
+    cat = (f_cat.result() if f_cat else None) or []
+    ov = (f_ov.result() if f_ov else None) or []
 
     terr = T.Terrain(proj, dem, lc, dem_is_dtm, res, log=log)
 
     # ------------------------------------------------------------ zona urbana
     log("3/7 Edificios y zonas urbanas…")
-    blds = B.collect(osm, ms, proj, rect, log=log)
+    blds = B.collect(osm, ms, proj, rect, log=log, cat_parts=cat, alturas=ov)
     urban_parts = [b["poly"].buffer(22) for b in blds]
-    water_parts, areas = [], []
+    areas = []
     for a in osm["areas"]:
         t = a["tags"]
         x, y = proj.to_local([c[0] for c in a["outer"]], [c[1] for c in a["outer"]])
@@ -122,8 +155,6 @@ def run(args, log=print):
         lu = t.get("landuse")
         if lu in ("residential", "commercial", "retail"):
             urban_parts.append(pg)
-        if t.get("natural") == "water" or lu in ("reservoir", "basin"):
-            water_parts.append(pg)
         key = lu or t.get("leisure") or t.get("natural") or ("parking" if t.get("amenity") == "parking" else None)
         if key in AREA_COLORS:
             areas.append((pg, AREA_COLORS[key]))
@@ -143,7 +174,9 @@ def run(args, log=print):
             pts = shapely.points(GX[m], GY[m])
             urban_parts.append(unary_union(shapely.buffer(pts, 18.0, quad_segs=2)))
     urban_poly = unary_union(urban_parts).buffer(-8).buffer(8) if urban_parts else None
-    water_poly = unary_union(water_parts) if water_parts else None
+    # qué es cada sitio (agua, bosque, roca...): OSM + WorldCover + índice de agua de Sentinel-2
+    cob = COB.Cobertura(osm, proj, rect, lc, ndwi, args.temporada, log=log)
+    water_poly = cob.agua
     if urban_poly is not None:
         shapely.prepare(urban_poly)
     urban_fn = (lambda x, y: shapely.contains_xy(urban_poly, x, y)) if urban_poly is not None else None
@@ -151,18 +184,15 @@ def run(args, log=print):
     # ------------------------------------------------------------ carreteras
     log("4/7 Red de carreteras…")
     net = roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log)
-    scene = Scene()
-    cc0_tex = {}
-    if not args.sin_cc0:
-        from .sources import cc0 as CC0
-        cc0_tex = CC0.load_all(1024, log=log)
-    textures.register_all(scene, args.temporada, cc0_tex)
-    RS.register_materials(scene)
     blds_poly_pre = unary_union([b["poly"] for b in blds]) if blds else None
     has_gr = any(b["tags"].get("barrier") == "guard_rail" for b in osm.get("barriers", []))
+    rails = []
+    for r in osm.get("rails", []):
+        x, y = proj.to_local([c[0] for c in r["coords"]], [c[1] for c in r["coords"]])
+        rails.append({"tags": r["tags"], "xy": np.column_stack([x, y])})
     rd = roads.build_roads(net, scene, blds_poly_pre, water_poly, urban_poly, log=log, osm_guardrails=has_gr,
-                           ortho=orto, proj=proj)
-    keep_out = rd["road_union"]
+                           ortho=orto, proj=proj, rails=rails)
+    keep_out = rd["ground_union"]          # sobre un túnel sí puede haber edificios
     if rd["sidewalks"] is not None and keep_out is not None:
         keep_out = unary_union([keep_out, rd["sidewalks"]])
     blds = B.drop_on_roads(blds, keep_out)
@@ -191,20 +221,20 @@ def run(args, log=print):
     terr.build_grid()
     terr.flatten_urban(rd["carve"], urban_fn)
     terr.carve(rd["carve"], rd["tunnel"])
+    terr.cubrir_tuneles(rd.get("tunnel_poly"), rd.get("tunnel_bocas", []), rd["tunnel"], scene)
+    sin_puente = [p for p, e in rd["road_polys"] if not e.bridge]
+    agua = AG.Agua(cob, terr, unary_union(sin_puente) if sin_puente else None, log=log)
+    agua.tallar()
     paths = []
     for w in osm["ways"]:
         if w["tags"].get("highway") in C.PATHS:
             x, y = proj.to_local([c[0] for c in w["coords"]], [c[1] for c in w["coords"]])
             paths.append((np.column_stack([x, y]), 1.3))
+    paths += [(c, w) for c, w in cob.secos]     # cauces secos (ramblas, arroyos intermitentes)
     painter = T.GroundPainter(lc, proj, args.temporada, rd["road_polys"], paths, areas, blds_poly, water_poly, s2=s2,
                               ortho=orto)
     terr.build_mesh(scene, painter, tile_m=args.tesela, mpp=mpp)
-    if water_poly is not None:
-        for pg in roads.iter_polys(water_poly.intersection(shapely.geometry.box(*rect))):
-            verts, faces = roads.triangulate_polygon(pg, 8.0)
-            if len(faces):
-                z = float(np.percentile(terr.height(verts[:, 0], verts[:, 1]), 10)) + 0.1
-                scene.add("agua", "agua", np.column_stack([verts, np.full(len(verts), z)]), verts / 8, faces)
+    agua.construir(scene)
 
     m = BR.build(scene, osm.get("barriers", []), proj, terr, rect, rd["road_union"])
     if m:
@@ -231,6 +261,8 @@ def run(args, log=print):
         excl.append(blds_poly.buffer(1.5))
     if water_poly is not None:
         excl.append(water_poly)
+    if rd.get("tunnel_poly") is not None:      # ni árboles sobre la tapa del túnel ni en sus bocas
+        excl.append(rd["tunnel_poly"].buffer(2.0))
     exclude = unary_union(excl) if excl else None
     if exclude is not None:
         shapely.prepare(exclude)
@@ -247,9 +279,8 @@ def run(args, log=print):
         log(f"  {X.trunk_colliders(scene, trunks)} troncos con colisión junto a la calle")
     if not args.sin_horizonte:
         try:
-            far = bbox.padded(5000)
-            dem_far = rasters.copernicus_dem(far, log=log)
-            s2_far = rasters.sentinel2(far, args.temporada, log=log) if not args.sin_satelite else None
+            dem_far = f_far_dem.result()
+            s2_far = f_far_s2.result() if f_far_s2 else None
             nf = X.horizon(scene, proj, dem_far, s2_far, rect, terrain=terr)
             log(f"  horizonte: {nf:,} triángulos hasta 5 km")
         except Exception as e:  # noqa: BLE001
@@ -264,6 +295,8 @@ def run(args, log=print):
         f"{st['texturas']} texturas")
     prev = T.mosaic(terr.tiles, proj, 2.0)
     prev.save(os.path.join(args.salida, f"{name}_cenital.jpg"), quality=88)
+    cob.panel(orto if orto is not None else s2, f"{name}: qué es cada sitio").save(
+        os.path.join(args.salida, f"{name}_cobertura.jpg"), quality=88)
     extras = {"nombre": name, "centro": [proj.lat0, proj.lon0], "modo": args.modo}
     if route is not None:
         extras["ruta"] = export_glb.to_yup(route).round(2).tolist()
@@ -288,8 +321,10 @@ def run(args, log=print):
                 "closed": args.modo == "circuito"}
         export_ac.write_track(scene, os.path.join(args.salida, "assetto_corsa"), name, info, map_lines, route, log=log)
     with open(os.path.join(args.salida, f"{name}.json"), "w", encoding="utf-8") as f:
-        json.dump({"area_km2": area_km2, "stats": st, "carreteras": rd["stats"], "segundos": round(time.time() - t0, 1),
+        json.dump({"area_km2": area_km2, "stats": st, "carreteras": rd["stats"], "cobertura": cob.stats,
+                   "segundos": round(time.time() - t0, 1),
                    "centro": [proj.lat0, proj.lon0], "modo": args.modo}, f, ensure_ascii=False, indent=2)
+    pool.shutdown(wait=False, cancel_futures=True)
     log(f"Listo en {time.time() - t0:.0f} s")
     return glb
 

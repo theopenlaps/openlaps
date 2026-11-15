@@ -7,7 +7,10 @@
 - Iglesias más altas, con campanario.
 La altura sale de `height` o `building:levels`; si no hay, se estima según el tipo y el
 tamaño (casas de 1-2 niveles, comercios y bodegas más altos).
+En España, si hay datos del Catastro, las huellas y las plantas de cada parte del edificio salen
+de ahí (ver `_con_catastro`); OSM solo aporta etiquetas (colores, tipo, forma del techo).
 """
+from collections import defaultdict
 import math
 import zlib
 
@@ -26,8 +29,11 @@ def _h(v):
     return zlib.crc32(str(v).encode()) / 0xFFFFFFFF
 
 
-def collect(osm, ms_polys, proj, area_rect, log=print):
-    """Devuelve lista de dict(poly, tags, height) en coordenadas locales."""
+def collect(osm, ms_polys, proj, area_rect, log=print, cat_parts=None, alturas=None):
+    """Devuelve lista de dict(poly, tags, height) en coordenadas locales.
+
+    `cat_parts`: partes de edificio del Catastro (sources/catastro.py); si vienen, sustituyen a
+    las huellas de OSM que cubren."""
     xmin, ymin, xmax, ymax = area_rect
     clip = shapely.geometry.box(xmin + 1, ymin + 1, xmax - 1, ymax - 1)
     out = []
@@ -57,9 +63,13 @@ def collect(osm, ms_polys, proj, area_rect, log=print):
                 out.append({"poly": g, "tags": t, "height": None, "src": "osm"})
                 osm_polys.append(g)
     out = _dedupe(out)
-    osm_polys = [b["poly"] for b in out]
     n_osm = len(out)
-    osm_union = unary_union(osm_polys) if osm_polys else None
+    n_cat = 0
+    if cat_parts:
+        out, n_cat = _con_catastro(out, cat_parts, to_poly, clip, log)
+    if alturas:
+        out = _con_overture(out, alturas, to_poly, clip, log)
+    osm_polys = [b["poly"] for b in out]
     tree = shapely.STRtree(osm_polys) if osm_polys else None
     n_ms = 0
     for b in ms_polys or []:
@@ -70,8 +80,138 @@ def collect(osm, ms_polys, proj, area_rect, log=print):
             continue
         out.append({"poly": p, "tags": {"building": "yes"}, "height": b["height"], "src": "ms"})
         n_ms += 1
-    log(f"  edificios: {n_osm} de OSM + {n_ms} de Microsoft = {len(out)}")
+    if n_cat:
+        n_o = sum(1 for b in out if b["src"] == "osm")
+        log(f"  edificios: {n_cat} volúmenes del Catastro + {n_o} de OSM (de {n_osm}) + {n_ms} de Microsoft"
+            f" = {len(out)}")
+    else:
+        log(f"  edificios: {n_osm} de OSM + {n_ms} de Microsoft = {len(out)}")
     return out
+
+
+def _con_overture(items, ov, to_poly, clip, log):
+    """Alturas de Overture para los edificios de OSM que no traen `height` ni `building:levels`
+    (el de Overture que más se solapa, si cubre al menos el 40 %), y los edificios de Overture que
+    OSM no tiene (casi todos huellas de Microsoft, ya con altura). Overture da la altura total:
+    en una casa con tejado se descuenta lo que sube el tejado."""
+    polys, datos = [], []
+    for o in ov:
+        if not o.get("height") and not o.get("floors"):
+            continue
+        p = to_poly(o["outer"], o.get("inners", []))
+        if p is None:
+            continue
+        for g in getattr(p, "geoms", [p]):
+            if g.area >= 6 and clip.contains(g.centroid):
+                polys.append(g)
+                datos.append(o)
+    if not polys:
+        return items
+    tree = shapely.STRtree(polys)
+    usados = set()
+    n_alt = 0
+    for b in items:
+        t = b["tags"]
+        hit = [int(k) for k in tree.query(b["poly"], predicate="intersects")]
+        if not hit:
+            continue
+        inter = [(b["poly"].intersection(polys[k]).area, k) for k in hit]
+        for a, k in inter:
+            if a > 0.3 * polys[k].area:
+                usados.add(k)
+        a, k = max(inter)
+        if b["src"] == "catastro" or _num(t.get("height")) or _num(t.get("building:levels")) or a < 0.4 * b["poly"].area:
+            continue
+        o = datos[k]
+        fl = o.get("floors")
+        hgt = o.get("height") or (fl * C.LEVEL_HEIGHT + 0.6 if fl else None)
+        if not hgt:
+            continue
+        if hgt < 12:                       # casa: la altura de Overture llega a la cumbrera
+            hgt = max(2.6, hgt - 1.5)
+        b["height"] = hgt
+        b["floors"] = int(fl) if fl else max(1, int(round((hgt - 0.6) / C.LEVEL_HEIGHT)))
+        n_alt += 1
+    nuevos = 0
+    for k, g in enumerate(polys):
+        if k in usados:
+            continue
+        o = datos[k]
+        fl = o.get("floors")
+        hgt = o.get("height") or (fl * C.LEVEL_HEIGHT + 0.6 if fl else None)
+        if hgt < 12:
+            hgt = max(2.6, hgt - 1.5)
+        items.append({"poly": g, "tags": {"building": o.get("clase") or "yes"}, "height": hgt, "src": "overture",
+                      "floors": int(fl) if fl else max(1, int(round((hgt - 0.6) / C.LEVEL_HEIGHT)))})
+        nuevos += 1
+    log(f"  Overture: altura para {n_alt} edificios de OSM y {nuevos} edificios que OSM no tiene")
+    return items
+
+
+CHURCH = ("church", "cathedral", "chapel", "basilica")
+# etiquetas de altura de OSM que no se heredan: la altura de cada parte la da el Catastro
+_HEIGHT_TAGS = ("height", "building:levels", "roof:levels", "min_height", "building:min_level", "roof:height")
+
+
+def cat_height(floors):
+    """Altura de cornisa a partir de las plantas sobre rasante del Catastro (planta baja más alta)."""
+    return floors * C.LEVEL_HEIGHT + 0.6
+
+
+def _con_catastro(osm_items, cat_parts, to_poly, clip, log):
+    """Cambia las huellas de OSM por los volúmenes del Catastro (una pieza por parcela y número de
+    plantas). Se conservan de OSM las iglesias (su altura no se mide en plantas) y los edificios
+    que el Catastro no cubre; las piezas del Catastro heredan las etiquetas del edificio OSM que
+    las contiene (color de fachada y de techo, tipo, forma del techo)."""
+    grupos = defaultdict(list)
+    for c in cat_parts:
+        if c["floors"] < 1:          # sótanos, patios y cubiertas sin plantas sobre rasante
+            continue
+        p = to_poly(c["outer"], c["inners"])
+        if p is None:
+            continue
+        for g in getattr(p, "geoms", [p]):
+            if g.area >= 4 and clip.contains(g.centroid):
+                grupos[(c["ref"], c["floors"])].append(g)
+    if not grupos:
+        return osm_items, 0
+    piezas = []
+    for (ref, fl), gs in grupos.items():
+        u = unary_union(gs).buffer(0.05, join_style=2).buffer(-0.05, join_style=2)
+        for g in getattr(u, "geoms", [u]):
+            if g.geom_type == "Polygon" and g.area >= 4:
+                piezas.append((g, fl))
+    cat_union = unary_union([g for g, _ in piezas])
+    shapely.prepare(cat_union)
+    keep, donors = [], []
+    for b in osm_items:
+        t = b["tags"]
+        church = t.get("building") in CHURCH or t.get("amenity") == "place_of_worship"
+        cov = b["poly"].intersection(cat_union).area / max(b["poly"].area, 1e-6)
+        if cov >= 0.5 and not church:
+            donors.append(b)
+        else:
+            keep.append(b)
+    keep_union = unary_union([b["poly"] for b in keep]) if keep else None
+    dtree = shapely.STRtree([b["poly"] for b in donors]) if donors else None
+    out = list(keep)
+    n = 0
+    for g, fl in piezas:
+        if keep_union is not None and g.intersects(keep_union):
+            g = g.difference(keep_union)
+        for gg in getattr(g, "geoms", [g]):
+            if gg.geom_type != "Polygon" or gg.area < 6:
+                continue
+            tags = {"building": "yes"}
+            if dtree is not None:
+                rp = gg.representative_point()
+                hit = [int(k) for k in dtree.query(rp, predicate="intersects")]
+                if hit:
+                    src = donors[max(hit, key=lambda k: donors[k]["poly"].intersection(gg).area)]["tags"]
+                    tags = {k: v for k, v in src.items() if k not in _HEIGHT_TAGS}
+            out.append({"poly": gg, "tags": tags, "height": cat_height(fl), "src": "catastro", "floors": fl})
+            n += 1
+    return out, n
 
 
 def _dedupe(items):
@@ -204,11 +344,24 @@ def build(scene, buildings, terrain, log=print):
         mat = "iglesia" if church else f"fachada_{int(r * nfc) % nfc}{var}"
         # naves (industria, almacén, granero, comercio grande): chapa grecada y cubierta baja de
         # chapa, no fachada de vivienda
-        nave = not church and (kind in NAVE_KINDS or (kind == "yes" and poly.area > 900))
+        # una huella grande sin tipo solo es nave si es baja: en un casco urbano una parcela de más
+        # de 900 m² con 6 plantas es un bloque de pisos (con el Catastro salen muchas)
+        nave = not church and ((kind in NAVE_KINDS and h < 12.0) or (kind == "yes" and poly.area > 900 and h < 10.0))
         if nave:
             mat = f"nave_{int(r * len(textures.NAVE_COLORS)) % len(textures.NAVE_COLORS)}"
         pitched = R.roof == "pitched" and not church and not nave and kind not in ("retail", "supermarket",
                                                                                    "commercial") and poly.area < 1500
+        # plantas (del Catastro u Overture, o estimadas por la altura): en EE. UU. los edificios
+        # de 4 o más plantas tienen azotea plana, y desde 8 la fachada es de torre de oficinas
+        floors = b.get("floors") or max(1, int(round((h - 0.6) / C.LEVEL_HEIGHT)))
+        torre = bool(R.tower_floors) and floors >= R.tower_floors and not church
+        if torre:
+            mat = f"torre_{int(r * 4) % 4}"
+            pitched = nave = False
+        elif R.flat_from_floors and floors >= R.flat_from_floors and not church:
+            pitched = False
+            if R.facade_style == "us" and not nave:
+                mat = f"ciudad_{int(r * 4) % 4}"
         # lo que OSM sabe de este edificio manda sobre lo genérico (color de fachada y de techo,
         # forma del techo)
         tg = b["tags"]
@@ -218,8 +371,8 @@ def build(scene, buildings, terrain, log=print):
         elif shape in ("gabled", "hipped", "pyramidal", "half-hipped", "mansard", "gambrel") and not church:
             pitched = True
         fc = textures.parse_colour(tg.get("building:colour"))
-        if fc and not church and not nave:
-            mat = textures.facade_material(scene, fc, "mx" if R.roof == "flat" else "eu")
+        if fc and not church and not nave and not torre:
+            mat = textures.facade_material(scene, fc, R.facade_style or ("mx" if R.roof == "flat" else "eu"))
         rc = textures.parse_colour(tg.get("roof:colour"))
         roof_mat = textures.roof_material(scene, rc, pitched) if rc else None
         # muros (exterior hacia afuera) + pretil
@@ -238,8 +391,12 @@ def build(scene, buildings, terrain, log=print):
             scene.add("edificios", mat, p, uv, f)
         if nave and shape != "flat" and _hip_roof(scene, poly, top, roof_mat or "chapa", pitch=0.16, eave=0.25):
             continue
+        # bloques de pisos (3 o más plantas): faldones tendidos que desde la calle apenas asoman
+        # tras la cornisa; con la pendiente de una casa de pueblo parecían tejados de chalé
+        tall = b.get("floors", 0) >= 3 or h >= 3 * C.LEVEL_HEIGHT + 0.3
         if pitched and _hip_roof(scene, poly, top + C.PARAPET,
-                                 roof_mat or f"tejado_{int(_h((i, 'r')) * len(R.roof_colors)) % len(R.roof_colors)}"):
+                                 roof_mat or f"tejado_{int(_h((i, 'r')) * len(R.roof_colors)) % len(R.roof_colors)}",
+                                 pitch=0.36 if tall else 0.58, max_inset=4.0 if tall else 7.0):
             continue
         # azotea
         verts, faces = triangulate_polygon(poly, 50.0)
@@ -269,7 +426,7 @@ def build(scene, buildings, terrain, log=print):
     log(f"  edificios construidos: {len(buildings)}, tinacos: {n_tinaco}")
 
 
-def _hip_roof(scene, poly, z0, mat, pitch=0.58, eave=0.35):
+def _hip_roof(scene, poly, z0, mat, pitch=0.58, eave=0.35, max_inset=7.0):
     """Tejado a cuatro aguas aproximado: el contorno (con alero) sube hasta el mismo contorno
     encogido hacia dentro; arriba queda una cumbrera o un remate plano pequeño.
 
@@ -282,7 +439,7 @@ def _hip_roof(scene, poly, z0, mat, pitch=0.58, eave=0.35):
     half = float(sides.min()) / 2.0
     if half < 1.5:
         return False
-    d = min(half * 0.92, 7.0)
+    d = min(half * 0.92, max_inset)
     inner = None
     for _ in range(5):
         g = poly.buffer(-d, join_style=2, mitre_limit=3.0)

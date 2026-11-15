@@ -25,7 +25,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d, median_filter
 from scipy.spatial import cKDTree
 import shapely
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 import mapbox_earcut as earcut
 
@@ -176,6 +176,7 @@ class Edge:
     mat: str = "asfalto"
     phys: str = "ROAD"
     bridge: bool = False
+    parking: float = 0.0
     tunnel: bool = False
     layer: int = 0
     speed: float = 40
@@ -217,6 +218,78 @@ class Edge:
 
     def key_attrs(self):
         return (self.cls, round(self.hw, 2), self.mat, self.bridge, self.tunnel, self.layer, self.oneway)
+
+
+def radio_vertical_min(v_kmh):
+    """Radio mínimo de acuerdo vertical (m) para la velocidad de proyecto: ~0.18 v² (30 km/h ->
+    160 m, 50 -> 450 m, 80 -> 1150 m, 110 -> 2200 m), entre 60 y 3000 m."""
+    return float(np.clip(0.18 * v_kmh ** 2, 60.0, 3000.0))
+
+
+def _acuerdos_verticales(s, z, v_kmh, desvio=2.0, iters=400):
+    """Suaviza la rasante solo donde la curvatura vertical pasa del límite de la velocidad de
+    proyecto (baches y quiebres que se notaban al conducir), sin mover los extremos (costura con
+    los cruces) y sin separarse más de `desvio` m de la rasante de partida."""
+    if len(z) < 5:
+        return z
+    kmax = 1.0 / radio_vertical_min(v_kmh)
+    z0 = np.asarray(z, float)
+    z = z0.copy()
+    ds = np.maximum(np.diff(s), 1e-3)
+    for _ in range(iters):
+        g = np.diff(z) / ds
+        k = np.diff(g) / (0.5 * (ds[:-1] + ds[1:]))
+        exc = np.abs(k) > kmax
+        if not exc.any():
+            break
+        # paso de suavizado (laplaciano) solo en los puntos que se pasan y sus vecinos
+        m = np.zeros(len(z), bool)
+        m[1:-1] = exc
+        m[1:-1] |= np.convolve(exc.astype(int), [1, 1, 1], "same") > 0
+        lap = np.zeros_like(z)
+        lap[1:-1] = 0.5 * (z[:-2] + z[2:]) - z[1:-1]
+        z = np.where(m, z + 0.5 * lap, z)
+        z = np.clip(z, z0 - desvio, z0 + desvio)
+        z[0], z[-1] = z0[0], z0[-1]
+    return z
+
+
+# ancho de un carril de estacionamiento según la orientación (m)
+_ANCHO_ESTAC = {"parallel": 2.3, "diagonal": 4.6, "perpendicular": 5.0}
+_SI_ESTAC = {"lane", "parallel", "diagonal", "perpendicular", "marked", "yes", "painted_area_only"}
+_ESTAC_CLASES = {"residential", "tertiary", "secondary", "primary", "unclassified", "living_street"}
+
+
+def _estacionamiento(t, cls, urbana):
+    """Ancho total (m) de los carriles de estacionamiento de una calle."""
+    total, alguno = 0.0, False
+    for lado in ("left", "right"):
+        for clave in (f"parking:{lado}", "parking:both", f"parking:lane:{lado}", "parking:lane:both"):
+            v = t.get(clave)
+            if v is None:
+                continue
+            alguno = True
+            if v in _SI_ESTAC and t.get(clave + ":position", t.get(clave.replace(lado, "both") + ":position"))                     not in ("on_kerb", "street_side"):
+                ori = t.get(clave + ":orientation") or t.get("parking:both:orientation") or                     (v if v in _ANCHO_ESTAC else "parallel")
+                total += _ANCHO_ESTAC.get(ori, 2.3)
+            break
+    if alguno:
+        return total
+    R = regions.active()
+    if urbana and R.parking_default and cls in _ESTAC_CLASES:
+        return 2 * _ANCHO_ESTAC["parallel"]
+    return 0.0
+
+
+def _velocidad(v):
+    """maxspeed de OSM en km/h; "25 mph" -> 40 (antes se leía como 25 km/h)."""
+    if not v:
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*(mph)?", str(v))
+    if not m:
+        return None
+    n = float(m.group(1)) * (1.609344 if m.group(2) else 1.0)
+    return n if 5 <= n <= 160 else None
 
 
 class RoadNetwork:
@@ -288,8 +361,8 @@ class RoadNetwork:
         if lanes is None:
             lanes = def_lanes if not e.oneway else (2 if e.cls in ("motorway", "trunk") else 1)
         lanes = int(max(1, min(lanes, 8)))
-        e.lanes, e.lane_w, e.shoulder = lanes, lane_w, shoulder
-        e.speed = _num(t.get("maxspeed"), speed) or speed
+        e.lanes, e.lane_w, e.shoulder = lanes, lane_w * regions.active().lane_mult, shoulder
+        e.speed = _velocidad(t.get("maxspeed")) or speed
         e.sigma, e.prio = sigma, prio
         surf = t.get("surface")
         if surf in C.SURFACE_MAP:
@@ -368,6 +441,12 @@ class RoadNetwork:
             # acotamiento solo fuera de poblado
             if not e.urban and "width" not in e.tags:
                 e.hw += e.shoulder
+            # carriles de estacionamiento (OSM parking:* o, en ciudad, el valor por defecto de la
+            # región): en el centro de EE. UU. casi toda calle tiene uno a cada lado y sin ellos
+            # la calzada salía estrecha y la banqueta, anchísima
+            if "width" not in e.tags and not e.tunnel and not e.bridge:
+                e.parking = _estacionamiento(e.tags, e.cls, e.urban)
+                e.hw += e.parking / 2.0
             e.sidewalk = e.urban and e.cls in C.SIDEWALK_CLASSES and not e.tunnel
         self.edges = [e for e in self.edges if e.P is not None and len(e.P) >= 2 and e.s[-1] > 0.5]
 
@@ -465,6 +544,12 @@ class RoadNetwork:
                 a[0] += val * w
                 a[1] += w
         self.node_z = {n: v[0] / v[1] for n, v in acc.items()}
+        self._libres = {}
+        self._estructuras_en_cadena()
+        # tierra sobre el túnel (gálibo + 1.5 m) y transición junto a la boca: la rampa de bajada
+        # es la calle de antes (sin tunnel=yes en OSM y ya hundida en el MDT), así que en la boca
+        # el túnel ya está bajo tierra y basta con unos metros
+        cobertura, rampa = 7.3, 20.0
         for e in self.edges:
             za, zb = self.node_z[e.a], self.node_z[e.b]
             t = e.s / max(e.s[-1], 1e-6)
@@ -472,6 +557,16 @@ class RoadNetwork:
                 L = e.s[-1]
                 crest = (min(1.5, 0.01 * L) if e.bridge else 0.0) * 4 * t * (1 - t)
                 e.Z = za + (zb - za) * t + crest
+                if e.tunnel:
+                    # el túnel va bajo tierra en todo su recorrido, no en línea recta entre bocas
+                    # (la calle o el parque de encima se metían dentro): cobertura completa salvo
+                    # en los primeros metros junto a cada boca
+                    ca = np.ones_like(e.s) if e.a in self._libres else np.clip(e.s / rampa, 0, 1)
+                    cb = np.ones_like(e.s) if e.b in self._libres else np.clip((L - e.s) / rampa, 0, 1)
+                    zt = np.minimum(e.Z, prof[e.id] - cobertura * np.minimum(ca, cb))
+                    dz = gaussian_filter1d(zt - e.Z, 6.0, mode="nearest") if len(zt) > 6 else zt - e.Z
+                    dz[[0, -1]] = 0.0
+                    e.Z = e.Z + np.minimum(dz, 0.0)
             else:
                 # corrección hacia la altura del nodo con una campana coseno (pendiente nula en el
                 # nodo): no cambia la pendiente de la calle al cruzar, solo sube o baja la zona
@@ -480,7 +575,54 @@ class RoadNetwork:
                 D = max(min(12.0, L * 0.5), min(60.0, L * 0.5))
                 wa = 0.5 * (1 + np.cos(np.pi * np.clip(e.s / D, 0, 1)))
                 wb = 0.5 * (1 + np.cos(np.pi * np.clip((L - e.s) / D, 0, 1)))
-                e.Z = zs + (za - zs[0]) * wa + (zb - zs[-1]) * wb
+                e.Z = _acuerdos_verticales(e.s, zs + (za - zs[0]) * wa + (zb - zs[-1]) * wb, e.speed)
+
+    def _estructuras_en_cadena(self, cobertura=7.3):
+        """Nodos intermedios de un túnel (o de un viaducto) partido en varios tramos de OSM.
+
+        Su altura salía del terreno de la superficie: el túnel subía a la calle en cada nodo
+        intermedio (techo y muros asomando, pozos, losas inclinadas en las bocas) y el viaducto
+        bajaba al fondo del valle. Ahora se interpolan a lo largo de la cadena entre los nodos
+        que tocan calles normales (las bocas o estribos), y en los túneles se exige que el techo
+        quede bajo el terreno (`cobertura` = gálibo + 1.5 m de tierra encima)."""
+        inc = {}
+        for e in self.edges:
+            for n in (e.a, e.b):
+                inc.setdefault(n, []).append(e)
+        libres = {}
+        for n, es in inc.items():
+            if all(e.tunnel for e in es):
+                libres[n] = "tunel"
+            elif all(e.bridge for e in es):
+                libres[n] = "puente"
+        self._libres = libres
+        if not libres:
+            return
+        vec = {n: [] for n in libres}
+        for e in self.edges:
+            L = max(float(e.s[-1]), 1.0)
+            for n, m in ((e.a, e.b), (e.b, e.a)):
+                if n in vec and n != m:
+                    vec[n].append((m, 1.0 / L))
+        z = dict(self.node_z)
+        tope = {}
+        for n, k in libres.items():
+            if k == "tunel":
+                x, y = self.node_xy[n]
+                tope[n] = float(self.dem_z(np.array([x]), np.array([y]))[0]) - cobertura
+        for _ in range(400):                       # Gauss-Seidel: media ponderada de los vecinos
+            cambio = 0.0
+            for n, vs in vec.items():
+                if not vs:
+                    continue
+                nz = sum(z[m] * w for m, w in vs) / sum(w for _, w in vs)
+                if n in tope:
+                    nz = min(nz, tope[n])
+                cambio = max(cambio, abs(nz - z[n]))
+                z[n] = nz
+            if cambio < 1e-3:
+                break
+        self.node_z = z
 
     def _merge_forks(self, max_angle=50.0):
         """Bifurcaciones de ángulo cerrado: mientras las dos calzadas se enciman en planta, comparten
@@ -718,11 +860,13 @@ def wall_strip(points_bottom, height, u_scale=4.0, v_scale=3.0, both=True):
 
 
 def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, urban_poly=None, log=print,
-                osm_guardrails=False, ortho=None, proj=None):
+                osm_guardrails=False, ortho=None, proj=None, rails=None):
     """Genera calzadas, cruces, rayas, topes, banquetas, defensas, puentes y túneles.
 
     Devuelve un dict con los datos que necesitan el terreno, la vegetación y la textura del suelo.
     """
+    net.cruces_a_nivel = []
+    net.huella_tunel = []    # polígonos de tramos en túnel y de cruces totalmente subterráneos
     carve_pts = []   # (x, y, z, radio_plano)
     road_polys = []
     surf_pts = []    # puntos de superficie para consultar altura (banquetas)
@@ -763,22 +907,26 @@ def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, u
                 pg = Polygon(ring).buffer(0)
                 if not pg.is_empty:
                     road_polys.append((pg, e))
+                    if e.tunnel:
+                        net.huella_tunel.append(pg)
             dense = _svals(e, a, b, 1.0)
             cen = e.at(dense, 0.0)
             if e.tunnel:
-                tunnel_pts.append(np.column_stack([cen, np.full(len(cen), e.hw + 1.0)]))
+                tunnel_pts.append(np.column_stack([cen, np.full(len(cen), e.hw + 0.6)]))
             elif not e.bridge:
                 # puntos a lo ancho de la sección con su altura real (incluye el peralte):
                 # interiores con radio pequeño y las orillas con el margen plano exterior
-                margin = (C.SIDEWALK_WIDTH + 0.4) if e.sidewalk else 0.8
+                margin = (regions.active().sidewalk_w + 0.4) if e.sidewalk else 0.8
                 offs = np.linspace(-e.hw, e.hw, max(3, int(2 * e.hw / 1.0) + 1))
                 S, O = np.meshgrid(dense, offs, indexing="ij")
                 sec = e.at(S.ravel(), O.ravel())
                 rad = np.where(np.abs(O.ravel()) >= e.hw - 1e-6, margin, 0.75)
                 carve_pts.append(np.column_stack([sec, rad]))
-            # orillas de la calzada cada metro: de aquí sale la altura de las banquetas
-            for o in (-e.hw, e.hw):
-                surf_pts.append(e.at(dense, o))
+            # orillas de la calzada cada metro: de aquí sale la altura de las banquetas (no las de
+            # los túneles: van por debajo y torcían las banquetas de la calle de encima)
+            if not e.tunnel:
+                for o in (-e.hw, e.hw):
+                    surf_pts.append(e.at(dense, o))
 
     # ---- cruces
     for nid, j in net.junctions.items():
@@ -871,7 +1019,15 @@ def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, u
             uv = verts / TEX_SCALE.get(best.mat, 4.0)
             scene.add("calzada", best.mat, pos, uv, faces, phys=best.phys)
         road_polys.append((poly, best))
+        if (best.tunnel or best.bridge) and any(not (e.tunnel or e.bridge) for e, _ in inc):
+            # cruce a nivel de calle aunque la vía principal sea un túnel o un puente (su boca)
+            net.cruces_a_nivel.append(poly)
         stats["cruces"] += 1
+        if all(e.tunnel for e, _ in inc):
+            # cruce subterráneo: forma parte de la huella del túnel, no de la calle de arriba
+            tunnel_pts.append(np.column_stack([pos, np.full(len(pos), 1.0)]))
+            net.huella_tunel.append(poly)
+            continue
         if not rb_node and len(inc) >= 2:
             _corner_fillets(net, scene, inc, poly, best, refp, refz, road_polys, carve_pts, surf_pts)
         carve_pts.append(np.column_stack([pos, np.full(len(pos), 1.2)]))
@@ -896,6 +1052,8 @@ def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, u
 
     # ---- rayas, pasos peatonales y topes
     _markings(net, scene, stats)
+    if rails:
+        stats["vias_m"] = _rieles(scene, rails, carve_pts)
     _crossings_and_bumps(net, scene, stats)
 
     # ---- banquetas
@@ -910,16 +1068,78 @@ def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, u
     # ---- defensas, fantasmas, puentes, túneles
     _roadside(net, scene, stats, osm_guardrails)
     _structures(net, scene)
+    tun = np.vstack(tunnel_pts) if tunnel_pts else np.zeros((0, 4))
+    tunnel_poly, tunnel_bocas = _tunnels(scene, road_polys, tun, surf_all, net.huella_tunel)         if len(tun) else (None, [])
 
     carve = np.vstack(carve_pts) if carve_pts else np.zeros((0, 4))
-    tun = np.vstack(tunnel_pts) if tunnel_pts else np.zeros((0, 4))
     log(f"  carreteras: {stats['km']:.1f} km, {stats['cruces']} cruces, {stats['topes']} topes, "
-        f"{stats['pasos']} pasos peatonales, {stats['defensa_m']:.0f} m de defensa")
-    return {"carve": carve, "tunnel": tun, "road_union": road_union, "road_polys": road_polys,
+        f"{stats['pasos']} pasos peatonales, {stats['defensa_m']:.0f} m de defensa"
+        + (f", {stats['vias_m']:.0f} m de vías de tranvía" if stats.get("vias_m") else ""))
+    ground = [pg for pg, e in road_polys if not (e.tunnel or e.bridge)] + net.cruces_a_nivel
+    return {"carve": carve, "tunnel": tun, "tunnel_poly": tunnel_poly, "tunnel_bocas": tunnel_bocas,
+            "road_union": road_union,
+            "ground_union": unary_union(ground) if ground else None, "road_polys": road_polys,
             "sidewalks": sw_poly, "stats": stats}
 
 
 # --------------------------------------------------------------------------------------
+def _rieles(scene, rails, carve_pts, ancho=0.075):
+    """Vías de tranvía o de cable car embebidas en la calzada (railway=tram / light_rail de OSM):
+    dos carriles de acero a ras del asfalto, a la altura real de la calle en cada punto (con su
+    peralte). Solo donde la vía va por una calzada; las de plataforma propia no se modelan."""
+    if not carve_pts:
+        return 0.0
+    sec = np.vstack(carve_pts)
+    sec = sec[sec[:, 3] <= 1.0]                      # calzada y cruces (no los márgenes de banqueta)
+    if not len(sec):
+        return 0.0
+    tree = cKDTree(sec[:, :2])
+    total = 0.0
+    for r in rails:
+        c = np.asarray(r["xy"], float)
+        if len(c) < 2:
+            continue
+        gauge = _num(r["tags"].get("gauge"), 1435.0) / 1000.0
+        if not (0.6 < gauge < 2.0):
+            gauge = 1.435
+        L = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(c, axis=0), axis=1))])
+        s = np.arange(0, L[-1], 1.0)
+        if len(s) < 2:
+            continue
+        P = np.column_stack([np.interp(s, L, c[:, 0]), np.interp(s, L, c[:, 1])])
+        T = tangents(P)
+        Nn = np.column_stack([-T[:, 1], T[:, 0]])
+        for lado in (-1, 1):
+            q = P + Nn * lado * gauge / 2
+            d, ii = tree.query(q, k=3)
+            en_calle = d[:, 0] < 0.9
+            w = 1.0 / (d + 0.2) ** 2
+            z = (w * sec[ii, 2]).sum(1) / w.sum(1) + 0.012
+            i = 0
+            while i < len(q) - 1:                    # tramos seguidos sobre calzada
+                if not en_calle[i]:
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < len(q) and en_calle[j + 1]:
+                    j += 1
+                if j - i >= 2:
+                    a = q[i:j + 1] + Nn[i:j + 1] * ancho / 2
+                    b = q[i:j + 1] - Nn[i:j + 1] * ancho / 2
+                    pos = np.vstack([np.column_stack([a, z[i:j + 1]]), np.column_stack([b, z[i:j + 1]])])
+                    n = j - i + 1
+                    k = np.arange(n - 1)
+                    faces = np.concatenate([np.column_stack([k, k + n, k + 1]), np.column_stack([k + 1, k + n, k + n + 1])])
+                    tri = pos[faces]
+                    if (np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])[:, 2] < 0).mean() > 0.5:
+                        faces = faces[:, ::-1]
+                    uv = np.column_stack([np.r_[s[i:j + 1], s[i:j + 1]] / 2.0, np.r_[np.zeros(n), np.ones(n)]])
+                    scene.add("rayas", "riel", pos, uv, faces)
+                    total += (j - i) * 0.5
+                i = j + 1
+    return total
+
+
 def _add_skirts(scene, skirts, road_union):
     """Faldón de 0.8 m bajo cada orilla de calzada, salvo donde lo de fuera es otra calzada."""
     other = road_union.buffer(-0.05) if road_union is not None else None
@@ -1207,9 +1427,11 @@ def _markings(net, scene, stats):
                 seg_b = sv[j] if j < len(sv) else e.length
                 sa, sb = max(a, seg_a), min(b, seg_b)
                 if sb - sa > 0.5:
-                    if e.lanes >= 4:
-                        _line(scene, e, sa, sb, 0.12, w, cmat)
-                        _line(scene, e, sa, sb, -0.12, w, cmat)
+                    if e.lanes >= 4 or (R.center_double and not can_pass[i]):
+                        # doble continua: separación de 4 in (0.10 m) entre rayas en EE. UU.
+                        sep = 0.5 * w + (0.05 if R.center_double else 0.07)
+                        _line(scene, e, sa, sb, sep, w, cmat)
+                        _line(scene, e, sa, sb, -sep, w, cmat)
                     else:
                         _line(scene, e, sa, sb, 0.0, w, cmat, dash if can_pass[i] else None)
                 i = j
@@ -1241,8 +1463,20 @@ def _crossings_and_bumps(net, scene, stats):
         tc = tags.get("traffic_calming")
         cr = tags.get("highway") == "crossing" or "crossing" in tags
         for e, s in where[nid]:
-            if not any(a + 1 < s < b - 1 for a, b in net.ranges(e, e.s0, e.s1)):
-                continue
+            rngs = net.ranges(e, e.s0, e.s1)
+            if not any(a + 1 < s < b - 1 for a, b in rngs):
+                # paso de peatones dentro de la zona recortada del cruce (en EE. UU. casi todos están
+                # en la esquina misma): se pone justo a la salida del cruce en vez de perderlo
+                if not cr or tc:
+                    continue
+                if e.s0 - 15.0 < s <= e.s0 + 1.5:
+                    s = e.s0 + 1.8
+                elif e.s1 - 1.5 <= s < e.s1 + 15.0:
+                    s = e.s1 - 1.8
+                else:
+                    continue
+                if not any(a + 1 < s < b - 1 for a, b in rngs):
+                    continue
             if tc and tc not in ("no", "island", "chicane", "choker"):
                 if tc == "rumble_strip":
                     L, H, flat = 0.5, 0.015, 0.0
@@ -1276,6 +1510,68 @@ def _crossings_and_bumps(net, scene, stats):
             break
 
 
+def _trocear(poly, cell, tile=48.0):
+    """Corta un polígono en la rejilla de `cell` m. En dos niveles: primero en teselas de `tile` m
+    (múltiplo de `cell`) y luego cada trozo en celdas. La red de banquetas de un centro urbano es
+    un solo polígono de miles de vértices y cortarlo directamente contra miles de celdas recorría
+    el polígono entero cada vez (~20 s en el centro de Madrid)."""
+    x0, y0, x1, y1 = poly.bounds
+    if (x1 - x0) <= cell and (y1 - y0) <= cell:
+        return [poly]
+    tx = np.arange(math.floor(x0 / tile) * tile, x1, tile)
+    ty = np.arange(math.floor(y0 / tile) * tile, y1, tile)
+    tiles = shapely.intersection(poly, [shapely.box(x, y, x + tile, y + tile) for x in tx for y in ty])
+    out = []
+    for t in tiles:
+        if t.is_empty:
+            continue
+        a, b, c, d = t.bounds
+        gx = np.arange(math.floor(a / cell) * cell, c, cell)
+        gy = np.arange(math.floor(b / cell) * cell, d, cell)
+        GX, GY = (m.ravel() for m in np.meshgrid(gx, gy, indexing="ij"))
+        boxes = shapely.box(GX, GY, GX + cell, GY + cell)
+        out += [g for g in shapely.intersection(t, boxes) if not g.is_empty]
+    return out
+
+
+def _a_nivel(road_polys, surf_all, tol=1.5):
+    """Trozos de calzada en túnel o puente que van a la altura de las calles de alrededor (bocas
+    y estribos). Las banquetas se recortan contra ellos; contra el resto del túnel o del puente
+    no, porque pasan por debajo o por encima de la calle y cortaban sus banquetas. Sin esto, la
+    banqueta de la calle de al lado cruzaba la calzada a la salida del túnel (un escalón)."""
+    if not len(surf_all):
+        return []
+    tree = cKDTree(surf_all[:, :2])
+    out = []
+    vistos = set()
+    for _, e in road_polys:
+        if not (e.tunnel or e.bridge) or id(e) in vistos:
+            continue
+        vistos.add(id(e))
+        s = np.arange(e.s0, e.s1 + 1e-6, 1.0)
+        if len(s) < 2:
+            continue
+        c = e.at(s, 0.0)
+        d, ii = tree.query(c[:, :2])
+        nivel = (d < e.hw + 6.0) & (np.abs(surf_all[ii, 2] - c[:, 2]) < tol)
+        i = 0
+        while i < len(s):
+            if not nivel[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < len(s) and nivel[j + 1]:
+                j += 1
+            sv = s[max(0, i - 1):min(len(s), j + 2)]
+            if len(sv) >= 2:
+                ring = np.vstack([e.at(sv, e.hw + 0.3)[:, :2], e.at(sv, -e.hw - 0.3)[::-1, :2]])
+                pg = Polygon(ring).buffer(0)
+                if not pg.is_empty:
+                    out.append(pg)
+            i = j + 1
+    return out
+
+
 def _sidewalks(net, scene, road_polys, road_union, surf_all, buildings_poly, water_poly, urban_poly):
     """Banquetas con guarnición.
 
@@ -1285,10 +1581,14 @@ def _sidewalks(net, scene, road_polys, road_union, surf_all, buildings_poly, wat
     polígono se trocea en celdas de 3 m para que haya vértices a lo ancho y la superficie siga
     la pendiente. Devuelve también puntos para tallar el terreno debajo de toda la banqueta.
     """
-    sw_src = [p for p, e in road_polys if e.sidewalk]
+    # solo calles de superficie: un túnel va por debajo y un puente por encima de la calle que
+    # cruzan; con ellos, la banqueta de esa calle se cortaba o tomaba la altura equivocada
+    sw_src = [p for p, e in road_polys if e.sidewalk and not (e.tunnel or e.bridge)]
     if not sw_src:
         return None, np.zeros((0, 4))
-    belt = unary_union([p.buffer(C.SIDEWALK_WIDTH, join_style=1, quad_segs=6) for p in sw_src])   # esquinas redondeadas
+    road_union = unary_union([p for p, e in road_polys if not (e.tunnel or e.bridge)] +
+                             _a_nivel(road_polys, surf_all) + getattr(net, "cruces_a_nivel", []))
+    belt = unary_union([p.buffer(regions.active().sidewalk_w, join_style=1, quad_segs=6) for p in sw_src])   # esquinas redondeadas
     sw = belt.difference(road_union.buffer(0.02))
     if urban_poly is not None:
         sw = sw.intersection(urban_poly)
@@ -1334,14 +1634,7 @@ def _sidewalks(net, scene, road_polys, road_union, surf_all, buildings_poly, wat
                 medians.append(poly)
             continue
         # trocear en celdas para tener vértices interiores
-        x0, y0, x1, y1 = poly.bounds
-        pieces = [poly]
-        if (x1 - x0) > cell or (y1 - y0) > cell:
-            gx = np.arange(math.floor(x0 / cell) * cell, x1, cell)
-            gy = np.arange(math.floor(y0 / cell) * cell, y1, cell)
-            boxes = [shapely.box(x, y, x + cell, y + cell) for x in gx for y in gy]
-            inter = shapely.intersection(poly, boxes)
-            pieces = [g for g in inter if not g.is_empty]
+        pieces = _trocear(poly, cell)
         for piece in pieces:
             for pg in iter_polys(piece):
                 if pg.area < 0.01:
@@ -1452,8 +1745,9 @@ def _roadside(net, scene, stats, osm_guardrails=False):
 
 
 def _structures(net, scene):
+    """Puentes (barandilla, losa y pilas). Los túneles se hacen aparte con su huella conjunta."""
     for e in net.edges:
-        if not (e.bridge or e.tunnel):
+        if not e.bridge:
             continue
         for a, b in net.ranges(e, 0.0, e.length):
             sv = _svals(e, a, b)
@@ -1484,15 +1778,138 @@ def _structures(net, scene):
                         yaw = math.atan2(*e.frame(sp)[::-1])
                         p, uv, f = box_mesh((c[0], c[1], gz - 1.0), (1.4, e.hw * 1.2, hgt + 1.0), yaw)
                         scene.add("puente", "puente", p, uv, f, phys="WALL")
-            else:
-                for side in (-1, 1):
-                    o = side * (e.hw + 0.6)
-                    base = e.at(sv, o)
-                    pts = base[::-1] if side < 0 else base   # cara hacia adentro
-                    p, uv, f = wall_strip(pts, 5.8, both=False)
-                    scene.add("tunel", "muro", p, uv, f, phys="WALL")
-                p, uv, f = strip(e, sv, [-e.hw - 0.6, e.hw + 0.6], dz=5.8)
-                scene.add("tunel", "muro", p, uv, f[:, ::-1])
+
+TUNEL_ALTO = 5.8      # altura libre del túnel sobre la calzada (m)
+TUNEL_HOLGURA = 0.6   # del borde de la calzada al muro (m)
+
+
+def _tunnels(scene, road_polys, tunnel_pts, ground_surf, huella_polys=None):
+    """Túneles: muros y techo sobre la huella conjunta de todas las calzadas en túnel.
+
+    Antes cada tramo levantaba sus propios muros: en las bifurcaciones y cruces subterráneos el
+    muro de un ramal atravesaba la calzada del otro, y entre tramos seguidos quedaban huecos y
+    escalones. Ahora se une la huella de todos los tramos (y sus cruces), se levanta el muro por
+    el contorno y se cubre con un techo; el contorno queda abierto solo en las bocas, donde
+    sigue una calzada a la misma altura. Devuelve la huella (para el terreno y la vegetación)."""
+    # solo tramos en túnel y cruces totalmente subterráneos: el polígono de un cruce de boca (cuya
+    # calle principal es el túnel) abarca la rampa de superficie, y el terreno se subía encima
+    polys = huella_polys if huella_polys is not None else [pg for pg, e in road_polys if e.tunnel]
+    if not polys or not len(tunnel_pts):
+        return None, []
+    # cierre de 2 m: dos tramos seguidos cuyas huellas no llegan a tocarse (un nodo sin polígono de
+    # cruce, un recorte) dejaban cada uno su muro de cierre atravesando la calzada
+    foot = unary_union(polys).buffer(TUNEL_HOLGURA + 2.0, join_style=2, mitre_limit=2.0)
+    foot = foot.buffer(-2.0, join_style=2, mitre_limit=2.0)
+    foot = foot.buffer(-0.3).buffer(0.3)         # sin astillas entre tramos casi paralelos
+    tz = cKDTree(tunnel_pts[:, :2])
+    # bocas: solo el corte transversal donde un tramo de túnel sigue en una calle normal. Antes
+    # contaba como boca cualquier tramo de contorno pegado a una calle de superficie a la misma
+    # altura, y una rampa que corre junto al muro dejaba todo ese lateral sin muro ni terreno
+    aristas = list({id(e): e for _, e in road_polys}.values())
+    inc = {}
+    for e in aristas:
+        for nd in (e.a, e.b):
+            inc.setdefault(nd, []).append(e)
+    cortes = []
+    for e in aristas:
+        if not e.tunnel:
+            continue
+        for nd, s in ((e.a, e.s0), (e.b, e.s1)):
+            if any(not o.tunnel for o in inc.get(nd, [])):
+                p1, p2 = e.at(s, e.hw + 2.0)[:2], e.at(s, -e.hw - 2.0)[:2]
+                cortes.append(LineString([p1, p2]))
+    cortes_u = unary_union(cortes) if cortes else None
+    gs = cKDTree(ground_surf[:, :2]) if len(ground_surf) else None
+
+    def z_tunel(xy):
+        d, ii = tz.query(xy, k=min(4, len(tunnel_pts)))
+        d, ii = np.atleast_2d(d), np.atleast_2d(ii)
+        w = 1.0 / (d + 0.3) ** 2
+        return (w * tunnel_pts[ii, 2]).sum(1) / w.sum(1)
+
+    bocas = []
+    for pg in iter_polys(foot):
+        pg = shapely.geometry.polygon.orient(pg, -1.0)       # exterior horario: el interior a la derecha
+        for ring in [pg.exterior] + list(pg.interiors):
+            r = np.asarray(shapely.segmentize(ring, 1.5).coords)[:, :2]
+            # el muro mira a la derecha del avance: se comprueba de qué lado queda de verdad el
+            # interior del túnel (con la orientación del anillo había muros mirando hacia fuera,
+            # invisibles desde dentro, y por ellos se veía el cielo)
+            if len(r) >= 3:
+                t_ = r[1:] - r[:-1]
+                ln = np.maximum(np.linalg.norm(t_, axis=1), 1e-9)[:, None]
+                der = (r[:-1] + r[1:]) / 2 + np.column_stack([t_[:, 1], -t_[:, 0]]) / ln * 0.3
+                if shapely.contains_xy(pg, der[:, 0], der[:, 1]).mean() < 0.5:
+                    r = r[::-1]
+            z = z_tunel(r)
+            # boca: el contorno pasa por el corte transversal de un extremo de túnel que sigue en
+            # una calle normal
+            boca = np.zeros(len(r), bool)
+            if cortes_u is not None:
+                boca = shapely.dwithin(cortes_u, shapely.points(r), 1.2)
+            mid_boca = boca[:-1] & boca[1:]
+            # tramos de contorno abiertos (bocas), con su altura, para el muro frontal del terreno.
+            # El anillo es cerrado: una boca que pasa por el punto de inicio sale partida en dos
+            # trozos (uno al final y otro al principio) y se vuelven a unir
+            runs = []
+            k = 0
+            while k < len(mid_boca):
+                if mid_boca[k]:
+                    m = k
+                    while m + 1 < len(mid_boca) and mid_boca[m + 1]:
+                        m += 1
+                    runs.append([k, m])
+                    k = m + 1
+                else:
+                    k += 1
+            piezas = [np.column_stack([r[a_:b_ + 2], z[a_:b_ + 2]]) for a_, b_ in runs]
+            if len(runs) >= 2 and runs[0][0] == 0 and runs[-1][1] == len(mid_boca) - 1:
+                piezas = [np.vstack([piezas[-1], piezas[0][1:]])] + piezas[1:-1]
+            bocas += piezas
+            i = 0
+            while i < len(r) - 1:
+                if mid_boca[i]:
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < len(r) - 1 and not mid_boca[j + 1]:
+                    j += 1
+                # el muro baja hasta 1.6 m bajo la calzada: sin rendija con el suelo
+                seg = np.column_stack([r[i:j + 2], z[i:j + 2] - 1.6])
+                p, uv, f = wall_strip(seg, TUNEL_ALTO + 1.6, u_scale=4.0, v_scale=TUNEL_ALTO + 1.6, both=False)
+                scene.add("tunel", "tunel_pared", p, uv, f, phys="WALL")
+                i = j + 1
+        # suelo de servicio entre la calzada y el muro (sin él, por la rendija se veía el vacío);
+        # sale unos metros por cada boca para tapar la franja donde se quita el terreno
+        for piece in _trocear(pg, 6.0):
+            for pp in iter_polys(piece):
+                v, f = triangulate_polygon(pp, 3.0)
+                if len(f):
+                    pos = np.column_stack([v, z_tunel(v) - 0.35])   # bajo la calzada aunque tenga peralte
+                    scene.add("tunel", "concreto", pos, v / 3.0, f if _up(pos, f) else f[:, ::-1])
+        # techo: hacia abajo (se ve desde dentro) y hacia arriba (donde el terreno queda más bajo).
+        # Troceado en celdas de 6 m para que tenga vértices dentro y siga la pendiente: con solo
+        # los del contorno salían triángulos larguísimos que cruzaban el cielo
+        for piece in _trocear(pg, 6.0):
+            for pp in iter_polys(piece):
+                v, f = triangulate_polygon(pp, 3.0)
+                if not len(f):
+                    continue
+                pos = np.column_stack([v, z_tunel(v) + TUNEL_ALTO])
+                up = _up(pos, f)
+                scene.add("tunel", "tunel_techo", pos, v / 8.0, f[:, ::-1] if up else f)
+                # cara de arriba de la losa, 30 cm más alta: en el mismo plano que la de abajo, las
+                # dos caras parpadeaban (z-fighting) y el techo se veía moteado
+                top = pos + np.array([0.0, 0.0, 0.3])
+                scene.add("tunel", "tunel_techo", top, v / 8.0, f if up else f[:, ::-1])
+    return foot, bocas
+
+
+def _up(pos, f):
+    """¿Las caras de f miran hacia arriba? (por la mayoría de triángulos)."""
+    t = pos[f]
+    nz = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])[:, 2]
+    return (nz > 0).mean() > 0.5
 
 
 # --------------------------------------------------------------------------------------

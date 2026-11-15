@@ -30,6 +30,8 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+# alturas de edificios de Overture Maps (EE. UU.); sin él la pista se genera sin esas alturas
+overture = ["pyarrow>=17"]
 
 [project.urls]
 Homepage = "https://github.com/theopenlaps/openlaps"

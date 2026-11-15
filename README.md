@@ -13,8 +13,9 @@ style, vegetation and the best open orthophoto and elevation sources available t
 | Region | Markings | Roofs | Orthophoto | Elevation |
 |---|---|---|---|---|
 | Mexico (`mx`) | yellow centre line (NOM-034) | flat roof with water tank | Sentinel-2, 10 m | Copernicus 30 m or INEGI CEM (`--dem`) |
-| Spain (`es`) | white, Norma 8.2-IC | hipped tile roofs | **PNOA, 25 cm** | **IGN MDT05, 5 m** |
+| Spain (`es`) | white, Norma 8.2-IC | hipped tile roofs; **real floor counts from the Catastro** | **PNOA, 25 cm** | **IGN MDT05, 5 m** |
 | France (`fr`) | white | tile / slate | **BD ORTHO, 20 cm** | Copernicus 30 m |
+| United States (`us`) | double yellow centre line (MUTCD), mph signs | asphalt shingles; flat roofs from 4 floors; glass towers; **Overture heights** | **NAIP, 60 cm** | **USGS 3DEP, 1 m** |
 | Europe (`eu`) and generic | white | pitched | Sentinel-2 | Copernicus 30 m |
 
 The region is detected from the coordinates; `--region es` (or `mx`, `fr`, `eu`, `generic`) forces it.
@@ -48,19 +49,25 @@ openlaps --centro 19.43,-99.13 --tam 800 --dem CEM_V3_..._R15.tif
 `python -m openlaps` works too. Run `openlaps --help` for every option.
 
 Output goes to `salida/`: `<name>.glb`, `<name>_cenital.jpg` (baked aerial view),
-`<name>.json` (stats) and, with `--ac`, the track folder `salida/assetto_corsa/<name>/`.
+`<name>_cobertura.jpg` (what every spot is: water, sea, forest, rock, sand..., and where OSM and the
+satellite disagree about water), `<name>.json` (stats) and, with `--ac`, the track folder `salida/assetto_corsa/<name>/`.
 See [docs/assetto-corsa.md](docs/assetto-corsa.md) to install and test it in the game.
 
-Downloads are cached in `~/.cache/openlaps` (override with `OPENLAPS_CACHE`).
+Downloads are cached in `~/.cache/openlaps` (override with `OPENLAPS_CACHE`): OSM and Catastro data,
+orthophoto, elevation, WorldCover, canopy and Sentinel-2 crops (Sentinel-2 refreshes monthly) and
+the generated asphalt textures. Downloads run in parallel. Central Madrid (800 m) takes ~80 s the
+first time and ~35 s afterwards.
 
 **Viewer**: run `python -m http.server` in the project folder and open
 `http://localhost:8000/viewer/?glb=../salida/tepoztlan.glb`, or open the viewer and use
 "Abrir .glb". You can drive in it (keyboard or touch buttons), with a timer and chainage on stages.
+With `&cam=x,y,z&mira=x,y,z` (`.glb` coordinates) it opens in free view looking at that point, handy to
+inspect a specific spot.
 
 Useful options: `--modo libre|tramo|circuito` (free / stage / circuit), `--ruta "lat,lon;lat,lon"`,
 `--region`, `--temporada seca|lluvias` (dry / rainy season), `--vegetacion 0.5` (fewer trees),
 `--res` (terrain mesh), `--mpp` (ground texture resolution), `--sin-orto`, `--sin-satelite`,
-`--sin-dosel`, `--sin-horizonte`, `--sin-microsoft`, `--sin-cc0`.
+`--sin-dosel`, `--sin-horizonte`, `--sin-microsoft`, `--sin-catastro`, `--sin-cc0`.
 
 ## Data sources (all open)
 
@@ -70,11 +77,14 @@ Useful options: `--modo libre|tramo|circuito` (free / stage / circuit), `--ruta 
 | Building footprints | Microsoft Global ML Building Footprints | ODbL |
 | Elevation | Copernicus GLO-30 (automatic) or INEGI CEM 3.0 / LiDAR (local file) | Copernicus / INEGI free use |
 | Land cover | ESA WorldCover 2021, 10 m | CC BY 4.0 |
-| Satellite imagery | Sentinel-2 L2A (10 m) via Element84 / AWS | Copernicus open licence |
+| Satellite imagery and water index (NDWI) | Sentinel-2 L2A (10 m) via Element84 / AWS | Copernicus open licence |
 | Real trees | Meta/WRI Global Canopy Height 1 m | CC BY 4.0 |
 | Photographic textures | ambientCG | CC0 |
 | Orthophoto and elevation, Spain | PNOA 25 cm and MDT05 5 m (IGN) | CC BY 4.0 |
+| Buildings and floor counts, Spain | Catastro (DG del Catastro, INSPIRE service) | Catastro licence / CC BY 4.0 |
 | Orthophoto, France | BD ORTHO 20 cm (IGN) | Licence Ouverte 2.0 |
+| Orthophoto and elevation, USA | NAIP 60 cm (USDA) and 3DEP 1 m (USGS) | Public domain |
+| Building heights, USA | Overture Maps (includes USGS lidar); needs `pyarrow` | ODbL 1.0 |
 
 Exact credit lines are in [ATTRIBUTION.md](ATTRIBUTION.md). Every generated track includes an
 `ATRIBUCIONES.txt` with the sources it used: **keep it when you share a track.**
@@ -108,13 +118,20 @@ multilayer shader.
 10. **Sidewalks**: polygon geometry (road buffer minus roadway, inside the urban area) with kerbs.
 11. **Buildings**: extrusion with roof shape and colours from OSM when available, regional
     styles otherwise (flat roofs with water tanks in Mexico, hipped roofs in Europe), industrial
-    sheds and churches with bell towers.
-12. **Vegetation**: individual crowns from local maxima of the canopy height, plus fill for
+    sheds and churches with bell towers. In Spain footprints and heights come from the Catastro:
+    every building part with its floors above ground (one piece per parcel and height), inheriting
+    colours and type from OSM; churches keep their OSM footprint.
+12. **Water**: OSM lakes, reservoirs and rivers (also those drawn as lines, with their width), the
+    sea from the coastline and water the satellite sees (Sentinel-2 NDWI) even if OSM lacks it.
+    Still water sits at its shoreline level; rivers follow the valley floor. The bed is carved and
+    the bank lowered to the water; where a road without a bridge crosses, there is no water.
+    Intermittent streams are dry beds in the dry season.
+13. **Vegetation**: individual crowns from local maxima of the canopy height, plus fill for
     closed canopy; species from land cover and altitude. Thinned near the road.
-13. **Details**: soft road edges, tyre tracks, street lights at night, signs, guard rails (real
+14. **Details**: soft road edges, tyre tracks, street lights at night, signs, guard rails (real
     ones from OSM `barrier=guard_rail`, heuristic on high embankments), roadside posts, trunks
     and poles with collision, invisible wall at the area edge and a 5 km satellite horizon.
-14. **Stage or circuit mode**: route points snap to the nearest road and the route is computed
+15. **Stage or circuit mode**: route points snap to the nearest road and the route is computed
     with Dijkstra respecting one-way streets. Adds start and finish gantries, side-street
     barriers, grid, AI line and TV cameras.
 
@@ -147,6 +164,16 @@ furniture, facades with per-floor door/window atlases, and LOD for distant trees
 
 - `tools/render.py`: CPU renderer (numba) to check a `.glb` without a GPU.
   On ARM use `NUMBA_CPU_NAME=generic`.
+- `tools/defectos.py`: finds geometric defects in a `.glb` (tilted road or sidewalk slabs, steps in
+  the road surface) and renders close-ups of the worst spots.
+- `tools/cobertura.py`: what every spot of an area is (water, sea, forest, rock, sand...) without
+  generating the track, with OSM vs satellite water mismatches; handy to scout nature areas.
+- `tools/referencias.py`: downloads real street-level photos of an area with position and heading
+  (Panoramax, Mapillary with `MAPILLARY_TOKEN`, Wikimedia Commons), preferring 360° panoramas and
+  empty streets; night shots are dropped automatically and `hoja.jpg` helps flag the rest by hand.
+- `tools/comparar_fotos.py`: renders the `.glb` from each photo's pose (refining heading, pitch,
+  zoom and a few metres of GPS error) and writes a real / model / blend / edges panel per photo, with
+  sky IoU and skyline difference, plus an `index.html` with a swipe slider.
 - `tools/comparar_ruta.py`: driver views every N metres along a stage, on one sheet
   (`--referencia` puts real-road frames side by side).
 - `tools/probar_ac.ps1`: links the track into Assetto Corsa, starts a practice and checks the log.

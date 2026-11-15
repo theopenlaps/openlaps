@@ -6,8 +6,11 @@
   TERRENO, mejor para México; se le pasa al programa como archivo local (--dem archivo.tif).
 - ESA WorldCover 10 m 2021 (© ESA WorldCover project, CC BY 4.0): tipo de cobertura de suelo.
 """
+import functools
+import json
 import math
 import os
+from datetime import date
 
 import numpy as np
 import rasterio
@@ -17,12 +20,40 @@ from rasterio.windows import from_bounds
 from pyproj import Transformer
 from scipy.ndimage import map_coordinates
 
-from .cache import UA
+from .cache import UA, cache_path
 
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
 os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
 os.environ.setdefault("GDAL_HTTP_MAX_RETRY", "3")
 os.environ.setdefault("GDAL_HTTP_RETRY_DELAY", "2")
+
+
+_TRANSFORMERS = {}
+
+
+def _transformer(epsg_src, crs_dst):
+    k = (epsg_src, crs_dst)
+    if k not in _TRANSFORMERS:
+        _TRANSFORMERS[k] = Transformer.from_crs(f"EPSG:{epsg_src}", crs_dst, always_xy=True)
+    return _TRANSFORMERS[k]
+
+
+def _transformar(tr, x, y, n=33):
+    """Transforma muchos puntos a otro sistema. Con más de 50 000 puntos se transforma solo una
+    rejilla de n x n sobre su caja y el resto se interpola (bilineal): en las distancias de una
+    pista el cambio de proyección es casi afín y el error queda en milímetros, frente a píxeles
+    de 25 cm o más. Antes se transformaba cada píxel de cada tesela, uno por uno."""
+    if x.size < 50000:
+        return tr.transform(x, y)
+    x0, x1, y0, y1 = float(x.min()), float(x.max()), float(y.min()), float(y.max())
+    gx, gy = np.linspace(x0, x1, n), np.linspace(y0, y1, n)
+    GX, GY = np.meshgrid(gx, gy)
+    TX, TY = tr.transform(GX, GY)
+    TX, TY = np.asarray(TX, float), np.asarray(TY, float)
+    c = (x - x0) / max(x1 - x0, 1e-9) * (n - 1)
+    r = (y - y0) / max(y1 - y0, 1e-9) * (n - 1)
+    return (map_coordinates(TX, [r, c], order=1, mode="nearest"),
+            map_coordinates(TY, [r, c], order=1, mode="nearest"))
 
 
 class Raster:
@@ -37,19 +68,54 @@ class Raster:
     def sample(self, proj, x, y, order=1, mode="nearest"):
         x = np.asarray(x, float)
         y = np.asarray(y, float)
-        lon, lat = proj.to_lonlat(x.ravel(), y.ravel())
-        if str(self.crs).upper() not in ("EPSG:4326", "OGC:CRS84"):
-            tr = Transformer.from_crs("EPSG:4326", self.crs, always_xy=True)
-            lon, lat = tr.transform(lon, lat)
+        # de la UTM local directamente al sistema del ráster (sin pasar por lat/lon), con el
+        # transformador reutilizado: crearlo en cada llamada costaba ~5 s por pista
+        lon, lat = _transformar(_transformer(proj.epsg, str(self.crs)), x.ravel() + proj.ox, y.ravel() + proj.oy)
         inv = ~self.transform
         col, row = inv * (lon, lat)
         # centro de pixel -> índice
         coords = np.vstack([np.asarray(row) - 0.5, np.asarray(col) - 0.5])
+        # se interpola directamente sobre los datos (uint8 o float32) con salida en float32: antes
+        # se copiaba el ráster entero a float32 en cada llamada (la ortofoto, 54 MB por banda)
         if self.data.ndim == 3:
-            return np.stack([map_coordinates(b.astype(np.float32), coords, order=order, mode=mode).reshape(x.shape)
+            return np.stack([map_coordinates(b, coords, order=order, mode=mode, output=np.float32).reshape(x.shape)
                              for b in self.data], -1)
-        out = map_coordinates(self.data.astype(np.float32), coords, order=order, mode=mode)
+        out = map_coordinates(self.data, coords, order=order, mode=mode, output=np.float32)
         return out.reshape(x.shape)
+
+
+def _cacheado(nombre, mensual=False):
+    """Guarda en disco (~/.cache/openlaps) el recorte ráster que devuelve la función.
+
+    Los COG remotos (Copernicus, WorldCover, dosel, Sentinel-2) se leían por HTTP en cada
+    ejecución: ~45 s de cada generación. La clave es la caja redondeada y los argumentos; con
+    `mensual`, también el mes en curso (Sentinel-2 busca las escenas más recientes)."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrap(bbox, *args, log=print, **kw):
+            key = json.dumps([nombre, [round(v, 6) for v in (bbox.south, bbox.west, bbox.north, bbox.east)],
+                              list(args), kw, date.today().strftime("%Y-%m") if mensual else None])
+            path = cache_path(key, ".raster.npz")
+            if os.path.exists(path):
+                try:
+                    with np.load(path, allow_pickle=False) as z:
+                        meta = json.loads(str(z["meta"]))
+                        r = Raster(z["data"], rasterio.Affine(*meta["transform"]), meta["crs"], meta["nodata"])
+                    S2_YEARS.update(meta.get("s2_years", []))
+                    log(f"  {nombre}: desde la caché")
+                    return r
+                except Exception:  # noqa: BLE001 - caché corrupta: se vuelve a descargar
+                    os.remove(path)
+            antes = set(S2_YEARS)
+            r = fn(bbox, *args, log=log, **kw)
+            if r is not None:
+                meta = {"transform": list(r.transform)[:6], "crs": str(r.crs), "nodata": r.nodata,
+                        "s2_years": sorted(S2_YEARS - antes)}
+                np.savez(path + ".part.npz", data=r.data, meta=json.dumps(meta))
+                os.replace(path + ".part.npz", path)
+            return r
+        return wrap
+    return deco
 
 
 def _copernicus_url(lat, lon):
@@ -82,6 +148,7 @@ def _read_tiles(urls, bbox, fill, log):
     return Raster(arr[0], tr, crs, nodata=fill)
 
 
+@_cacheado("relieve Copernicus")
 def copernicus_dem(bbox, log=print):
     urls = []
     for la in range(math.floor(bbox.south), math.floor(bbox.north) + 1):
@@ -93,6 +160,7 @@ def copernicus_dem(bbox, log=print):
     return r
 
 
+@_cacheado("WorldCover")
 def worldcover(bbox, log=print):
     urls = []
     for la in range(math.floor(bbox.south / 3) * 3, math.floor(bbox.north / 3) * 3 + 1, 3):
@@ -124,12 +192,8 @@ STAC = "https://earth-search.aws.element84.com/v1/search"
 S2_YEARS = set()   # años de las escenas usadas en esta ejecución
 
 
-def sentinel2(bbox, season="seca", log=print):
-    """Imagen en color real de 10 m sin nubes (TCI de Sentinel-2 L2A en COG público).
-
-    Busca escenas de la temporada pedida (seca: nov-abr; lluvias: jul-oct) de los dos últimos
-    años, ordenadas por nubosidad, y mezcla hasta tres para tapar huecos de borde de tesela.
-    """
+def _s2_items(bbox, season, log):
+    """Escenas Sentinel-2 L2A de la temporada pedida, de menos a más nubes."""
     import json
     import urllib.request
     from datetime import date
@@ -150,6 +214,24 @@ def sentinel2(bbox, season="seca", log=print):
             log(f"  aviso: búsqueda Sentinel-2 falló ({e})")
         if len(feats) >= 3:
             break
+    return feats
+
+
+def _read_window(href, bbox):
+    with rasterio.open("/vsicurl/" + href) as ds:
+        b = transform_bounds("EPSG:4326", ds.crs, bbox.west, bbox.south, bbox.east, bbox.north)
+        win = from_bounds(*b, ds.transform).round_offsets().round_lengths()
+        return ds.read(window=win, boundless=True, fill_value=0), ds.window_transform(win), ds.crs
+
+
+@_cacheado("Sentinel-2", mensual=True)
+def sentinel2(bbox, season="seca", log=print):
+    """Imagen en color real de 10 m sin nubes (TCI de Sentinel-2 L2A en COG público).
+
+    Busca escenas de la temporada pedida (seca: nov-abr; lluvias: jul-oct) de los dos últimos
+    años, ordenadas por nubosidad, y mezcla hasta tres para tapar huecos de borde de tesela.
+    """
+    feats = _s2_items(bbox, season, log)
     if not feats:
         return None
     acc = None
@@ -159,12 +241,7 @@ def sentinel2(bbox, season="seca", log=print):
         if not href:
             continue
         try:
-            with rasterio.open("/vsicurl/" + href) as ds:
-                b = transform_bounds("EPSG:4326", ds.crs, bbox.west, bbox.south, bbox.east, bbox.north)
-                win = from_bounds(*b, ds.transform).round_offsets().round_lengths()
-                arr = ds.read(window=win, boundless=True, fill_value=0)
-                tr = ds.window_transform(win)
-                crs = ds.crs
+            arr, tr, crs = _read_window(href, bbox)
         except Exception as e:  # noqa: BLE001
             log(f"  aviso: no se pudo leer {f['id']}: {e.__class__.__name__}")
             continue
@@ -186,6 +263,43 @@ def sentinel2(bbox, season="seca", log=print):
     return Raster(acc, acc_tr, acc_crs)
 
 
+@_cacheado("NDWI Sentinel-2", mensual=True)
+def sentinel2_ndwi(bbox, season="seca", log=print):
+    """Índice de agua NDWI = (verde - infrarrojo) / (verde + infrarrojo) a 10 m (bandas B03 y B08).
+
+    El agua libre da valores > 0.2; la vegetación y el suelo, negativos. Sirve para ver dónde hay
+    agua de verdad aunque OSM no la tenga dibujada (o al revés: embalses bajos, ramblas secas)."""
+    feats = _s2_items(bbox, season, log)
+    acc, used = None, []
+    for f in feats[:6]:
+        g, n = f["assets"].get("green", {}).get("href"), f["assets"].get("nir", {}).get("href")
+        if not g or not n:
+            continue
+        try:
+            ga, tr, crs = _read_window(g, bbox)
+            na, _, _ = _read_window(n, bbox)
+        except Exception as e:  # noqa: BLE001
+            log(f"  aviso: NDWI no se pudo leer {f['id']}: {e.__class__.__name__}")
+            continue
+        ga, na = ga[0].astype(np.float32), na[0].astype(np.float32)
+        ok = (ga > 0) & (na > 0)
+        nd = np.where(ok, (ga - na) / np.maximum(ga + na, 1), np.nan)
+        if acc is None:
+            acc, acc_tr, acc_crs = nd, tr, crs
+            used.append(f["id"])
+        elif crs == acc_crs and nd.shape == acc.shape:
+            hole = np.isnan(acc) & ~np.isnan(nd)
+            if hole.any():
+                acc[hole] = nd[hole]
+                used.append(f["id"])
+        if acc is not None and not np.isnan(acc).any():
+            break
+    if acc is None:
+        return None
+    S2_YEARS.update(s.split("_")[2][:4] for s in used if s.count("_") >= 2)
+    return Raster(np.nan_to_num(acc, nan=-1.0), acc_tr, acc_crs)
+
+
 def _qk(lat, lon, z=9):
     n = 2 ** z
     x = int((lon + 180) / 360 * n)
@@ -198,6 +312,7 @@ def _qk(lat, lon, z=9):
     return q
 
 
+@_cacheado("altura de dosel")
 def canopy_height(bbox, log=print):
     """Altura de dosel de 1 m (Tolan et al. 2024, Meta / WRI), en metros."""
     keys = sorted({_qk(la, lo) for la in (bbox.south, bbox.north) for lo in (bbox.west, bbox.east)})
@@ -231,6 +346,12 @@ ORTHO_WMS = {
 }
 
 
+# servicios ArcGIS ImageServer (exportImage): NAIP de EE. UU. (USDA, 60 cm, dominio público)
+ORTHO_ARCGIS = {
+    "naip": ("https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPPlus/ImageServer/exportImage", 4000),
+}
+
+
 def ortho(bbox, source, mpp=0.25, log=print):
     """Ortofoto RGB del área pedida a `mpp` metros por pixel (aprox.), por teselas WMS en EPSG:3857.
 
@@ -239,7 +360,8 @@ def ortho(bbox, source, mpp=0.25, log=print):
     from PIL import Image
     import rasterio.transform
     from .cache import fetch
-    url, layer, maxpx = ORTHO_WMS[source]
+    arcgis = source in ORTHO_ARCGIS
+    url, layer, maxpx = ORTHO_WMS[source] if not arcgis else (ORTHO_ARCGIS[source][0], None, ORTHO_ARCGIS[source][1])
     tr = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
     x0, y0 = tr.transform(bbox.west, bbox.south)
     x1, y1 = tr.transform(bbox.east, bbox.north)
@@ -255,8 +377,12 @@ def ortho(bbox, source, mpp=0.25, log=print):
             w, h = min(step, W - c0), min(step, H - r0)
             bx0, bx1 = x0 + c0 * res, x0 + (c0 + w) * res
             by1, by0 = y1 - r0 * res, y1 - (r0 + h) * res
-            q = (f"{url}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS={layer}&STYLES=&CRS=EPSG:3857"
-                 f"&BBOX={bx0:.2f},{by0:.2f},{bx1:.2f},{by1:.2f}&WIDTH={w}&HEIGHT={h}&FORMAT=image/jpeg")
+            if arcgis:
+                q = (f"{url}?bbox={bx0:.2f},{by0:.2f},{bx1:.2f},{by1:.2f}&bboxSR=3857&imageSR=3857&size={w},{h}"
+                     f"&format=jpg&bandIds=0,1,2&compressionQuality=90&f=image")
+            else:
+                q = (f"{url}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS={layer}&STYLES=&CRS=EPSG:3857"
+                     f"&BBOX={bx0:.2f},{by0:.2f},{bx1:.2f},{by1:.2f}&WIDTH={w}&HEIGHT={h}&FORMAT=image/jpeg")
             try:
                 path = fetch(q, ext=".jpg", log=log)
                 img = Image.open(path).convert("RGB")
@@ -270,6 +396,38 @@ def ortho(bbox, source, mpp=0.25, log=print):
         return None
     log(f"  ortofoto {source}: {W}x{H} px (~{mpp:.2f} m/px)")
     return Raster(out, rasterio.transform.from_origin(x0, y1, res, res), "EPSG:3857")
+
+
+def dem_3dep(bbox, mpp=1.0, log=print):
+    """Relieve del TERRENO de EE. UU.: USGS 3DEP (1 m donde hay LiDAR, si no 10 m), dominio público.
+
+    Una petición exportImage al ImageServer dinámico, que mezcla la mejor fuente disponible.
+    El servicio a veces responde 502: `fetch` reintenta, y una respuesta que no es un GeoTIFF
+    válido no se guarda en la caché."""
+    from .cache import fetch
+    tr = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    x0, y0 = tr.transform(bbox.west, bbox.south)
+    x1, y1 = tr.transform(bbox.east, bbox.north)
+    k = 1.0 / math.cos(math.radians((bbox.south + bbox.north) / 2))
+    W = int(min(4000, math.ceil((x1 - x0) / (mpp * k))))
+    H = int(min(4000, math.ceil((y1 - y0) / (mpp * k))))
+    q = ("https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
+         f"?bbox={x0:.2f},{y0:.2f},{x1:.2f},{y1:.2f}&bboxSR=3857&imageSR=3857&size={W},{H}&format=tiff"
+         "&pixelType=F32&interpolation=RSP_BilinearInterpolation&noData=-9999&f=image")
+    path = fetch(q, ext=".tif", log=log)
+    try:
+        with rasterio.open(path) as ds:
+            arr = ds.read(1, masked=True)
+            tr_ds, crs = ds.transform, ds.crs
+    except Exception:
+        os.remove(path)
+        raise
+    arr = np.ma.masked_less(arr, -1000)
+    if arr.count() == 0:
+        raise RuntimeError("3DEP vacío en esta zona")
+    data = arr.filled(float(np.ma.median(arr))).astype(np.float32)
+    log(f"  3DEP (USGS): {W}x{H} px (~{mpp:.0f} m), {data.min():.0f}-{data.max():.0f} m")
+    return Raster(data, tr_ds, crs)
 
 
 def mdt05(bbox, log=print):
