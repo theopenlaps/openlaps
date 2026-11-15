@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=77"]   # license = "MIT" (expresión SPDX) necesita setuptools 77+
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openlaps"
+dynamic = ["version"]
+description = "Open generator of drivable 3D tracks (glTF and Assetto Corsa) from real places, using only open data."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "mapbox_earcut>=2.1",
+    "numba>=0.60",
+    "numpy>=2.0",
+    "pillow>=10.0",
+    "pyproj>=3.6",
+    "rasterio>=1.4",
+    "scipy>=1.13",
+    "shapely>=2.0",
+]
+keywords = ["assetto-corsa", "openstreetmap", "procedural-generation", "gltf", "racing", "gis"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Games/Entertainment :: Simulation",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/theopenlaps/openlaps"
+Issues = "https://github.com/theopenlaps/openlaps/issues"
+
+[project.scripts]
+openlaps = "openlaps.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "openlaps.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["openlaps*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+
+[tool.ruff.lint]
+# solo errores reales: sintaxis, nombres indefinidos e imports sin usar
+select = ["E9", "F63", "F7", "F82", "F401"]

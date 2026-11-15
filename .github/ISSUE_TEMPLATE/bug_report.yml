@@ -1,0 +1,40 @@
+name: Bug / problema con una pista
+description: Something looks or drives wrong / algo se ve o se maneja mal
+labels: [bug]
+body:
+  - type: textarea
+    id: command
+    attributes:
+      label: Command / comando
+      description: The exact openlaps command you ran (coordinates, size, mode, route)
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong / qué está mal
+      description: Screenshots help a lot, ideally next to a photo of the real place
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where / dónde
+      options:
+        - Generation (error or crash) / generación
+        - Web viewer (.glb) / visor web
+        - Assetto Corsa
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Console output, or for Assetto Corsa the relevant part of log.txt and custom_shaders_patch.log
+      render: text
+  - type: input
+    id: env
+    attributes:
+      label: Environment / entorno
+      placeholder: "Windows 11, Python 3.12, openlaps 0.2.0, CSP 0.2.x"

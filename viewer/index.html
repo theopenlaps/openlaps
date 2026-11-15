@@ -1,0 +1,531 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Visor openlaps</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&display=swap">
+<style>
+/* Concepto: tablero de manejo sobre la escena 3D a pantalla completa; el amarillo de raya central es el único acento. */
+:root {
+  --asfalto: #15171a;
+  --asfalto-2: #1f2226;
+  --linea: #3a3f46;
+  --texto: #eceae4;
+  --texto-2: #a9adb3;
+  --amarillo: #e8b21e;
+  --rojo: #d9483b;
+  --verde: #4caf6a;
+  --vidrio: rgba(21, 23, 26, 0.78);
+  --f-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --f-texto: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; margin: 0; }
+body { background: var(--asfalto); color: var(--texto); font: 15px/1.45 var(--f-texto); overflow: hidden; }
+#lienzo { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+.barra {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 5;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding-top: calc(10px + env(safe-area-inset-top, 0px)); padding-bottom: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: linear-gradient(var(--vidrio), transparent);
+  pointer-events: none;
+}
+.barra > * { pointer-events: auto; }
+.marca { font: 700 20px/1 var(--f-display); letter-spacing: 0.04em; text-transform: uppercase; margin-right: auto; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.marca i { width: 26px; height: 4px; background: var(--amarillo); display: inline-block; box-shadow: 0 8px 0 var(--texto-2); transform: translateY(-4px); }
+.marca span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+button, .boton {
+  font: 600 14px/1 var(--f-display); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--texto); background: var(--asfalto-2); border: 1px solid var(--linea); border-radius: 6px;
+  padding: 9px 12px; cursor: pointer; min-height: 38px; display: inline-flex; align-items: center; gap: 6px;
+}
+button:hover, .boton:hover { border-color: var(--texto-2); }
+button:focus-visible, .boton:focus-within { outline: 2px solid var(--amarillo); outline-offset: 2px; }
+button[aria-pressed="true"] { background: var(--amarillo); color: var(--asfalto); border-color: var(--amarillo); }
+.boton input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+.hud {
+  position: fixed; z-index: 5; left: max(16px, env(safe-area-inset-left, 0px));
+  top: calc(70px + env(safe-area-inset-top, 0px));
+  display: grid; gap: 4px; padding: 10px 14px; background: var(--vidrio); border-left: 3px solid var(--amarillo);
+  font-family: var(--f-display); font-variant-numeric: tabular-nums; min-width: 150px;
+}
+.hud .vel { font-size: 44px; font-weight: 700; line-height: 1; }
+.hud .vel small { font-size: 16px; color: var(--texto-2); margin-left: 4px; font-weight: 500; }
+.hud .fila { display: flex; justify-content: space-between; gap: 14px; font-size: 15px; color: var(--texto-2); letter-spacing: 0.04em; text-transform: uppercase; }
+.hud .fila b { color: var(--texto); font-weight: 600; }
+.hud .crono { font-size: 26px; font-weight: 700; color: var(--amarillo); }
+.hud .crono.fin { color: var(--verde); }
+
+.info {
+  position: fixed; z-index: 5; right: max(16px, env(safe-area-inset-right, 0px));
+  top: calc(70px + env(safe-area-inset-top, 0px));
+  font: 500 13px/1.5 var(--f-display); letter-spacing: 0.05em; text-transform: uppercase; color: var(--texto-2);
+  text-align: right; background: var(--vidrio); padding: 8px 12px; font-variant-numeric: tabular-nums;
+}
+
+.mandos {
+  position: fixed; z-index: 6; left: 0; right: 0; bottom: 0;
+  display: flex; justify-content: space-between; align-items: flex-end; gap: 12px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  pointer-events: none; user-select: none; -webkit-user-select: none;
+}
+.mandos .grupo { display: flex; gap: 12px; pointer-events: auto; }
+.tecla {
+  width: 76px; height: 76px; border-radius: 50%; border: 2px solid var(--linea); background: var(--vidrio);
+  display: grid; place-items: center; color: var(--texto); touch-action: none;
+  font: 700 15px/1 var(--f-display); letter-spacing: 0.06em;
+}
+.tecla.on { border-color: var(--amarillo); color: var(--amarillo); }
+.tecla svg { width: 30px; height: 30px; stroke: currentColor; fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.tecla.acel { width: 84px; height: 108px; border-radius: 14px; }
+.tecla.freno { width: 76px; height: 76px; border-radius: 14px; }
+
+.vacio {
+  position: fixed; inset: 0; z-index: 4; display: grid; place-items: center;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.vacio .caja { max-width: 440px; display: grid; gap: 14px; }
+.vacio h1 { font: 700 34px/1.05 var(--f-display); text-transform: uppercase; letter-spacing: 0.02em; margin: 0; text-wrap: balance; }
+.vacio p { margin: 0; color: var(--texto-2); }
+.vacio code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 13px; color: var(--texto); background: var(--asfalto-2); padding: 2px 6px; border-radius: 4px; word-break: break-all; }
+.progreso { height: 4px; background: var(--asfalto-2); overflow: hidden; }
+.progreso div { height: 100%; width: 0; background: var(--amarillo); transition: width .2s; }
+.aviso { color: var(--rojo); }
+
+@media (max-width: 560px) {
+  .hud { top: auto; bottom: calc(140px + env(safe-area-inset-bottom, 0px)); min-width: 120px; }
+  .hud .vel { font-size: 36px; }
+  .info { display: none; }
+  .tecla { width: 66px; height: 66px; }
+  .tecla.acel { width: 74px; height: 96px; }
+  .tecla.freno { width: 66px; height: 66px; }
+}
+@media (hover: hover) and (pointer: fine) { .mandos { display: none; } }
+@media (prefers-reduced-motion: reduce) { .progreso div { transition: none; } }
+</style>
+
+<canvas id="lienzo" aria-label="Escena 3D de la pista"></canvas>
+
+<header class="barra">
+  <div class="marca"><i aria-hidden="true"></i><span id="nombre">openlaps</span></div>
+  <button id="b-modo" aria-pressed="true" title="Cambiar entre manejar y vista libre (tecla V)">Manejar</button>
+  <button id="b-cam" title="Cámara de persecución o de cabina (tecla C)">Cámara</button>
+  <button id="b-reinicio" title="Volver a la salida (tecla R)">Salida</button>
+  <button id="b-calidad" aria-pressed="false" title="Sombras y más resolución (gasta más batería)">Alta</button>
+  <label class="boton" title="Abrir un archivo .glb generado con openlaps">Abrir .glb<input id="archivo" type="file" accept=".glb,model/gltf-binary"></label>
+</header>
+
+<div class="hud" id="hud" hidden>
+  <div class="vel"><span id="vel">0</span><small>km/h</small></div>
+  <div class="fila"><span>Cad.</span><b id="cad">—</b></div>
+  <div class="fila"><span>Superficie</span><b id="sup">—</b></div>
+  <div class="crono" id="crono" hidden>0:00.0</div>
+</div>
+<div class="info" id="info" hidden></div>
+
+<div class="mandos" id="mandos" hidden>
+  <div class="grupo">
+    <div class="tecla" data-k="izq" aria-label="Izquierda"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+    <div class="tecla" data-k="der" aria-label="Derecha"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
+  </div>
+  <div class="grupo">
+    <div class="tecla freno" data-k="freno">FRENO</div>
+    <div class="tecla acel" data-k="acel">ACEL</div>
+  </div>
+</div>
+
+<div class="vacio" id="vacio">
+  <div class="caja">
+    <h1 id="v-titulo">Cargando la pista…</h1>
+    <div class="progreso"><div id="barra"></div></div>
+    <p id="v-texto">Las calles, el relieve y los edificios salen de datos abiertos (OpenStreetMap, Copernicus, INEGI, ESA WorldCover, Microsoft) y un algoritmo los convierte en una pista.</p>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.6/build/index.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { computeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+const $ = (id) => document.getElementById(id);
+const SUPERFICIES = { ROAD: "Asfalto", MXCOBBLE: "Empedrado", LOOSE: "Terracería", MXDIRT: "Terracería", PAVEMENT: "Banqueta", GRASS: "Pasto / tierra" };
+const VMAX = { ROAD: 50, MXCOBBLE: 30, LOOSE: 33, MXDIRT: 33, PAVEMENT: 25, GRASS: 16 };   // m/s según superficie
+const AGARRE = { ROAD: 1.0, MXCOBBLE: 0.85, LOOSE: 0.72, MXDIRT: 0.7, PAVEMENT: 0.9, GRASS: 0.5 };
+
+const canvas = $("lienzo");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+let alta = false;
+function ajustarCalidad() {
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, alta ? 2 : 1.25));
+  renderer.shadowMap.enabled = alta;
+  sol.castShadow = alta;
+  scene.traverse((o) => { if (o.material) o.material.needsUpdate = true; });
+}
+
+const scene = new THREE.Scene();
+const CIELO = new THREE.Color(0x9cc3e6);
+scene.background = CIELO;
+scene.fog = new THREE.Fog(CIELO, 250, 1800);
+const camera = new THREE.PerspectiveCamera(62, 1, 0.2, 6000);
+scene.add(new THREE.HemisphereLight(0xdfeeff, 0x6b5a44, 1.35));
+const sol = new THREE.DirectionalLight(0xfff1dc, 2.4);
+sol.position.set(300, 500, 200);
+sol.shadow.mapSize.set(2048, 2048);
+sol.shadow.camera.left = sol.shadow.camera.bottom = -90;
+sol.shadow.camera.right = sol.shadow.camera.top = 90;
+sol.shadow.camera.far = 1500;
+scene.add(sol, sol.target);
+
+const orbit = new OrbitControls(camera, canvas);
+orbit.enableDamping = true;
+orbit.maxPolarAngle = Math.PI * 0.49;
+orbit.enabled = false;
+
+function redimensionar() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", redimensionar);
+
+// ---------------------------------------------------------------- coche
+function hacerCoche() {
+  const g = new THREE.Group();
+  const pintura = new THREE.MeshStandardMaterial({ color: 0xc8352b, roughness: 0.45, metalness: 0.3 });
+  const vidrio = new THREE.MeshStandardMaterial({ color: 0x1c2630, roughness: 0.15, metalness: 0.6 });
+  const llanta = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
+  const cuerpo = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.55, 4.1), pintura);
+  cuerpo.position.y = 0.55;
+  const cabina = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.5, 2.0), vidrio);
+  cabina.position.set(0, 1.05, -0.2);
+  g.add(cuerpo, cabina);
+  const rg = new THREE.CylinderGeometry(0.33, 0.33, 0.25, 16);
+  rg.rotateZ(Math.PI / 2);
+  for (const [x, z] of [[-0.82, 1.3], [0.82, 1.3], [-0.82, -1.3], [0.82, -1.3]]) {
+    const r = new THREE.Mesh(rg, llanta);
+    r.position.set(x, 0.33, z);
+    g.add(r);
+  }
+  g.traverse((o) => { if (o.isMesh) { o.castShadow = true; } });
+  return g;
+}
+const coche = hacerCoche();
+coche.visible = false;
+scene.add(coche);
+
+// ---------------------------------------------------------------- estado
+const st = {
+  pos: new THREE.Vector3(), yaw: 0, v: 0, up: new THREE.Vector3(0, 1, 0),
+  superficie: "ROAD", camara: "persecucion", manejar: true,
+  spawn: null, ruta: null, rutaS: null, iRuta: 0, iIni: 0, iFin: 0,
+  crono: { estado: "listo", t0: 0, t: 0 },
+};
+let suelo = [], muros = [], mundo = null;
+const keys = {};
+const ray = new THREE.Raycaster();
+ray.firstHitOnly = true;
+const ABAJO = new THREE.Vector3(0, -1, 0);
+
+function alturaEn(x, z, y0) {
+  ray.set(new THREE.Vector3(x, y0 + 40, z), ABAJO);
+  ray.far = 200;
+  const h = ray.intersectObjects(suelo, false)[0];
+  return h || null;
+}
+
+function colocarEnSalida() {
+  if (!st.spawn) return;
+  st.pos.copy(st.spawn.pos);
+  st.yaw = Math.atan2(st.spawn.fwd.x, st.spawn.fwd.z);
+  st.v = 0;
+  const h = alturaEn(st.pos.x, st.pos.z, st.pos.y);
+  if (h) st.pos.y = h.point.y;
+  st.crono = { estado: "listo", t0: 0, t: 0 };
+  if (st.ruta) st.iRuta = indiceCercano(st.pos, 0, st.ruta.length);
+  $("crono").hidden = !st.ruta;
+  $("crono").classList.remove("fin");
+}
+
+function indiceCercano(p, a, b) {
+  let best = a, bd = Infinity;
+  const R = st.ruta;
+  for (let i = Math.max(0, a); i < Math.min(R.length, b); i++) {
+    const dx = R[i][0] - p.x, dz = R[i][2] - p.z;
+    const d = dx * dx + dz * dz;
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+
+function cadenamiento(m) {
+  const km = Math.floor(m / 1000), r = Math.floor(m % 1000);
+  return `${km}+${String(r).padStart(3, "0")}`;
+}
+
+function fmtTiempo(s) {
+  const m = Math.floor(s / 60);
+  return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`;
+}
+
+// ---------------------------------------------------------------- carga
+const loader = new GLTFLoader();
+function cargar(url, nombre) {
+  $("vacio").hidden = false;
+  $("v-titulo").textContent = "Cargando la pista…";
+  $("v-texto").textContent = nombre ? `Archivo: ${nombre}` : $("v-texto").textContent;
+  loader.load(url, (gltf) => {
+    try { montar(gltf); } catch (e) { fallo(e); }
+  }, (ev) => {
+    if (ev.total) $("barra").style.width = `${Math.round((ev.loaded / ev.total) * 100)}%`;
+  }, fallo);
+}
+function fallo(err) {
+  $("vacio").hidden = false;
+  $("v-titulo").textContent = "No se pudo abrir la pista";
+  $("v-texto").innerHTML = `<span class="aviso">${(err && err.message) || err}</span><br>Abre un archivo .glb generado con <code>python -m openlaps … </code> usando el botón “Abrir .glb”.`;
+}
+
+function montar(gltf) {
+  if (mundo) { scene.remove(mundo); mundo.traverse((o) => { o.geometry?.dispose?.(); }); }
+  mundo = gltf.scene;
+  scene.add(mundo);
+  suelo = []; muros = [];
+  let tris = 0;
+  mundo.traverse((o) => {
+    if (!o.isMesh) return;
+    const n = o.name;
+    tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
+    o.receiveShadow = true;
+    o.castShadow = /edificios|vegetacion|defensa|puente/.test(n);
+    const m = o.material;
+    if (m.map) { m.map.anisotropy = renderer.capabilities.getMaxAnisotropy(); }
+    if (/^\d(?!WALL)[A-Z]+_/.test(n)) { o.geometry.computeBoundsTree(); suelo.push(o); }
+    else if (/^\dWALL/.test(n)) { o.geometry.computeBoundsTree(); muros.push(o); }
+  });
+  const ex = gltf.parser.json.extras || {};
+  $("nombre").textContent = ex.nombre || "openlaps";
+  // salida
+  let nodo = null;
+  for (const k of ["AC_HOTLAP_START_0", "AC_START_0", "AC_PIT_0"]) { nodo = nodo || mundo.getObjectByName(k); }
+  const caja = new THREE.Box3().setFromObject(mundo);
+  const centro = caja.getCenter(new THREE.Vector3());
+  if (nodo) {
+    const f = nodo.userData.forward || [0, 0, -1];
+    st.spawn = { pos: nodo.position.clone(), fwd: new THREE.Vector3(f[0], 0, f[2]).normalize() };
+  } else {
+    st.spawn = { pos: centro.clone(), fwd: new THREE.Vector3(0, 0, -1) };
+  }
+  st.ruta = ex.ruta || null;
+  if (st.ruta) {
+    st.rutaS = [0];
+    for (let i = 1; i < st.ruta.length; i++) {
+      const a = st.ruta[i - 1], b = st.ruta[i];
+      st.rutaS.push(st.rutaS[i - 1] + Math.hypot(b[0] - a[0], b[2] - a[2]));
+    }
+    const L = st.rutaS[st.rutaS.length - 1];
+    const cerrado = ex.modo === "circuito";
+    const sIni = Math.min(60, L * 0.1), sFin = cerrado ? L : Math.max(L - 30, L * 0.9);
+    st.iIni = st.rutaS.findIndex((s) => s >= sIni);
+    st.iFin = st.rutaS.findIndex((s) => s >= sFin - (cerrado ? 1 : 0));
+    if (st.iFin < 0) st.iFin = st.ruta.length - 1;
+  }
+  const tam = caja.getSize(new THREE.Vector3());
+  scene.fog.far = Math.max(1200, Math.max(tam.x, tam.z) * 1.2);
+  orbit.target.copy(centro);
+  camera.position.copy(centro).add(new THREE.Vector3(-tam.x * 0.45, Math.max(tam.x, tam.z) * 0.45, tam.z * 0.45));
+  $("info").textContent = `${(tam.x / 1000).toFixed(2)} × ${(tam.z / 1000).toFixed(2)} km · ${Math.round(tris).toLocaleString("es-MX")} triángulos`;
+  $("info").hidden = false;
+  $("vacio").hidden = true;
+  colocarEnSalida();
+  modo(true);
+}
+
+$("archivo").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (f) cargar(URL.createObjectURL(f), f.name);
+});
+
+// ---------------------------------------------------------------- controles
+function modo(manejar) {
+  st.manejar = manejar;
+  $("b-modo").setAttribute("aria-pressed", String(manejar));
+  $("b-modo").textContent = manejar ? "Manejar" : "Vista libre";
+  orbit.enabled = !manejar;
+  coche.visible = manejar || st.v !== 0;
+  $("hud").hidden = !manejar;
+  $("mandos").hidden = !manejar;
+  if (!manejar) { orbit.target.copy(st.pos); }
+}
+$("b-modo").onclick = () => modo(!st.manejar);
+$("b-cam").onclick = () => { st.camara = st.camara === "persecucion" ? "cabina" : "persecucion"; };
+$("b-reinicio").onclick = () => colocarEnSalida();
+$("b-calidad").onclick = () => { alta = !alta; $("b-calidad").setAttribute("aria-pressed", String(alta)); ajustarCalidad(); };
+const MAPA = { ArrowUp: "acel", KeyW: "acel", ArrowDown: "freno", KeyS: "freno", ArrowLeft: "izq", KeyA: "izq", ArrowRight: "der", KeyD: "der", Space: "freno" };
+window.addEventListener("keydown", (e) => {
+  if (MAPA[e.code]) { keys[MAPA[e.code]] = true; e.preventDefault(); }
+  if (e.code === "KeyR") colocarEnSalida();
+  if (e.code === "KeyV") modo(!st.manejar);
+  if (e.code === "KeyC") $("b-cam").onclick();
+});
+window.addEventListener("keyup", (e) => { if (MAPA[e.code]) keys[MAPA[e.code]] = false; });
+for (const el of document.querySelectorAll(".tecla")) {
+  const k = el.dataset.k;
+  const on = (e) => { e.preventDefault(); el.setPointerCapture?.(e.pointerId); keys[k] = true; el.classList.add("on"); };
+  const off = () => { keys[k] = false; el.classList.remove("on"); };
+  el.addEventListener("pointerdown", on);
+  el.addEventListener("pointerup", off);
+  el.addEventListener("pointercancel", off);
+  el.addEventListener("lostpointercapture", off);
+}
+
+// ---------------------------------------------------------------- física arcade
+const tmpF = new THREE.Vector3(), tmpR = new THREE.Vector3(), q = new THREE.Quaternion(), m4 = new THREE.Matrix4();
+let dirGiro = 0;
+function fisica(dt) {
+  const acel = keys.acel ? 1 : 0, fren = keys.freno ? 1 : 0;
+  const giro = (keys.izq ? 1 : 0) - (keys.der ? 1 : 0);
+  dirGiro += (giro - dirGiro) * Math.min(1, dt * 6);
+  const vmax = VMAX[st.superficie] ?? 30, agarre = AGARRE[st.superficie] ?? 0.8;
+  if (acel) st.v += (st.v < 0 ? 12 : 6.5 * agarre) * dt;
+  if (fren) st.v -= (st.v > 0.5 ? 11 * agarre : 4) * dt;
+  st.v -= st.v * 0.12 * dt + Math.sign(st.v) * 0.4 * dt;
+  if (st.v > vmax) st.v -= (st.v - vmax) * 2.5 * dt;
+  st.v = Math.max(-8, st.v);
+  if (!acel && !fren && Math.abs(st.v) < 0.25) st.v = 0;
+  const delta = 0.55 * dirGiro / (1 + Math.abs(st.v) / 22);
+  st.yaw += (st.v / 2.6) * Math.tan(delta) * dt;
+  tmpF.set(Math.sin(st.yaw), 0, Math.cos(st.yaw));
+  const paso = st.v * dt;
+  // choque con muros, defensas, vallas y edificios
+  if (muros.length && Math.abs(paso) > 0) {
+    const dir = tmpF.clone().multiplyScalar(Math.sign(paso));
+    ray.set(st.pos.clone().add(new THREE.Vector3(0, 0.7, 0)), dir);
+    ray.far = Math.abs(paso) + 2.2;
+    if (ray.intersectObjects(muros, false)[0]) { st.v = -st.v * 0.25; return; }
+  }
+  st.pos.addScaledVector(tmpF, paso);
+  // altura e inclinación con cuatro rayos (adelante, atrás, izquierda, derecha)
+  tmpR.set(tmpF.z, 0, -tmpF.x);
+  const c = alturaEn(st.pos.x, st.pos.z, st.pos.y);
+  if (c) {
+    st.superficie = (c.object.name.match(/^\d([A-Z]+)/) || [])[1] || "GRASS";
+    st.pos.y += (c.point.y - st.pos.y) * Math.min(1, dt * 18);
+    const f = alturaEn(st.pos.x + tmpF.x * 1.4, st.pos.z + tmpF.z * 1.4, st.pos.y);
+    const b = alturaEn(st.pos.x - tmpF.x * 1.4, st.pos.z - tmpF.z * 1.4, st.pos.y);
+    const l = alturaEn(st.pos.x + tmpR.x * 0.8, st.pos.z + tmpR.z * 0.8, st.pos.y);
+    const r = alturaEn(st.pos.x - tmpR.x * 0.8, st.pos.z - tmpR.z * 0.8, st.pos.y);
+    if (f && b && l && r) {
+      const vf = new THREE.Vector3().subVectors(f.point, b.point).normalize();
+      const vl = new THREE.Vector3().subVectors(l.point, r.point).normalize();
+      const up = new THREE.Vector3().crossVectors(vf, vl).normalize();
+      if (up.y < 0) up.negate();
+      st.up.lerp(up, Math.min(1, dt * 10)).normalize();
+    }
+  }
+  // orientación del coche
+  const fwd = tmpF.clone().projectOnPlane(st.up).normalize();
+  const right = new THREE.Vector3().crossVectors(st.up, fwd).normalize();
+  m4.makeBasis(right.negate(), st.up, fwd);
+  q.setFromRotationMatrix(m4);
+  coche.position.copy(st.pos);
+  coche.quaternion.slerp(q, Math.min(1, dt * 14));
+  // ruta y cronómetro
+  if (st.ruta) {
+    st.iRuta = indiceCercano(st.pos, st.iRuta - 40, st.iRuta + 40);
+    const s = st.rutaS[st.iRuta];
+    $("cad").textContent = cadenamiento(s);
+    const cr = st.crono, ahora = performance.now() / 1000;
+    if (cr.estado === "listo" && st.iRuta >= st.iIni && st.iRuta < st.iIni + 30) { cr.estado = "corriendo"; cr.t0 = ahora; }
+    if (cr.estado === "corriendo") {
+      cr.t = ahora - cr.t0;
+      if (st.iRuta >= st.iFin && cr.t > 3) { cr.estado = "fin"; $("crono").classList.add("fin"); }
+    }
+    $("crono").textContent = cr.estado === "listo" ? "Cruza la salida" : fmtTiempo(cr.t);
+  }
+  $("vel").textContent = Math.round(Math.abs(st.v) * 3.6);
+  $("sup").textContent = SUPERFICIES[st.superficie] || st.superficie;
+}
+
+function camaraManejo(dt) {
+  const fwd = new THREE.Vector3(Math.sin(st.yaw), 0, Math.cos(st.yaw));
+  if (st.camara === "cabina") {
+    const p = st.pos.clone().addScaledVector(fwd, 0.3).add(new THREE.Vector3(0, 1.2, 0));
+    camera.position.copy(p);
+    camera.lookAt(p.clone().addScaledVector(fwd, 20).add(new THREE.Vector3(0, -0.6, 0)));
+    coche.visible = false;
+  } else {
+    coche.visible = true;
+    const deseo = st.pos.clone().addScaledVector(fwd, -7.5).add(new THREE.Vector3(0, 2.9, 0));
+    const suelo2 = alturaEn(deseo.x, deseo.z, deseo.y);
+    if (suelo2 && deseo.y < suelo2.point.y + 1.2) deseo.y = suelo2.point.y + 1.2;
+    camera.position.lerp(deseo, Math.min(1, dt * 5));
+    camera.lookAt(st.pos.clone().add(new THREE.Vector3(0, 1.2, 0)).addScaledVector(fwd, 4));
+  }
+  sol.position.copy(st.pos).add(new THREE.Vector3(120, 220, 80));
+  sol.target.position.copy(st.pos);
+}
+
+// ---------------------------------------------------------------- ciclo
+const reloj = new THREE.Clock();
+function ciclo() {
+  const dt = Math.min(0.05, reloj.getDelta());
+  if (mundo) {
+    if (st.manejar) { fisica(dt); camaraManejo(dt); }
+    else orbit.update();
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(ciclo);
+}
+redimensionar();
+ajustarCalidad();
+ciclo();
+
+// ---------------------------------------------------------------- arranque
+// La escena puede venir como .glb o, donde solo se sirven archivos de texto, como partes
+// base64 (escena.parte1.txt, escena.parte2.txt, …) que se reconstruyen aquí.
+async function cargarPartes() {
+  const trozos = [];
+  for (let i = 1; i < 20; i++) {
+    const r = await fetch(`escena.parte${i}.txt`);
+    if (!r.ok) break;
+    trozos.push(await r.text());
+    $("barra").style.width = `${Math.min(90, i * 30)}%`;
+  }
+  if (!trozos.length) throw new Error("sin escena");
+  const bin = atob(trozos.join("").replace(/\s+/g, ""));
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  loader.parse(buf.buffer, "", (gltf) => { try { montar(gltf); } catch (e) { fallo(e); } }, fallo);
+}
+
+const param = new URLSearchParams(location.search).get("glb");
+const porDefecto = param || "escena.glb";
+fetch(porDefecto, { method: "HEAD" }).then((r) => {
+  if (r.ok) cargar(porDefecto);
+  else return cargarPartes();
+}).catch(() => cargarPartes()).catch(() => {
+  $("v-titulo").textContent = "Abre una pista generada";
+  $("barra").parentElement.hidden = true;
+  $("v-texto").innerHTML = "Genera una escena con <code>python -m openlaps --centro 18.9853,-99.0995 --tam 800 --nombre tepoztlan</code> y ábrela con el botón “Abrir .glb”, o sirve la carpeta del proyecto y entra a <code>viewer/?glb=../salida/tepoztlan.glb</code>.";
+});
+</script>

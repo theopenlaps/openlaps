@@ -1,0 +1,11 @@
+# saltos de línea normalizados a LF en el repo; cada sistema los convierte al hacer checkout
+* text=auto eol=lf
+*.ps1 text eol=crlf
+
+# binarios
+*.png binary
+*.jpg binary
+*.dds binary
+*.kn5 binary
+*.glb binary
+*.tif binary

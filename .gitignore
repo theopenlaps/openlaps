@@ -1,0 +1,26 @@
+# entorno de Python
+.venv/
+__pycache__/
+*.pyc
+
+# resultados generados (pesados; el KN5 del Espinazo pasa de 100 MB, el límite de GitHub)
+salida*/
+
+# material de terceros que no se redistribuye
+recursos/
+
+# cachés de herramientas
+.pytest_cache/
+.ruff_cache/
+
+# empaquetado
+build/
+dist/
+*.egg-info/
+
+# editores y sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

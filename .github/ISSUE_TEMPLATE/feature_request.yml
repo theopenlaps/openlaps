@@ -1,0 +1,16 @@
+name: Idea / feature request
+description: Suggest an improvement, a new country profile or a data source / propone una mejora
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+      description: What would you like OpenLaps to do? / ¿Qué te gustaría que hiciera?
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Open data source (if any) / fuente de datos abierta
+      description: Link and licence of the dataset this would use
