@@ -10,6 +10,7 @@ Solo hay una consulta a Overpass en curso a la vez (el servidor limita las conex
 llega otra zona mientras tanto, se atiende la última y las intermedias se descartan.
 """
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .. import regions
@@ -45,13 +46,18 @@ class Precarga:
         self._pedir_extras(k, bbox)
         return k
 
-    def esperar(self, k, timeout=300):
-        """Datos de Overpass de esa zona; None si otra zona la sustituyó antes de empezar."""
+    def esperar(self, k, timeout=180, cancelar=None):
+        """Datos de Overpass de esa zona; None si otra zona la sustituyó, expira o se cancela."""
+        fin = time.monotonic() + timeout
         with self._cv:
-            ok = self._cv.wait_for(lambda: k in self._hechas or (k != self._en_curso and (self._pendiente or ("",))[0] != k),
-                                   timeout=timeout)
-            if not ok or k not in self._hechas:
-                return None
+            while True:
+                if k in self._hechas:
+                    break
+                if k != self._en_curso and (self._pendiente or ("",))[0] != k:
+                    return None
+                if (cancelar and cancelar()) or time.monotonic() >= fin:
+                    return None
+                self._cv.wait(timeout=0.5)
             r = self._hechas[k]
         if isinstance(r, Exception):
             raise r

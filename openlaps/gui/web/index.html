@@ -365,6 +365,69 @@
     </div>
   </div>
 
+  <details class="aj-grupo aj-vivo">
+    <summary class="aj-vivo-cab">
+      <div class="aj-fila-txt">
+        <span class="etiqueta" data-i18n="aj.vivo_titulo"></span>
+        <p class="ayuda" data-i18n="aj.vivo_desc"></p>
+      </div>
+    </summary>
+    <div class="aj-vivo-cuerpo">
+      <div class="aj-sl">
+        <label class="etiqueta" for="aj-vivo-lado"><span data-i18n="aj.vivo_lado"></span> <b id="val-vivo_lado"></b></label>
+        <input type="range" id="aj-vivo-lado" min="128" max="512" step="32" data-ajuste="vivo_lado">
+        <p class="ayuda" data-i18n="aj.vivo_lado_d"></p>
+      </div>
+      <div class="aj-sl">
+        <label class="etiqueta" for="aj-vivo-margen"><span data-i18n="aj.vivo_margen"></span> <b id="val-vivo_margen"></b></label>
+        <input type="range" id="aj-vivo-margen" min="16" max="160" step="8" data-ajuste="vivo_margen">
+        <p class="ayuda" data-i18n="aj.vivo_margen_d"></p>
+      </div>
+      <div class="aj-sl">
+        <label class="etiqueta" for="aj-vivo-intervalo"><span data-i18n="aj.vivo_intervalo"></span> <b id="val-vivo_intervalo"></b></label>
+        <input type="range" id="aj-vivo-intervalo" min="0.1" max="2.0" step="0.05" data-ajuste="vivo_intervalo">
+        <p class="ayuda" data-i18n="aj.vivo_intervalo_d"></p>
+      </div>
+      <div class="aj-sl">
+        <label class="etiqueta" for="aj-vivo-trabajadores"><span data-i18n="aj.vivo_trabajadores"></span> <b id="val-vivo_trabajadores"></b></label>
+        <input type="range" id="aj-vivo-trabajadores" min="0" max="8" step="1" data-ajuste="vivo_trabajadores">
+        <p class="ayuda" data-i18n="aj.vivo_trabajadores_d"></p>
+      </div>
+      <details class="avanzado aj-avanzado">
+        <summary data-i18n="aj.vivo_mas"></summary>
+        <div class="aj-vivo-sub">
+          <div class="aj-sl">
+            <label class="etiqueta" for="aj-vivo-radio"><span data-i18n="aj.vivo_radio"></span> <b id="val-vivo_radio"></b></label>
+            <input type="range" id="aj-vivo-radio" min="150" max="800" step="25" data-ajuste="vivo_radio">
+          </div>
+          <div class="aj-sl">
+            <label class="etiqueta" for="aj-vivo-radio-fondo"><span data-i18n="aj.vivo_radio_fondo"></span> <b id="val-vivo_radio_fondo"></b></label>
+            <input type="range" id="aj-vivo-radio-fondo" min="300" max="2400" step="100" data-ajuste="vivo_radio_fondo">
+          </div>
+          <div class="aj-sl">
+            <label class="etiqueta" for="aj-vivo-pad-osm"><span data-i18n="aj.vivo_pad_osm"></span> <b id="val-vivo_pad_osm"></b></label>
+            <input type="range" id="aj-vivo-pad-osm" min="50" max="400" step="25" data-ajuste="vivo_pad_osm">
+          </div>
+          <div class="aj-sl">
+            <label class="etiqueta" for="aj-vivo-tesela-osm"><span data-i18n="aj.vivo_tesela_osm"></span> <b id="val-vivo_tesela_osm"></b></label>
+            <input type="range" id="aj-vivo-tesela-osm" min="512" max="2048" step="256" data-ajuste="vivo_tesela_osm">
+          </div>
+          <div class="aj-sl">
+            <label class="etiqueta" for="aj-vivo-r-carga"><span data-i18n="aj.vivo_r_carga"></span> <b id="val-vivo_r_carga"></b></label>
+            <input type="range" id="aj-vivo-r-carga" min="200" max="1000" step="25" data-ajuste="vivo_r_carga">
+          </div>
+          <div class="aj-sl">
+            <label class="etiqueta" for="aj-vivo-r-soltar"><span data-i18n="aj.vivo_r_soltar"></span> <b id="val-vivo_r_soltar"></b></label>
+            <input type="range" id="aj-vivo-r-soltar" min="350" max="1500" step="25" data-ajuste="vivo_r_soltar">
+          </div>
+        </div>
+      </details>
+      <div class="fila-botones" style="justify-content:flex-end">
+        <button class="boton chico" data-accion="restablecer-vivo" data-i18n="aj.vivo_reset"></button>
+      </div>
+    </div>
+  </details>
+
   <div class="aj-grupo acerca">
     <div class="acerca-cabeza">
       <strong>OpenLaps</strong>

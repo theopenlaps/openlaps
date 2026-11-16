@@ -116,3 +116,122 @@ def test_pedazo_recibe_el_tunel_entero():
     # sin túneles no se añade nada
     t.datos[(0, 0)], t.datos[(1, 0)] = [els[0]], []
     assert t.del_pedazo(0, 0)[1] is None
+
+
+def test_recortar_y_cubierto_con_exclusion():
+    s = Scene()
+    _malla_grande(s)
+    _arbol(s, 0, 0)
+    _arbol(s, 200, 0)
+    V.recortar(s, (-300, -300, 300, 300), excluir=(-100, -100, 100, 100))
+    for p in s.pieces[("carretera", "asfalto", "ROAD")]:
+        c = p.pos[p.faces].mean(1)[:, :2]
+        dentro = (c[:, 0] >= -100) & (c[:, 0] < 100) & (c[:, 1] >= -100) & (c[:, 1] < 100)
+        assert not dentro.any()
+    veg = [p for (g, _, _), ps in s.pieces.items() if g == "vegetacion" for p in ps]
+    assert len(veg) == 1 and veg[0].pos[:, 0].mean() > 150
+
+    v = object.__new__(V.Vivo)
+    v.excluir = (-200.0, -200.0, 200.0, 200.0)
+    assert v._cubierto((0, 0)) is True
+    assert v._cubierto((1, 0)) is False
+    v.excluir = (-100.0, -100.0, 100.0, 100.0)
+    assert v._cubierto((0, 0)) is False
+
+
+def test_export_normal_y_vivo_en_espera(tmp_path):
+    from openlaps import export_ac
+
+    ini = export_ac.surfaces_ini()
+    assert "WAV_PITCH=extended-0" in ini
+    assert "[_SCRIPTING_PHYSICS]\nALLOW_TRACK_SCRIPTS=1" in ini
+    assert "WAV_PITCH=extended-0" not in export_ac.surfaces_ini(extendido=False)
+
+    s = Scene()
+    s.textures["det_tierra.png"] = b""
+    s.material("asfalto", "det_tierra.png")
+    s.add("carretera", "asfalto", np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float),
+          np.zeros((3, 2)), [(0, 1, 2)], phys="ROAD")
+    s.add("col", "invisible", np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float),
+          np.zeros((3, 2)), [(0, 1, 2)], phys="WALL")
+    for k in [k for k in s.pieces if k[0] == "col"]:
+        del s.pieces[k]
+    export_ac.agregar_biblioteca(s)
+    assert any(k[:2] == ("biblioteca", "asfalto") for k in s.pieces)
+    assert any(k[:2] == ("biblioteca", "tv_base") for k in s.pieces)
+
+    g = export_ac.georef({"lat": 40.0, "lon": -3.0, "epsg": 32630,
+                          "rect": [-100, -80, 100, 80], "vivo_opc": {"calidad": "rapida"}})
+    assert g["lat0"] == 40.0 and g["lon0"] == -3.0
+    assert g["rect"] == [-100, -80, 100, 80] and g["vivo_opc"] == {"calidad": "rapida"}
+
+    V.escribir_lua(str(tmp_path), "", "", 40.0, -3.0, modo_espera=True,
+                   rect_horneado=[-100, -80, 100, 80], pista="mi_pista")
+    lua_txt = (tmp_path / "extension" / "vivo.lua").read_text(encoding="utf-8")
+    assert "local PISTA_ID = 'mi_pista'" in lua_txt
+    assert "local RECT_HORNEADO = { -100.0, -80.0, 100.0, 80.0 }" in lua_txt
+    assert "local vivoActivo = not true" in lua_txt
+    assert "ui.addSettings" in lua_txt
+
+    assert V.actualizar_control_lua(str(tmp_path), control_url="http://127.0.0.1:9999", pista="nueva",
+                                    lado=320, r_carga=500, r_soltar=750, t_foco=0.8)
+    lua_upd = (tmp_path / "extension" / "vivo.lua").read_text(encoding="utf-8")
+    assert "local CONTROL_URL = 'http://127.0.0.1:9999'" in lua_upd
+    assert "local PISTA_ID = 'nueva'" in lua_upd
+    assert "local L = 320" in lua_upd
+    assert "local R_CARGA, R_SOLTAR = 500, 750" in lua_upd
+    assert "local T_FOCO = 0.8" in lua_upd
+
+
+def test_configurar_parametros_vivo():
+    try:
+        V.configurar(lado=320, margen=96, pad_osm=150, tesela_osm=768)
+        assert V.nucleo(0, 0) == (-160.0, -160.0, 160.0, 160.0)
+        assert V.rect_pedazo(0, 0) == (-406.0, -406.0, 406.0, 406.0)
+        assert V.pedazo_de(170.0, -170.0) == (1, -1)
+        assert V.TeselasOSM.lado == 768.0
+    finally:
+        V.configurar(lado=256.0, margen=64.0, pad_osm=200.0, tesela_osm=1024.0)
+
+
+def test_layer_osm_con_multiples_valores():
+    from openlaps import roads
+    assert roads._layer(None) == 0
+    assert roads._layer("-3;-1") == -1
+    assert roads._layer("-1;0") == 0
+    assert roads._layer("2") == 2
+    assert roads._layer("subsuelo") == 0
+
+
+def test_osm_download_respaldo_api_y_precarga_cancelable(tmp_path, monkeypatch):
+    from openlaps.geo import BBox
+    from openlaps.sources import cache
+
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path))
+
+    def falso_post(*a, **kw):
+        raise TimeoutError("overpass caido")
+
+    llamadas_api = []
+
+    def falsa_api(bb, log=print, timeout=30):
+        llamadas_api.append(bb)
+        return {"elements": [{"type": "node", "id": 1, "lat": bb.south, "lon": bb.west, "tags": {"natural": "tree"}}]}
+
+    monkeypatch.setattr(OSM, "post_form", falso_post)
+    monkeypatch.setattr(OSM, "download_api", falsa_api)
+    out = OSM.download(BBox(19.41, -99.14, 19.42, -99.13), log=lambda *a: None)
+    assert len(llamadas_api) == 1 and len(out["elements"]) == 1
+
+    from openlaps.__main__ import parser as cli_parser
+    ns = cli_parser().parse_args(["--centro=19.43,-99.13", "--ac", "--res", "1.5"])
+    assert not hasattr(ns, "calidad") and ns.res == 1.5
+
+    from openlaps.gui.precarga import Precarga
+    pr = object.__new__(Precarga)
+    import threading
+    pr._cv = threading.Condition()
+    pr._pendiente = ("k1", BBox(0, 0, 1, 1))
+    pr._en_curso = None
+    pr._hechas = {}
+    assert pr.esperar("k1", timeout=5, cancelar=lambda: True) is None

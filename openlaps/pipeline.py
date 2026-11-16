@@ -258,7 +258,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     for w in osm["ways"]:
         # las veredas en túnel (pasillos y accesos del metro) van bajo tierra: no se pintan en la superficie
         if w["tags"].get("highway") in C.PATHS and w["tags"].get("tunnel") in (None, "no") \
-                and int(float(w["tags"].get("layer", "0") or 0)) >= 0:
+                and roads._layer(w["tags"].get("layer")) >= 0:
             x, y = proj.to_local([c[0] for c in w["coords"]], [c[1] for c in w["coords"]])
             paths.append((np.column_stack([x, y]), 1.3))
     paths += [(c, w) for c, w in cob.secos]     # cauces secos (ramblas, arroyos intermitentes)
@@ -347,11 +347,16 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     size = export_glb.write(scene, glb, extras)
     log(f"  {glb} ({size / 1e6:.1f} MB)")
     if args.ac:
+        # el muro invisible de borde queda en el .glb, pero en AC estorbaría si el usuario activa el modo en vivo
+        for k in [k for k in scene.pieces if k[0] == "col"]:
+            del scene.pieces[k]
         thumb = prev.copy()
         thumb.thumbnail((512, 512))
         bio = io.BytesIO()
         thumb.save(bio, "PNG")
         map_lines = [e.at(np.arange(a, b, 2.0), 0.0)[:, :2] for e in net.edges for a, b in e.runs if b - a > 4]
+        sin = [k for k in ("orto", "satelite", "dosel", "horizonte", "microsoft", "catastro", "overture", "cc0")
+               if getattr(args, f"sin_{k}", False)]
         info = {"name": args.titulo or name, "lat": proj.lat0, "lon": proj.lon0, "epsg": proj.epsg,
                 "attribution": ATTRIBUTION.format(
                     s2_years=f" ({', '.join(sorted(rasters.S2_YEARS))})" if rasters.S2_YEARS else "") + "".join("- " + a + chr(10) for a in R.attribution),
@@ -359,7 +364,13 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
                 "tags": [t for t in (R.code, "openlaps", args.modo) if t], "length": length or rd["stats"]["km"] * 1000, "run": info_run,
                 "pitboxes": 8, "preview_png": bio.getvalue(),
                 "ai_hw": route_hw, "width": int(round(float(np.median(route_hw)) * 2)) if route_hw is not None else "",
-                "closed": args.modo == "circuito"}
+                "closed": args.modo == "circuito",
+                "rect": [float(proj.xmin), float(proj.ymin), float(proj.xmax), float(proj.ymax)],
+                "vivo_opc": {"res": getattr(args, "res", None), "mpp": getattr(args, "mpp", None),
+                             "region": args.region, "temporada": args.temporada,
+                             "vegetacion": float(args.vegetacion), "sin": sin,
+                             "dem": getattr(args, "dem", None),
+                             "tuneles": getattr(args, "tuneles", "principales")}}
         export_ac.write_track(scene, os.path.join(args.salida, "assetto_corsa"), name, info, map_lines, route, log=log)
     with open(os.path.join(args.salida, f"{name}.json"), "w", encoding="utf-8") as f:
         json.dump({"area_km2": area_km2, "stats": st, "carreteras": rd["stats"], "cobertura": cob.stats,

@@ -58,7 +58,23 @@ def _estructura(el):
     return t.get("tunnel") not in (None, "no", "building_passage") or t.get("bridge") not in (None, "no")
 
 
-def rect_pedazo(i, j, pad=PAD_OSM):
+def configurar(lado=None, margen=None, pad_osm=None, tesela_osm=None):
+    """Ajusta en caliente los parámetros de tamaño, recorte y descarga de teselas."""
+    global L, MARGEN, PAD_OSM, TESELA_OSM
+    if lado is not None:
+        L = max(64.0, float(lado))
+    if margen is not None:
+        MARGEN = max(8.0, float(margen))
+    if pad_osm is not None:
+        PAD_OSM = max(0.0, float(pad_osm))
+    if tesela_osm is not None:
+        TESELA_OSM = max(256.0, float(tesela_osm))
+        TeselasOSM.lado = TESELA_OSM
+
+
+def rect_pedazo(i, j, pad=None):
+    if pad is None:
+        pad = PAD_OSM
     x0, y0, x1, y1 = nucleo(i, j)
     return (x0 - MARGEN - pad, y0 - MARGEN - pad, x1 + MARGEN + pad, y1 + MARGEN + pad)
 
@@ -75,15 +91,16 @@ def pedazo_de(x, y):
 _W = {}
 
 
-def _iniciar(args_dict, lat0, lon0):
+def _iniciar(args_dict, lat0, lon0, excluir=None, lado=None, margen=None, pad_osm=None, tesela_osm=None):
     from . import pipeline, regions
+    configurar(lado, margen, pad_osm, tesela_osm)
     args = argparse.Namespace(**args_dict)
     regions.set_active(regions.detect(lat0, lon0) if args.region == "auto" else args.region)
-    _W.update(args=args, origen=(lat0, lon0), tex_cache={},
+    _W.update(args=args, origen=(lat0, lon0), excluir=excluir, tex_cache={},
               plantilla=pipeline.preparar_escena(args, log=lambda *a: None))
 
 
-def _escena(i, j, elementos, partes_cat=None, log=None, ext=None):
+def _escena(i, j, elementos, partes_cat=None, log=None, ext=None, excluir=None):
     """Escena del pedazo (i, j), ya recortada a su centro y con el suelo renombrado. Devuelve (escena, terreno)."""
     from . import pipeline
     from .geo import LocalProjection
@@ -98,12 +115,13 @@ def _escena(i, j, elementos, partes_cat=None, log=None, ext=None):
     r = pipeline.run(args, log=log or (lambda m: None), proj=proj, scene=scene,
                      osm_data=OSM.parse({"elements": elementos}), pedazo=(x0, y0, x1, y1), cat_data=partes_cat,
                      extension=ext)
-    recortar(scene, (x0, y0, x1, y1))
+    recortar(scene, (x0, y0, x1, y1), excluir=excluir if excluir is not None else _W.get("excluir"))
     renombrar_terreno(scene, i, j)
     return scene, r["terr"]
 
 
-def _iniciar_precarga(args_dict, lat0, lon0):
+def _iniciar_precarga(args_dict, lat0, lon0, lado=None, margen=None, pad_osm=None, tesela_osm=None):
+    configurar(lado, margen, pad_osm, tesela_osm)
     _W.update(args=argparse.Namespace(**args_dict), origen=(lat0, lon0))
 
 
@@ -124,7 +142,7 @@ def _generar(i, j, elementos, carpeta, partes_cat=None, ext=None):
     log = []
     try:
         scene, _ = _escena(i, j, elementos, partes_cat, log=lambda m: log.append(f"{time.time() - t0:5.1f} {m}"),
-                           ext=ext)
+                           ext=ext, excluir=_W.get("excluir"))
     except Exception:  # noqa: BLE001
         return {"i": i, "j": j, "error": traceback.format_exc(limit=6), "log": log[-12:]}
     x0, y0, x1, y1 = nucleo(i, j)
@@ -141,10 +159,10 @@ def _generar(i, j, elementos, carpeta, partes_cat=None, ext=None):
     return {"i": i, "j": j, "seg": round(time.time() - t0, 1), "tri": n_tri, "log": log}
 
 
-def recortar(scene, caja):
-    """Deja solo lo que cae en el centro del pedazo. Las piezas pequeñas (árbol, poste, señal, caseta) van
-    enteras al pedazo donde cae el centro de su caja; lo grande (calles, terreno, edificios largos) se corta
-    por triángulos según su centroide. Intervalos semiabiertos: ningún triángulo cae en dos pedazos."""
+def recortar(scene, caja, excluir=None):
+    """Deja solo lo que cae en el centro del pedazo (y fuera de `excluir`, si hay un rectángulo ya horneado).
+    Las piezas pequeñas (árbol, poste, señal, caseta) van enteras al pedazo donde cae el centro de su caja; lo
+    grande (calles, terreno, edificios largos) se corta por triángulos según su centroide."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
@@ -152,7 +170,11 @@ def recortar(scene, caja):
     x0, y0, x1, y1 = caja
 
     def dentro(p):
-        return (p[:, 0] >= x0) & (p[:, 0] < x1) & (p[:, 1] >= y0) & (p[:, 1] < y1)
+        m = (p[:, 0] >= x0) & (p[:, 0] < x1) & (p[:, 1] >= y0) & (p[:, 1] < y1)
+        if excluir is not None:
+            ex0, ey0, ex1, ey1 = excluir
+            m &= ~((p[:, 0] >= ex0) & (p[:, 0] < ex1) & (p[:, 1] >= ey0) & (p[:, 1] < ey1))
+        return m
 
     for key, piezas in list(scene.pieces.items()):
         nuevas = []
@@ -161,10 +183,17 @@ def recortar(scene, caja):
             # que es lo caro, solo hace falta en las que cruzan el borde)
             bx0, by0 = p.pos[:, 0].min(), p.pos[:, 1].min()
             bx1, by1 = p.pos[:, 0].max(), p.pos[:, 1].max()
-            if bx0 >= x0 and bx1 < x1 and by0 >= y0 and by1 < y1:
-                nuevas.append(p)
-                continue
             if bx1 < x0 or bx0 >= x1 or by1 < y0 or by0 >= y1:
+                continue
+            if excluir is not None:
+                ex0, ey0, ex1, ey1 = excluir
+                if bx0 >= ex0 and bx1 < ex1 and by0 >= ey0 and by1 < ey1:
+                    continue
+                sin_cruce = bx1 <= ex0 or bx0 >= ex1 or by1 <= ey0 or by0 >= ey1
+            else:
+                sin_cruce = True
+            if sin_cruce and bx0 >= x0 and bx1 < x1 and by0 >= y0 and by1 < y1:
+                nuevas.append(p)
                 continue
             f = p.faces
             keep = dentro(p.pos[f].mean(1)[:, :2])
@@ -462,10 +491,13 @@ class TeselasCatastro(Teselas):
 
 # =========================================================================== el servicio
 class Vivo:
-    def __init__(self, gen_args, lat0, lon0, carpeta, trabajadores, radio, log=print, radio_fondo=1200.0, zona=None):
+    def __init__(self, gen_args, lat0, lon0, carpeta, trabajadores, radio, log=print, radio_fondo=1200.0, zona=None,
+                 excluir=None, intervalo=0.25):
         from .geo import LocalProjection
         self.args, self.carpeta, self.radio, self.log = gen_args, carpeta, radio, log
         self.radio_fondo = radio_fondo
+        self.intervalo = max(0.05, float(intervalo))
+        self.excluir = tuple(float(v) for v in excluir) if excluir else None
         # zona fija que se precalienta entera (ancho, alto en m, centrada en el origen): la app la usa para "genera
         # estos km² y lo demás en vivo"
         self.zona_tam = tuple(zona) if zona else None
@@ -499,11 +531,14 @@ class Vivo:
         os.makedirs(carpeta, exist_ok=True)
         meta = os.path.join(carpeta, "vivo.json")
         previo = json.load(open(meta)) if os.path.exists(meta) else {}
-        if previo.get("version") != VERSION:
+        exc_meta = list(self.excluir) if self.excluir else None
+        if (previo.get("version") != VERSION or previo.get("excluir") != exc_meta
+                or previo.get("L") != L or previo.get("margen") != MARGEN):
             for f in os.listdir(carpeta):
                 if f.startswith("p_") or f.startswith("tv_"):
                     os.remove(os.path.join(carpeta, f))
-        json.dump({"version": VERSION, "lat0": lat0, "lon0": lon0, "epsg": self.proj.epsg}, open(meta, "w"))
+        json.dump({"version": VERSION, "lat0": lat0, "lon0": lon0, "epsg": self.proj.epsg,
+                   "excluir": exc_meta, "L": L, "margen": MARGEN}, open(meta, "w"))
         for f in os.listdir(carpeta):
             if f.startswith("p_") and f.endswith(".glb"):
                 i, j = (int(v) for v in f[2:-4].split("_"))
@@ -511,10 +546,12 @@ class Vivo:
         if self.listos:
             log(f"{len(self.listos)} pedazos ya generados en {carpeta}")
         self.pool = ProcessPoolExecutor(max_workers=trabajadores, initializer=_iniciar,
-                                        initargs=(vars(gen_args), lat0, lon0))
+                                        initargs=(vars(gen_args), lat0, lon0, self.excluir,
+                                                  L, MARGEN, PAD_OSM, TESELA_OSM))
         # rásteres por adelantado, en procesos aparte (no le quitan el GIL al servidor)
         self.precargador = ProcessPoolExecutor(max_workers=2, initializer=_iniciar_precarga,
-                                               initargs=(vars(gen_args), lat0, lon0))
+                                               initargs=(vars(gen_args), lat0, lon0,
+                                                         L, MARGEN, PAD_OSM, TESELA_OSM))
         self.precarga, self.precarga_vuelo = {}, set()
         self.grafo, self.n_grafo, self.rehaciendo = None, -1, False
         self.tiempos = []
@@ -528,6 +565,13 @@ class Vivo:
         i0, j0 = pedazo_de(x0, y0)
         i1, j1 = pedazo_de(x1, y1)
         return [(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)]
+
+    def _cubierto(self, k):
+        if self.excluir is None:
+            return False
+        x0, y0, x1, y1 = nucleo(*k)
+        ex0, ey0, ex1, ey1 = self.excluir
+        return x0 >= ex0 and x1 <= ex1 and y0 >= ey0 and y1 <= ey1
 
     def _fondo(self):
         """Lo que se precalienta con los procesos libres: la zona fija (si la hay) y anillos alrededor de cada coche."""
@@ -671,7 +715,7 @@ class Vivo:
                 self._paso()
             except Exception:  # noqa: BLE001
                 self.log(traceback.format_exc())
-            time.sleep(0.25)
+            time.sleep(self.intervalo)
 
     def _grafo_al_dia(self):
         """Rehace (en otro hilo) el grafo de calles cuando llegan teselas nuevas de OSM."""
@@ -761,7 +805,7 @@ class Vivo:
             # siempre queda un proceso libre para lo cercano (a menos de 150 m del coche)
             if pr > 150 and len(self.en_curso) >= self.trabajadores - 1:
                 break
-            if k in self.listos or k in self.en_curso or time.time() - self.errores.get(k, (0,))[0] < 60:
+            if self._cubierto(k) or k in self.listos or k in self.en_curso or time.time() - self.errores.get(k, (0,))[0] < 60:
                 continue
             if k in self.precarga_vuelo:
                 continue            # que termine de bajar sus rásteres (dos procesos no deben bajar lo mismo)
@@ -999,7 +1043,7 @@ class Vivo:
 
 
 # =========================================================================== pista semilla de Assetto Corsa
-def semilla_ac(vivo, nombre, carpeta_ac, url, radio=1, log=print):
+def semilla_ac(vivo, nombre, carpeta_ac, url, radio=1, log=print, r_carga=430.0, r_soltar=640.0, t_foco=0.5):
     """Pista de AC para el modo en vivo: los pedazos alrededor de la salida ya horneados en el .kn5 (así el
     coche arranca sobre suelo firme), una "biblioteca" con todos los materiales y texturas (mallas diminutas
     escondidas bajo tierra) para que el script cree los demás pedazos con ellos, y el script vivo.lua."""
@@ -1015,10 +1059,14 @@ def semilla_ac(vivo, nombre, carpeta_ac, url, radio=1, log=print):
     marca = os.path.join(raiz, "extension", "vivo_version.txt")
     if os.path.exists(geo) and os.path.exists(marca) and open(marca).read().strip() == str(VERSION):
         g = json.load(open(geo, encoding="utf-8"))
-        if abs(g["lat0"] - lat0) < 1e-7 and abs(g["lon0"] - lon0) < 1e-7:
-            vieja = open(os.path.join(raiz, "extension", "vivo.lua"), encoding="utf-8").read()
+        lua_p = os.path.join(raiz, "extension", "vivo.lua")
+        vieja = open(lua_p, encoding="utf-8").read() if os.path.exists(lua_p) else ""
+        m_l = re.search(r"^local L = ([0-9.]+)", vieja, re.M)
+        if abs(g["lat0"] - lat0) < 1e-7 and abs(g["lon0"] - lon0) < 1e-7 and m_l and abs(float(m_l.group(1)) - L) < 0.1:
             horneados = re.search(r"^local HORNEADOS = \{ (.*) \}", vieja, re.M).group(1)
-            _escribir_lua(raiz, url, horneados, lat0, lon0)
+            escribir_lua(raiz, url, horneados, lat0, lon0, lado=L, r_carga=r_carga, r_soltar=r_soltar, t_foco=t_foco,
+                         margen=MARGEN, intervalo=vivo.intervalo, trabajadores=vivo.trabajadores,
+                         radio=vivo.radio, radio_fondo=vivo.radio_fondo, pad_osm=PAD_OSM, tesela_osm=TESELA_OSM)
             _instalar_semilla(raiz, carpeta_ac, nombre, log)
             log(f"pista semilla lista en {time.time() - t0:.0f} s (reutilizada)")
             return raiz
@@ -1061,14 +1109,7 @@ def semilla_ac(vivo, nombre, carpeta_ac, url, radio=1, log=print):
                 terr_salida = terr
             horneados.append(f"{i}_{j}")
             log(f"semilla: pedazo ({i}, {j}) horneado")
-    # biblioteca: un triángulo diminuto por material, 2 km bajo tierra
-    scene.material("tv_base", "det_tierra.png" if "det_tierra.png" in scene.textures else next(iter(scene.textures)),
-                   specular=0.0, ambient=0.4, diffuse=0.36)
-    for k, m in list(scene.materials.items()):
-        if k.startswith("tv_") and k != "tv_base":
-            continue
-        tri = np.array([[sx, sy, -2000.0], [sx + 0.01, sy, -2000.0], [sx, sy + 0.01, -2000.0]])
-        scene.add("biblioteca", k, tri, np.zeros((3, 2)), [(0, 1, 2)])
+    export_ac.agregar_biblioteca(scene, sx, sy)
     # salidas sobre la calle más cercana al origen
     fx, fy = S["fx"], -S["fz"]
     sv = np.arange(-120.0, 40.0, 1.0)
@@ -1088,20 +1129,14 @@ def semilla_ac(vivo, nombre, carpeta_ac, url, radio=1, log=print):
             "attribution": pipeline.ATTRIBUTION.format(s2_years=""),
             "description": "Tramo en vivo: la ciudad se genera alrededor del coche mientras conduces "
                            "(necesita el servidor: python -m openlaps.vivo).",
-            "tags": ["openlaps", "vivo"], "length": 0, "run": "free roam", "pitboxes": 8}
+            "tags": ["openlaps", "vivo"], "length": 0, "run": "free roam", "pitboxes": 8, "es_semilla_vivo": True}
     raiz = export_ac.write_track(scene, salida, nombre, info, [], None, log=log)
-    # CSP solo da la API de física a los scripts de pista si surfaces.ini es "extendido" (WAV_PITCH=extended-N en
-    # la primera superficie) y trae [_SCRIPTING_PHYSICS] ALLOW_TRACK_SCRIPTS=1. Sin lo primero,
-    # physics.allowed() es false y addTrackSurface responde "Not available" (probado en AC, 2026-11).
-    sup = os.path.join(raiz, "data", "surfaces.ini")
-    txt = open(sup, encoding="utf-8").read()
-    txt = re.sub(r"WAV_PITCH=[^\r\n]*", "WAV_PITCH=extended-0", txt, count=1)
-    open(sup, "w", encoding="utf-8", newline="").write(txt)
-    for rel, extra in ((("data", "surfaces.ini"), "[_SCRIPTING_PHYSICS]|ALLOW_TRACK_SCRIPTS=1"),
-                       (("extension", "ext_config.ini"), "[SCRIPT_0]|SCRIPT=vivo.lua")):
-        with open(os.path.join(raiz, *rel), "a", encoding="utf-8", newline="") as f:
-            f.write("".join(chr(13) + chr(10) + t for t in [""] + extra.split("|")) + chr(13) + chr(10))
-    _escribir_lua(raiz, url, ", ".join(f"['{k}'] = true" for k in horneados), lat0, lon0)
+    with open(os.path.join(raiz, "extension", "ext_config.ini"), "a", encoding="utf-8", newline="") as f:
+        f.write("\r\n[SCRIPT_0]\r\nSCRIPT=vivo.lua\r\n")
+    escribir_lua(raiz, url, ", ".join(f"['{k}'] = true" for k in horneados), lat0, lon0,
+                 lado=L, r_carga=r_carga, r_soltar=r_soltar, t_foco=t_foco,
+                 margen=MARGEN, intervalo=vivo.intervalo, trabajadores=vivo.trabajadores,
+                 radio=vivo.radio, radio_fondo=vivo.radio_fondo, pad_osm=PAD_OSM, tesela_osm=TESELA_OSM)
     with open(os.path.join(raiz, "extension", "vivo_version.txt"), "w") as f:
         f.write(str(VERSION))
     _instalar_semilla(raiz, carpeta_ac, nombre, log)
@@ -1109,13 +1144,75 @@ def semilla_ac(vivo, nombre, carpeta_ac, url, radio=1, log=print):
     return raiz
 
 
-def _escribir_lua(raiz, url, horneados, lat0, lon0):
+PUERTO_CONTROL_AC = 8789
+
+
+def escribir_lua(raiz, url, horneados, lat0, lon0, control_url=f"http://127.0.0.1:{PUERTO_CONTROL_AC}",
+                 modo_espera=False, rect_horneado=None, pista="", lado=None, r_carga=430.0, r_soltar=640.0,
+                 t_foco=0.5, margen=None, intervalo=0.25, trabajadores=0, radio=300.0, radio_fondo=1200.0,
+                 pad_osm=None, tesela_osm=None):
     with open(os.path.join(AQUI, "vivo_ac.lua"), encoding="utf-8") as f:
         lua = f.read()
+    if rect_horneado and len(rect_horneado) == 4:
+        rect_lua = "{ " + ", ".join(f"{float(v):.1f}" for v in rect_horneado) + " }"
+    else:
+        rect_lua = "nil"
+    lado_v = float(L if lado is None else lado)
+    margen_v = float(MARGEN if margen is None else margen)
+    pad_v = float(PAD_OSM if pad_osm is None else pad_osm)
+    tes_v = float(TESELA_OSM if tesela_osm is None else tesela_osm)
+    cfg_lua = (f"{{ lado = {lado_v:g}, margen = {margen_v:g}, intervalo = {float(intervalo):g}, "
+               f"trabajadores = {int(trabajadores)}, radio = {float(radio):g}, "
+               f"radio_fondo = {float(radio_fondo):g}, pad_osm = {pad_v:g}, "
+               f"tesela_osm = {tes_v:g}, r_carga = {float(r_carga):g}, r_soltar = {float(r_soltar):g} }}")
     lua = lua.replace("__URL__", url).replace("__HORNEADOS__", horneados)
-    lua = lua.replace("__L__", str(L)).replace("__LAT__", repr(lat0)).replace("__LON__", repr(lon0))
+    lua = lua.replace("__L__", f"{lado_v:g}").replace("__LAT__", repr(lat0)).replace("__LON__", repr(lon0))
+    lua = lua.replace("__R_CARGA__", f"{float(r_carga):g}").replace("__R_SOLTAR__", f"{float(r_soltar):g}")
+    lua = lua.replace("__T_FOCO__", f"{float(t_foco):g}").replace("__CFG__", cfg_lua)
+    lua = lua.replace("__CONTROL_URL__", control_url).replace("__MODO_ESPERA__", "true" if modo_espera else "false")
+    lua = lua.replace("__RECT_HORNEADO__", rect_lua).replace("__PISTA__", pista)
+    os.makedirs(os.path.join(raiz, "extension"), exist_ok=True)
     with open(os.path.join(raiz, "extension", "vivo.lua"), "w", encoding="utf-8") as f:
         f.write(lua)
+
+
+def actualizar_control_lua(raiz, control_url=None, pista=None, lado=None, r_carga=None, r_soltar=None,
+                           t_foco=None, params=None):
+    ruta = os.path.join(raiz, "extension", "vivo.lua")
+    if not os.path.isfile(ruta):
+        return False
+    txt = open(ruta, encoding="utf-8").read()
+    nuevo = txt
+    if control_url is not None:
+        nuevo = re.sub(r"^local CONTROL_URL = '[^']*'", f"local CONTROL_URL = '{control_url}'", nuevo, count=1, flags=re.M)
+    if pista is not None:
+        nuevo = re.sub(r"^local PISTA_ID = '[^']*'", f"local PISTA_ID = '{pista}'", nuevo, count=1, flags=re.M)
+    if params is not None:
+        lado = params.get("lado", lado)
+        r_carga = params.get("r_carga", r_carga)
+        r_soltar = params.get("r_soltar", r_soltar)
+        t_foco = params.get("t_foco", t_foco)
+        cfg_lua = (f"{{ lado = {float(params['lado']):g}, margen = {float(params['margen']):g}, "
+                   f"intervalo = {float(params['intervalo']):g}, trabajadores = {int(params['trabajadores'])}, "
+                   f"radio = {float(params['radio']):g}, radio_fondo = {float(params['radio_fondo']):g}, "
+                   f"pad_osm = {float(params['pad_osm']):g}, tesela_osm = {float(params['tesela_osm']):g}, "
+                   f"r_carga = {float(params['r_carga']):g}, r_soltar = {float(params['r_soltar']):g} }}")
+        nuevo = re.sub(r"^local CFG = \{[^\n]*\}", f"local CFG = {cfg_lua}", nuevo, count=1, flags=re.M)
+    if lado is not None:
+        nuevo = re.sub(r"^local L = [0-9.]+", f"local L = {float(lado):g}", nuevo, count=1, flags=re.M)
+    if r_carga is not None and r_soltar is not None:
+        nuevo = re.sub(r"^local R_CARGA, R_SOLTAR = [0-9.]+, [0-9.]+",
+                       f"local R_CARGA, R_SOLTAR = {float(r_carga):g}, {float(r_soltar):g}",
+                       nuevo, count=1, flags=re.M)
+    if t_foco is not None:
+        nuevo = re.sub(r"^local T_FOCO = [0-9.]+", f"local T_FOCO = {float(t_foco):g}", nuevo, count=1, flags=re.M)
+    if nuevo != txt:
+        open(ruta, "w", encoding="utf-8").write(nuevo)
+    return True
+
+
+def _escribir_lua(raiz, url, horneados, lat0, lon0):
+    escribir_lua(raiz, url, horneados, lat0, lon0)
 
 
 def _instalar_semilla(raiz, carpeta_ac, nombre, log):
@@ -1176,6 +1273,15 @@ def servidor(vivo, puerto):
                     return self._json(vivo.piloto)
                 if u.path == "/vivo/estado":
                     return self._json(vivo.estado())
+                if u.path == "/vivo/config":
+                    if "intervalo" in q:
+                        vivo.intervalo = max(0.05, min(2.0, float(q["intervalo"])))
+                    if "radio" in q:
+                        vivo.radio = max(150.0, min(800.0, float(q["radio"])))
+                    if "radio_fondo" in q:
+                        vivo.radio_fondo = max(300.0, min(2400.0, float(q["radio_fondo"])))
+                    return self._json({"ok": True, "intervalo": vivo.intervalo,
+                                       "radio": vivo.radio, "radio_fondo": vivo.radio_fondo})
                 if u.path == "/vivo/camino":
                     if "x" in q and "z" in q:
                         x, z = float(q["x"]), float(q["z"])
@@ -1219,8 +1325,18 @@ def main(argv=None):
     p.add_argument("--radio-fondo", type=float, default=None,
                    help="con los procesos libres, precalienta hasta esta distancia alrededor de cada coche (m; "
                         "por defecto 1200, o 600 con --zona)")
+    p.add_argument("--pedazo-m", type=float, default=256.0, help="tamaño de cada pedazo o tesela generada (m)")
+    p.add_argument("--margen", type=float, default=64.0, help="margen alrededor de cada pedazo antes de recortar (m)")
+    p.add_argument("--pad-osm", type=float, default=200.0, help="margen extra de datos OSM alrededor del pedazo (m)")
+    p.add_argument("--tesela-osm", type=float, default=1024.0, help="tamaño de cada tesela de descarga de OSM (m)")
+    p.add_argument("--intervalo", type=float, default=0.25, help="cada cuánto revisa y lanza teselas nuevas (s)")
+    p.add_argument("--r-carga", type=float, default=430.0, help="radio de carga en Assetto Corsa (m)")
+    p.add_argument("--r-soltar", type=float, default=640.0, help="radio de descarga en Assetto Corsa (m)")
+    p.add_argument("--t-foco", type=float, default=0.5, help="cada cuánto pide estado el script de Assetto Corsa (s)")
     p.add_argument("--zona", metavar="ANCHO,ALTO",
                    help="precalienta entera esta zona (m, centrada en --centro) antes que lo demás")
+    p.add_argument("--excluir", metavar="X0,Y0,X1,Y1",
+                   help="caja local ya horneada (m): recorta los pedazos fuera de ella")
     p.add_argument("--carpeta", help="dónde guardar los pedazos (por defecto salida/vivo/<centro>)")
     p.add_argument("--nuevo", action="store_true", help="borra los pedazos ya generados de este centro")
     p.add_argument("--piloto-ac", type=float, metavar="METROS",
@@ -1233,7 +1349,7 @@ def main(argv=None):
                    help="carpeta de Assetto Corsa donde instalar la semilla ('' para no instalar)")
     a, resto = p.parse_known_args(argv)
     lat0, lon0 = (float(v) for v in a.centro.split(","))
-    gen = parser_openlaps().parse_args(["--centro", a.centro, "--tesela", "64", "--sin-horizonte"] + resto)
+    gen = parser_openlaps().parse_args([f"--centro={a.centro}", "--tesela", "64", "--sin-horizonte"] + resto)
     carpeta = a.carpeta or os.path.join("salida", "vivo", f"{lat0:.5f}_{lon0:.5f}")
     if a.nuevo and os.path.isdir(carpeta):
         shutil.rmtree(carpeta)
@@ -1241,15 +1357,19 @@ def main(argv=None):
     def log(m):
         print(time.strftime("%H:%M:%S"), m, flush=True)
 
+    configurar(lado=a.pedazo_m, margen=a.margen, pad_osm=a.pad_osm, tesela_osm=a.tesela_osm)
     zona = tuple(float(v) for v in a.zona.split(",")) if a.zona else None
+    excluir = tuple(float(v) for v in a.excluir.split(",")) if a.excluir else None
     vivo = Vivo(gen, lat0, lon0, carpeta, a.trabajadores, a.radio, log=log,
-                radio_fondo=a.radio_fondo if a.radio_fondo is not None else (600.0 if zona else 1200.0), zona=zona)
+                radio_fondo=a.radio_fondo if a.radio_fondo is not None else (600.0 if zona else 1200.0),
+                zona=zona, excluir=excluir, intervalo=a.intervalo)
     srv = servidor(vivo, a.puerto)
     if a.semilla_ac:
         def hacer_semilla():
             try:
                 semilla_ac(vivo, a.nombre_ac, a.ac_carpeta if a.ac_carpeta and os.path.isdir(a.ac_carpeta) else None,
-                           f"http://127.0.0.1:{a.puerto}", log=log)
+                           f"http://127.0.0.1:{a.puerto}", log=log, r_carga=a.r_carga, r_soltar=a.r_soltar,
+                           t_foco=a.t_foco)
             except Exception:  # noqa: BLE001
                 log("semilla: ERROR\n" + traceback.format_exc())
         threading.Thread(target=hacer_semilla, daemon=True).start()

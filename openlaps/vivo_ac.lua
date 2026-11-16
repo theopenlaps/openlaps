@@ -6,12 +6,23 @@
 -- Si el coche va a entrar en un pedazo cuya física aún no está, lo frena hasta que llegue.
 
 local URL = '__URL__'
+local CONTROL_URL = '__CONTROL_URL__'
+local PISTA_ID = '__PISTA__'
 local HORNEADOS = { __HORNEADOS__ }   -- pedazos que ya vienen en el .kn5
 local L = __L__
 local ORIGEN = { __LAT__, __LON__ }   -- el servidor tiene que ser de este mismo lugar (si no, sus pedazos caerían mal)
+local RECT_HORNEADO = __RECT_HORNEADO__   -- { x0, y0, x1, y1 } en coordenadas locales cuando viene de pista normal
+local vivoActivo = not __MODO_ESPERA__
+local vivoActivando = false
+local vivoError = nil
+local horizontesOcultos = false
+local cercaBorde = false
 local otroLugar = false
 local zonaLista = nil      -- fracción ya generada alrededor (precalentado), la da el servidor
-local R_CARGA, R_SOLTAR = 430, 640    -- m (distancia del coche al borde del pedazo), más lejos cuanto más rápido
+local R_CARGA, R_SOLTAR = __R_CARGA__, __R_SOLTAR__    -- m (distancia del coche al borde del pedazo), más lejos cuanto más rápido
+local T_FOCO = __T_FOCO__
+local CFG = __CFG__
+local cfgPendiente, cfgSyncAt, cfgCargado = false, 0, false
 local MAX_DESCARGAS = 3
 
 web.timeouts(nil, nil, nil, nil, 30)
@@ -59,6 +70,201 @@ end
 -- un pedazo, se reutiliza su física y solo se crean las mallas.
 local fisicaHecha = {}     -- k -> lista de ac.Disposable
 
+local function enRectHorneado(x, z)
+  if not RECT_HORNEADO then return false end
+  local lx, ly = x, -z
+  return lx >= RECT_HORNEADO[1] and lx < RECT_HORNEADO[3] and ly >= RECT_HORNEADO[2] and ly < RECT_HORNEADO[4]
+end
+
+local function margenRectHorneado(x, z)
+  if not RECT_HORNEADO then return math.huge end
+  local lx, ly = x, -z
+  return math.min(lx - RECT_HORNEADO[1], RECT_HORNEADO[3] - lx, ly - RECT_HORNEADO[2], RECT_HORNEADO[4] - ly)
+end
+
+local function urlEncode(s)
+  return tostring(s or ''):gsub('([^%w%-_%.~])', function (ch)
+    return string.format('%%%02X', string.byte(ch))
+  end)
+end
+
+local function stepRound(v, step, mn, mx)
+  local s = math.floor(v / step + 0.5) * step
+  return math.max(mn, math.min(mx, s))
+end
+
+local function aplicarCfgTabla(e)
+  if not e then return end
+  if not vivoActivo and e.lado then
+    CFG.lado = tonumber(e.lado) or CFG.lado
+    L = CFG.lado
+  end
+  for _, k in ipairs({ 'margen', 'intervalo', 'trabajadores', 'radio', 'radio_fondo', 'pad_osm', 'tesela_osm', 'r_carga', 'r_soltar' }) do
+    if e[k] ~= nil then CFG[k] = tonumber(e[k]) or CFG[k] end
+  end
+  R_CARGA = CFG.r_carga
+  R_SOLTAR = math.max(CFG.r_soltar, R_CARGA + 100)
+  CFG.r_soltar = R_SOLTAR
+  T_FOCO = math.max(0.25, math.min(2.0, CFG.intervalo * 2))
+end
+
+local function queryParametros()
+  return string.format(
+    'lado=%d&margen=%d&intervalo=%.2f&trabajadores=%d&radio=%d&radio_fondo=%d&pad_osm=%d&tesela_osm=%d&r_carga=%d&r_soltar=%d',
+    CFG.lado, CFG.margen, CFG.intervalo, CFG.trabajadores, CFG.radio,
+    CFG.radio_fondo, CFG.pad_osm, CFG.tesela_osm, CFG.r_carga, CFG.r_soltar
+  )
+end
+
+local function enviarParametros()
+  cfgPendiente = false
+  if CONTROL_URL ~= '' then
+    web.get(CONTROL_URL .. '/parametros?' .. queryParametros(), function (err, r)
+      if not err and r and r.status == 200 then
+        local ok, e = pcall(JSON.parse, r.body or '')
+        if ok and e and e.ok then aplicarCfgTabla(e) end
+      end
+    end)
+  end
+  if vivoActivo and URL ~= '' then
+    local q = string.format('intervalo=%.2f&radio=%d&radio_fondo=%d', CFG.intervalo, CFG.radio, CFG.radio_fondo)
+    web.get(URL .. '/vivo/config?' .. q, function () end)
+  end
+end
+
+local function cargarParametros()
+  if cfgCargado or CONTROL_URL == '' then return end
+  cfgCargado = true
+  web.get(CONTROL_URL .. '/parametros', function (err, r)
+    if err or not r or r.status ~= 200 then return end
+    local ok, e = pcall(JSON.parse, r.body or '')
+    if ok and e and e.ok then aplicarCfgTabla(e) end
+  end)
+end
+
+local function activarEnVivo()
+  if vivoActivo or vivoActivando then return end
+  vivoActivando = true
+  vivoError = nil
+  local q = string.format('?pista=%s&lat=%.6f&lon=%.6f&%s', urlEncode(PISTA_ID), ORIGEN[1], ORIGEN[2], queryParametros())
+  web.get(CONTROL_URL .. '/activar' .. q, function (err, r)
+    vivoActivando = false
+    if not r then
+      vivoError = 'OpenLaps no responde: abre la app en el PC para activar el modo en vivo'
+      return
+    end
+    local ok, e = pcall(JSON.parse, r.body or '')
+    if r.status ~= 200 or not ok or not e or not e.ok or not e.url then
+      vivoError = (ok and e and e.error) or err or 'No se pudo activar el modo en vivo'
+      return
+    end
+    URL = e.url
+    if e.L and e.L > 0 then L = e.L end
+    aplicarCfgTabla(e)
+    vivoActivo = true
+    cercaBorde = false
+    tFoco = -10
+  end)
+end
+
+local shared = nil
+if ac.connect and ac.StructItem then
+  local ok, res = pcall(function ()
+    return ac.connect({
+      ac.StructItem.key('openlaps.config.v1'),
+      vivoUi = ac.StructItem.boolean(),
+      g3dActivo = ac.StructItem.boolean(),
+      g3dMostrar = ac.StructItem.boolean(),
+    }, true)
+  end)
+  if ok then
+    shared = res
+    shared.vivoUi = true
+  end
+end
+
+if ui and ui.addSettings then
+  ui.addSettings({
+    name = 'OpenLaps · Configuraciones',
+    id = 'openlaps_config',
+    category = 'main',
+    icon = ui.Icons.AppWindow,
+    size = { default = vec2(320, 360), min = vec2(260, 140), automatic = true },
+    onOpen = cargarParametros
+  }, function ()
+    if not cfgCargado and CONTROL_URL ~= '' then cargarParametros() end
+    if shared and shared.g3dActivo then
+      if ui.checkbox('Edificios de Google 3D', shared.g3dMostrar) then
+        shared.g3dMostrar = not shared.g3dMostrar
+      end
+      ui.textDisabled(shared.g3dMostrar and 'Visibles (se ocultan los de OpenLaps)' or 'Ocultos (usando edificios de OpenLaps)')
+      ui.separator()
+    end
+    if vivoActivo then
+      ui.textDisabled('Modo en vivo: ACTIVADO (bloqueado en esta sesion)')
+      ui.textDisabled(string.format('Tesela: %dm · Margen: %dm · Proc: %s',
+        L, CFG.margen, CFG.trabajadores <= 0 and 'Auto' or tostring(CFG.trabajadores)))
+    elseif vivoActivando then
+      ui.textDisabled('Activando modo en vivo...')
+    else
+      if ui.checkbox('Activar modo en vivo', false) then
+        activarEnVivo()
+      end
+      ui.textDisabled('Queda bloqueado hasta reiniciar la sesion')
+      if vivoError then
+        ui.text(vivoError)
+      end
+    end
+
+    local cambio = false
+    local function sl(id, val, mn, mx, step, fmt, intMode)
+      ui.setNextItemWidth(-1)
+      local v, ch = ui.slider(id, val, mn, mx, fmt, intMode)
+      if ch then
+        cambio = true
+        return stepRound(v, step, mn, mx)
+      end
+      return val
+    end
+
+    ui.treeNode('Configuracion de parametros', function ()
+      if not vivoActivo then
+        CFG.lado = sl('##lado', CFG.lado, 128, 512, 32, 'Tesela: %.0f m', true)
+        CFG.margen = sl('##margen', CFG.margen, 16, 160, 8, 'Margen recorte: %.0f m', true)
+        CFG.trabajadores = sl('##trab', CFG.trabajadores, 0, 8, 1,
+          CFG.trabajadores <= 0 and 'Procesos: Auto' or 'Procesos: %.0f', true)
+        L = CFG.lado
+      end
+      CFG.intervalo = sl('##interv', CFG.intervalo, 0.1, 2.0, 0.05, 'Frecuencia: %.2f s')
+      CFG.r_carga = sl('##rcarga', CFG.r_carga, 200, 1000, 25, 'Carga AC: %.0f m', true)
+      CFG.r_soltar = sl('##rsolt', math.max(CFG.r_soltar, CFG.r_carga + 100), 350, 1500, 25, 'Descarga AC: %.0f m', true)
+      if CFG.r_soltar < CFG.r_carga + 100 then CFG.r_soltar = math.min(1500, CFG.r_carga + 100) end
+      CFG.radio = sl('##radio', CFG.radio, 150, 800, 25, 'Radio urgente: %.0f m', true)
+      CFG.radio_fondo = sl('##rfondo', CFG.radio_fondo, 300, 2400, 100, 'Precalentado: %.0f m', true)
+      if not vivoActivo then
+        CFG.pad_osm = sl('##padosm', CFG.pad_osm, 50, 400, 25, 'Margen OSM: %.0f m', true)
+        CFG.tesela_osm = sl('##tesosm', CFG.tesela_osm, 512, 2048, 256, 'Tesela OSM: %.0f m', true)
+        if ui.button('Por defecto', vec2(-1, 0)) then
+          aplicarCfgTabla({
+            lado = 256, margen = 64, intervalo = 0.25, trabajadores = 0,
+            radio = 300, radio_fondo = 1200, pad_osm = 200, tesela_osm = 1024,
+            r_carga = 430, r_soltar = 640
+          })
+          cambio = true
+        end
+      end
+    end)
+
+    if cambio then
+      T_FOCO = math.max(0.25, math.min(2.0, CFG.intervalo * 2))
+      R_CARGA = CFG.r_carga
+      R_SOLTAR = CFG.r_soltar
+      cfgPendiente = true
+      cfgSyncAt = os.clock() + 0.35
+    end
+  end)
+end
+
 local function tieneFisica(k)
   if HORNEADOS[k] or fisicaHecha[k] then return true end
   local p = pedazos[k]
@@ -89,6 +295,7 @@ local function pedirFoco()
     listos = {}
     otroLugar = e.origen ~= nil and (math.abs(e.origen.lat - ORIGEN[1]) > 1e-5 or math.abs(e.origen.lon - ORIGEN[2]) > 1e-5)
     if otroLugar then return end
+    if e.L and e.L > 0 then L = e.L end
     zonaLista = e.zona_lista
     for _, p in ipairs(e.listos or {}) do listos[clave(p[1], p[2])] = true end
   end)
@@ -362,8 +569,46 @@ end
 
 -- ---------------------------------------------------------------- ciclo
 function script.update(dt)
+  local ahora = os.clock()
+  if cfgPendiente and ahora >= cfgSyncAt then
+    enviarParametros()
+  end
+  if not vivoActivo then
+    if RECT_HORNEADO then
+      local c = ac.getCar(0)
+      if c then
+        local x, z = c.position.x, c.position.z
+        local v = c.velocity
+        local rapidez = math.sqrt(v.x * v.x + v.z * v.z)
+        local m = margenRectHorneado(x, z)
+        cercaBorde = m < 18
+        if m < 12 and rapidez > 0.3 then
+          local margen = math.max(0.5, m - 2)
+          local frenada = math.max(4, rapidez * rapidez / (2 * margen) * 1.3)
+          local nueva = m < 4 and 0 or math.max(0, rapidez - frenada * dt)
+          physics.forceUserBrakesFor(0.2, 1)
+          physics.setCarVelocity(0, v * (nueva / rapidez))
+        end
+        tSeguro = tSeguro + dt
+        if m > 0.5 and tSeguro > 0.5 and math.abs(v.y) < 3 then
+          tSeguro = 0
+          local dir = rapidez > 1 and vec3(v.x, 0, v.z):normalize() or (seguro and seguro.dir or c.look)
+          seguro = { pos = c.position:clone(), dir = dir }
+        elseif m <= 0 and seguro and os.clock() - tRescate > 2 then
+          tRescate = os.clock()
+          physics.setCarPosition(0, seguro.pos + vec3(0, 0.3, 0), -seguro.dir)
+          physics.setCarVelocity(0, vec3(0, 0, 0))
+        end
+      end
+    end
+    return
+  end
+  if __MODO_ESPERA__ and not horizontesOcultos then
+    ac.findMeshes('horizonte_?'):setVisible(false)
+    horizontesOcultos = true
+  end
   local t = os.clock()
-  if not pidiendo and t - tFoco > 0.5 then
+  if not pidiendo and t - tFoco > T_FOCO then
     tFoco = t
     pedirFoco()
   end
@@ -424,12 +669,13 @@ function script.update(dt)
   if rapidez > 0.5 then
     for d = 0, alcance, 5 do
       local t = d / rapidez
-      local i2, j2 = pedazoDe(x + v.x * t, z + v.z * t)
-      if not tieneFisica(clave(i2, j2)) then falta = d break end
+      local px, pz = x + v.x * t, z + v.z * t
+      local i2, j2 = pedazoDe(px, pz)
+      if not enRectHorneado(px, pz) and not tieneFisica(clave(i2, j2)) then falta = d break end
     end
   end
   local i1, j1 = pedazoDe(x, z)
-  local aqui = tieneFisica(clave(i1, j1))
+  local aqui = enRectHorneado(x, z) or tieneFisica(clave(i1, j1))
   espera = falta ~= nil or not aqui
   if falta and rapidez > 0.3 then
     local margen = math.max(0.5, falta - 12)
@@ -464,6 +710,20 @@ end
 
 function script.draw3D()
   local s = ac.getSim()
+  if not vivoActivo then
+    if vivoActivando then
+      render.debugText(s.cameraPosition + s.cameraLook * 3 + s.cameraUp * 0.6,
+        'Activando modo en vivo...', rgbm(0.7, 0.9, 1, 0.9), 0.85)
+    elseif vivoError then
+      render.debugText(s.cameraPosition + s.cameraLook * 3 + s.cameraUp * 0.6,
+        vivoError, rgbm(1, 0.45, 0.35, 0.95), 0.8)
+    elseif cercaBorde then
+      render.debugText(s.cameraPosition + s.cameraLook * 3 + s.cameraUp * 0.6,
+        'Limite de la zona: activa el modo en vivo en Ajustes CSP (OpenLaps · Modo en vivo)',
+        rgbm(1, 0.85, 0.2, 0.9), 0.8)
+    end
+    return
+  end
   if otroLugar then
     render.debugText(s.cameraPosition + s.cameraLook * 3 + s.cameraUp * 0.6,
       'el servidor del tramo en vivo es de otro lugar: arrancalo con el mismo --centro que esta pista',

@@ -9,10 +9,15 @@ import xml.etree.ElementTree as ET
 from .cache import UA, cache_path, post_form
 
 ENDPOINTS = [
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 ]
+
+# en vivo, los espejos que contestan más rápido por cada tesela pequeña
+ENDPOINTS_VIVO = [("https://maps.mail.ru/osm/tools/overpass/api/interpreter", 20),
+                  ("https://overpass-api.de/api/interpreter", 25)]
 
 
 def query(bbox):
@@ -41,31 +46,6 @@ def query(bbox):
 out geom qt;"""
 
 
-def download(bbox, log=print):
-    q = query(bbox)
-    last = None
-    for ep in ENDPOINTS:
-        try:
-            path = post_form(ep, {"data": q}, ext=".osm.json", log=log, retries=2)
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            if "elements" not in data:
-                raise RuntimeError("respuesta sin elementos")
-            return data
-        except Exception as e:  # noqa: BLE001
-            last = e
-            log(f"  Overpass {ep} falló: {e}")
-    raise RuntimeError(f"Overpass no respondió: {last}")
-
-
-# ------------------------------------------------------------------ descarga rápida (modo en vivo)
-API = "https://api.openstreetmap.org/api/0.6/map"
-# en vivo, los espejos que contestan en menos de medio minuto (medido en 2026: mail.ru ~20 s, el principal ~40 s;
-# kumi y private.coffee pasaban del minuto)
-ENDPOINTS_VIVO = [("https://maps.mail.ru/osm/tools/overpass/api/interpreter", 25),
-                  ("https://overpass-api.de/api/interpreter", 30)]
-
-
 def _respuesta_valida(data):
     if "elements" not in data:
         raise RuntimeError("respuesta sin elementos")
@@ -75,36 +55,63 @@ def _respuesta_valida(data):
     return data
 
 
-def download_fast(bbox, log=print, timeout=30):
-    """Para el modo en vivo: un espejo de Overpass tras otro con espera corta (sin reintentos largos) y, solo si
-    ninguno contesta, la API oficial de OpenStreetMap (convertida al mismo formato; es rápida, pero su uso
-    principal es la edición, así que queda de último recurso). Todo queda en caché."""
-    q = query(bbox)
-    last = None
-    # ¿ya en caché (de una generación normal o de la API)?
-    for path in [cache_path(ep + "?" + urllib.parse.urlencode({"data": q}), ".osm.json") for ep in ENDPOINTS]             + [cache_path(f"osmapi:{bbox.overpass()}", ".osm.json")]:
+def _leer_cache_osm(bbox, q):
+    enc = urllib.parse.urlencode({"data": q})
+    rutas = [cache_path(ep + "?" + enc, ".osm.json") for ep in ENDPOINTS] + [
+        cache_path(f"osmapi:{bbox.overpass()}", ".osm.json")
+    ]
+    for path in rutas:
         if os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as f:
                     return _respuesta_valida(json.load(f))
             except Exception:  # noqa: BLE001
                 pass
-    for ep, espera in ENDPOINTS_VIVO:
+    return None
+
+
+def _post_overpass(ep, q, timeout, retries=1):
+    path = post_form(ep, {"data": q}, ext=".osm.json", log=lambda *a: None, retries=retries, timeout=timeout)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return _respuesta_valida(json.load(f))
+    except Exception:
+        if os.path.exists(path):
+            os.remove(path)
+        raise
+
+
+def _descargar_osm(bbox, espejos, log, timeout_api=30):
+    q = query(bbox)
+    cached = _leer_cache_osm(bbox, q)
+    if cached is not None:
+        return cached
+    last = None
+    for ep, espera in espejos:
         try:
-            path = post_form(ep, {"data": q}, ext=".osm.json", log=lambda *a: None, retries=1, timeout=espera)
-            try:
-                with open(path, encoding="utf-8") as f:
-                    return _respuesta_valida(json.load(f))
-            except Exception:
-                os.remove(path)                # no dejar en caché una respuesta mala
-                raise
+            return _post_overpass(ep, q, timeout=espera, retries=1)
         except Exception as e:  # noqa: BLE001
             last = e
             log(f"  Overpass {ep.split('/')[2]} falló: {str(e)[:100]}")
     try:
-        return download_api(bbox, log=log, timeout=timeout)
+        return download_api(bbox, log=log, timeout=timeout_api)
     except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"OSM no respondió (Overpass: {last}; API: {e})") from e
+        raise RuntimeError(f"Overpass no respondió ({last}; API OSM: {e})") from e
+
+
+def download(bbox, log=print, timeout=20):
+    """Descarga OSM de Overpass con espera acotada y respaldo automático en la API oficial de OSM."""
+    return _descargar_osm(bbox, [(ep, timeout) for ep in ENDPOINTS], log=log, timeout_api=max(30, timeout))
+
+
+# ------------------------------------------------------------------ descarga rápida (modo en vivo)
+API = "https://api.openstreetmap.org/api/0.6/map"
+
+
+def download_fast(bbox, log=print, timeout=30):
+    """Para el modo en vivo: un espejo de Overpass tras otro con espera corta y, si ninguno contesta,
+    la API oficial de OpenStreetMap."""
+    return _descargar_osm(bbox, ENDPOINTS_VIVO, log=log, timeout_api=timeout)
 
 
 def download_api(bbox, log=print, timeout=30):

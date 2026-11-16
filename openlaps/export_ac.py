@@ -209,13 +209,30 @@ SURFACE_DEFS = [
 ]
 
 
-def surfaces_ini():
+def surfaces_ini(extendido=True):
     out = []
     for i, (k, fr, dm, wav, wp, ff, dirt, valid, sh, sl, pit, vg, vl) in enumerate(SURFACE_DEFS):
-        out.append(f"[SURFACE_{i}]\nKEY={k}\nFRICTION={fr}\nDAMPING={dm}\nWAV={wav}\nWAV_PITCH={wp}\nFF_EFFECT={ff}\n"
+        wp_i = "extended-0" if extendido and i == 0 else wp
+        out.append(f"[SURFACE_{i}]\nKEY={k}\nFRICTION={fr}\nDAMPING={dm}\nWAV={wav}\nWAV_PITCH={wp_i}\nFF_EFFECT={ff}\n"
                    f"DIRT_ADDITIVE={dirt}\nBLACK_FLAG_TIME=0\nIS_VALID_TRACK={valid}\nSIN_HEIGHT={sh}\nSIN_LENGTH={sl}\n"
                    f"IS_PITLANE={pit}\nVIBRATION_GAIN={vg}\nVIBRATION_LENGTH={vl}\n")
+    if extendido:
+        out.append("[_SCRIPTING_PHYSICS]\nALLOW_TRACK_SCRIPTS=1\n")
     return "\n".join(out)
+
+
+def agregar_biblioteca(scene, sx=0.0, sy=0.0):
+    """Un triángulo diminuto bajo tierra por material para que los scripts de pista de AC puedan clonarlos."""
+    if any(k[0] == "biblioteca" for k in scene.pieces) or not scene.textures:
+        return
+    if "tv_base" not in scene.materials:
+        tex = "det_tierra.png" if "det_tierra.png" in scene.textures else next(iter(scene.textures))
+        scene.material("tv_base", tex, specular=0.0, ambient=0.4, diffuse=0.36)
+    for k in list(scene.materials):
+        if k.startswith("tv_") and k != "tv_base":
+            continue
+        tri = np.array([[sx, sy, -2000.0], [sx + 0.01, sy, -2000.0], [sx, sy + 0.01, -2000.0]])
+        scene.add("biblioteca", k, tri, np.zeros((3, 2)), [(0, 1, 2)])
 
 
 def _ai_bytes(poly, hw):
@@ -298,22 +315,34 @@ def georef(info):
     """Cómo pasar una posición de AC a coordenadas reales: UTM recentrado en (lat0, lon0)."""
     lat, lon = float(info["lat"]), float(info["lon"])
     epsg = info.get("epsg") or (32600 if lat >= 0 else 32700) + int((lon + 180) // 6) + 1
-    return {"lat0": lat, "lon0": lon, "epsg": int(epsg),
-            "ejes": "AC x = este - x0, AC y = altura sobre el nivel del mar (m), AC z = -(norte - y0); "
-                    "(x0, y0) = UTM de (lat0, lon0)",
-            "version": __version__}
+    out = {"lat0": lat, "lon0": lon, "epsg": int(epsg),
+           "ejes": "AC x = este - x0, AC y = altura sobre el nivel del mar (m), AC z = -(norte - y0); "
+                   "(x0, y0) = UTM de (lat0, lon0)",
+           "version": __version__}
+    if info.get("rect"):
+        out["rect"] = [round(float(v), 1) for v in info["rect"]]
+    if info.get("vivo_opc"):
+        out["vivo_opc"] = info["vivo_opc"]
+    return out
 
 
 def write_track(scene, out_dir, track_id, info, map_lines, route=None, log=print):
     root = os.path.join(out_dir, track_id)
     for sub in ("", "ui", "data", "ai", "extension"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
+    agregar_biblioteca(scene)
     write_kn5(scene, os.path.join(root, f"{track_id}.kn5"), log=log)
     w = lambda rel, txt: open(os.path.join(root, rel), "w", newline="\r\n", encoding="utf-8").write(txt)  # noqa: E731
     w("models.ini", f"[MODEL_0]\nFILE={track_id}.kn5\nPOSITION=0,0,0\nROTATION=0,0,0\n")
     w(os.path.join("data", "surfaces.ini"), surfaces_ini())
     w(os.path.join("data", "lighting.ini"), "[LIGHTING]\nSUN_PITCH_ANGLE=45\nSUN_HEADING_ANGLE=-40\n")
-    w(os.path.join("extension", "ext_config.ini"), ext_config(scene, info["lat"], info["lon"]))
+    ext_txt = ext_config(scene, info["lat"], info["lon"])
+    if not info.get("es_semilla_vivo"):
+        from . import vivo as V
+        V.escribir_lua(root, "", "", float(info["lat"]), float(info["lon"]),
+                       modo_espera=True, rect_horneado=info.get("rect"), pista=track_id)
+        ext_txt = ext_txt.rstrip() + "\n\n[SCRIPT_0]\nSCRIPT=vivo.lua\n"
+    w(os.path.join("extension", "ext_config.ini"), ext_txt)
     if scene.cameras:
         w(os.path.join("data", "cameras.ini"), cameras_ini(scene.cameras))
     # mapa

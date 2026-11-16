@@ -1194,6 +1194,49 @@ function ponerRuta(el, ruta) {
     if (p === "\\" || p === "/") el.append(document.createElement("wbr"));
   });
 }
+const VIVO_DEFECTO = {
+  vivo_lado: 256, vivo_margen: 64, vivo_intervalo: 0.25, vivo_trabajadores: 0,
+  vivo_radio: 300, vivo_radio_fondo: 1200, vivo_pad_osm: 200, vivo_tesela_osm: 1024,
+  vivo_r_carga: 430, vivo_r_soltar: 640,
+};
+function formatoAjusteVivo(k, val) {
+  const n = Number(val);
+  if (k === "vivo_trabajadores") return n <= 0 ? t("aj.vivo_auto") : String(Math.round(n));
+  if (k === "vivo_intervalo") return `${n.toFixed(2)} s`;
+  return `${Math.round(n)} m`;
+}
+function aplicarCambioAjusteVivo(k, rawVal) {
+  const a = S.ajustes || (S.ajustes = {});
+  const val = k === "vivo_intervalo" ? Number(Number(rawVal).toFixed(2)) : Math.round(Number(rawVal));
+  a[k] = val;
+  const cambios = { [k]: val };
+  if (k === "vivo_r_carga") {
+    const soltar = Math.round(a.vivo_r_soltar ?? VIVO_DEFECTO.vivo_r_soltar);
+    if (soltar < val + 100) {
+      a.vivo_r_soltar = Math.min(1500, val + 100);
+      cambios.vivo_r_soltar = a.vivo_r_soltar;
+    }
+  } else if (k === "vivo_r_soltar") {
+    const carga = Math.round(a.vivo_r_carga ?? VIVO_DEFECTO.vivo_r_carga);
+    if (val < carga + 100) {
+      a.vivo_r_carga = Math.max(200, val - 100);
+      cambios.vivo_r_carga = a.vivo_r_carga;
+    }
+  }
+  pintarAjustesVivo();
+  return cambios;
+}
+function pintarAjustesVivo() {
+  const a = S.ajustes || {};
+  $$("[data-ajuste]").forEach((el) => {
+    const k = el.dataset.ajuste;
+    const val = a[k] ?? VIVO_DEFECTO[k];
+    el.value = val;
+    syncRange(el);
+    const out = $(`#val-${k}`);
+    if (out) out.textContent = formatoAjusteVivo(k, val);
+  });
+}
 function pintarAjustes() {
   ponerRuta($("#aj-salida"), S.salida);
   const acEl = $("#aj-ac");
@@ -1207,6 +1250,7 @@ function pintarAjustes() {
   }
   $("#aj-idioma").value = IDIOMA;
   $("#aj-version").textContent = S.version ? `v${S.version}` : "";
+  pintarAjustesVivo();
   refrescarDesplegables();
 }
 async function recargarEstado() {
@@ -1288,6 +1332,11 @@ const ACCIONES = {
     if (typeof r === "string") { S.dem = r; sync(); }
   },
   "quitar-dem": () => { S.dem = null; sync(); },
+  "restablecer-vivo": async () => {
+    S.ajustes = Object.assign(S.ajustes || {}, VIVO_DEFECTO);
+    pintarAjustesVivo();
+    await api("guardar_ajustes", VIVO_DEFECTO);
+  },
 };
 
 document.addEventListener("click", (e) => {
@@ -1324,6 +1373,10 @@ document.addEventListener("click", (e) => {
 document.addEventListener("input", (e) => {
   const el = e.target;
   if (el.type === "range") syncRange(el);
+  if (el.dataset.ajuste) {
+    aplicarCambioAjusteVivo(el.dataset.ajuste, el.value);
+    return;
+  }
   if (el.dataset.campo) {
     const k = el.dataset.campo;
     S[k] = el.type === "checkbox" ? el.checked : el.type === "range" ? Number(el.value) : el.value;
@@ -1344,6 +1397,12 @@ document.addEventListener("input", (e) => {
   } else if (el.dataset.usar) {
     S.usar[el.dataset.usar] = el.checked;
     sync();
+  }
+});
+document.addEventListener("change", (e) => {
+  const el = e.target;
+  if (el.dataset.ajuste) {
+    api("guardar_ajustes", aplicarCambioAjusteVivo(el.dataset.ajuste, el.value));
   }
 });
 $("#b-osm").addEventListener("click", () => {

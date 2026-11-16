@@ -17,16 +17,32 @@ def test_nombre_valido():
     assert len(G.nombre_valido("x" * 100)) == 40
 
 
+def _bbox_arg(a):
+    for i, x in enumerate(a):
+        if x.startswith("--bbox="):
+            return x.split("=", 1)[1]
+        if x == "--bbox":
+            return a[i + 1]
+    raise AssertionError("--bbox no encontrado")
+
+
 def test_argumentos_zona_y_calidad():
+    from openlaps.__main__ import parser as cli_parser
     a = G.argumentos({"modo": "libre", "centro": [40.14, -3.42], "ancho": 1200, "alto": 600, "calidad": "rapida",
                       "ac": True, "sin": ["cc0", "inventada"], "vegetacion": 0.3}, "salida", nombre="x")
-    # la zona es un rectángulo de ancho x alto: va como --bbox
-    assert BBox.parse(a[a.index("--bbox") + 1]) == BBox.around(40.14, -3.42, 1200, 600).__class__(
+    # la zona es un rectángulo de ancho x alto: va como --bbox=...
+    assert BBox.parse(_bbox_arg(a)) == BBox.around(40.14, -3.42, 1200, 600).__class__(
         *[round(v, 6) for v in (lambda b: (b.south, b.west, b.north, b.east))(BBox.around(40.14, -3.42, 1200, 600))])
     assert "--ruta" not in a and "--centro" not in a
     assert "--ac" in a and "--sin-cc0" in a and "--sin-inventada" not in a
     # la vegetación elegida va después de la de la calidad: en argparse gana la última
     assert a[len(a) - 1 - a[::-1].index("--vegetacion") + 1] == "0.30"
+
+    # hemisferio sur (latitud negativa): argparse no debe confundir el '-' con una bandera
+    a_sur = G.argumentos({"modo": "tramo", "centro": [-34.6037, -58.3816],
+                          "ruta": [[-34.6037, -58.3816], [-34.608, -58.375]], "calidad": "normal"}, "salida", nombre="ba")
+    ns = cli_parser().parse_args(a_sur)
+    assert ns.bbox.startswith("-34.") and ns.ruta.startswith("-34.")
 
 
 def test_borrador_no_exporta_ac():
@@ -45,7 +61,7 @@ def test_caja_de_precarga_coincide_con_el_generador():
     """La precarga solo sirve si su caja es idéntica a la que construye pipeline.run."""
     op = {"modo": "libre", "centro": [40.4215, -3.714], "ancho": 900, "alto": 1500}
     a = G.argumentos(op, "s", nombre="x")
-    assert _clave(caja_de(op)) == _clave(BBox.parse(a[a.index("--bbox") + 1]))
+    assert _clave(caja_de(op)) == _clave(BBox.parse(_bbox_arg(a)))
     # compatibilidad: una vista guardada con solo "tam" sigue siendo un cuadrado
     assert G.medidas({"tam": 700}) == (700.0, 700.0)
 
@@ -61,7 +77,7 @@ def test_limite_de_zona_y_modo_en_vivo():
     assert zona_recortada({"ancho": 3000, "alto": 2000}) == (3000.0, 2000.0)
     op = {"modo": "tramo", "ruta": [[23.63, -105.84], [23.635, -105.83]]}
     a = G.argumentos(op, "s", nombre="x")
-    assert _clave(caja_de(op)) == _clave(BBox.parse(a[a.index("--bbox") + 1]))
+    assert _clave(caja_de(op)) == _clave(BBox.parse(_bbox_arg(a)))
 
 
 class _Api:
@@ -147,3 +163,113 @@ def test_macro_rasters_y_msbuildings_indice(tmp_path):
         rows = con.execute("SELECT linea FROM b WHERE lon BETWEEN ? AND ? AND lat BETWEEN ? AND ?",
                            (chico.west, chico.east, chico.south, chico.north)).fetchall()
     assert len(rows) == 1 and "12.0" in rows[0][0]
+
+
+def test_renombrar_actualiza_vivo_lua(tmp_path):
+    from openlaps import vivo as V
+    from openlaps.gui import assetto
+    sal = tmp_path / "salida"
+    ac_dir = sal / "assetto_corsa" / "vieja"
+    (ac_dir / "ui").mkdir(parents=True)
+    (ac_dir / "vieja.kn5").write_bytes(b"kn5")
+    V.escribir_lua(str(ac_dir), "", "", 40.0, -3.0, modo_espera=True, rect_horneado=[-10, -10, 10, 10], pista="vieja")
+    assetto.renombrar(None, sal, "vieja", "nueva_ac")
+    lua_txt = (sal / "assetto_corsa" / "nueva_ac" / "extension" / "vivo.lua").read_text(encoding="utf-8")
+    assert "local PISTA_ID = 'nueva_ac'" in lua_txt
+
+
+def test_control_ac_activar_vivo(tmp_path, monkeypatch):
+    from openlaps.gui import ajustes, app as app_mod
+    sal = tmp_path / "salida"
+    pista_dir = sal / "assetto_corsa" / "demo"
+    pista_dir.mkdir(parents=True)
+    (pista_dir / "openlaps_geo.json").write_text(json.dumps({
+        "lat0": 40.4168, "lon0": -3.7038,
+        "rect": [-350.0, -350.0, 350.0, 350.0],
+        "vivo_opc": {"calidad": "rapida", "region": "eu"},
+    }), encoding="utf-8")
+    sin_rect = sal / "assetto_corsa" / "antigua"
+    sin_rect.mkdir(parents=True)
+    (sin_rect / "openlaps_geo.json").write_text(json.dumps({"lat0": 40.0, "lon0": -3.0}), encoding="utf-8")
+
+    monkeypatch.setattr(ajustes, "DATOS", tmp_path)
+    monkeypatch.setattr(ajustes, "_ARCHIVO", tmp_path / "ajustes.json")
+    monkeypatch.setattr(ajustes, "salida", lambda a=None: sal)
+    ajustes.guardar({"ac": ""})
+    api = app_mod.Api(servidor.Eventos())
+    llamadas = []
+
+    def falso_iniciar(op, s, ac=None, semilla=True, excluir=None, params=None):
+        llamadas.append((op, s, semilla, excluir, params))
+        api._vivo_ac.info = {"puerto": 9876, "nombre": op["nombre"], "centro": op["centro"],
+                             "params": ajustes.vivo_params(params)}
+        return {"puerto": 9876}
+
+    monkeypatch.setattr(api._vivo_ac, "iniciar", falso_iniciar)
+    monkeypatch.setattr(app_mod, "esperar_puerto", lambda p, timeout=15.0, proc=None: True)
+
+    srv, puerto = app_mod._iniciar_control_ac(api, puerto=0)
+    try:
+        base = f"http://127.0.0.1:{puerto}"
+        with pytest.raises(urllib.error.HTTPError) as e404:
+            urllib.request.urlopen(f"{base}/activar?pista=no_existe&lat=40.4168&lon=-3.7038", timeout=5)
+        assert e404.value.code == 404
+
+        with pytest.raises(urllib.error.HTTPError) as e409:
+            urllib.request.urlopen(f"{base}/activar?pista=demo&lat=41.0&lon=-3.7038", timeout=5)
+        assert e409.value.code == 409
+
+        with pytest.raises(urllib.error.HTTPError) as e400:
+            urllib.request.urlopen(f"{base}/activar?pista=antigua&lat=40.0&lon=-3.0", timeout=5)
+        assert e400.value.code == 400
+
+        with urllib.request.urlopen(f"{base}/parametros?lado=320&margen=96&intervalo=0.5&radio=400", timeout=5) as rp:
+            rp_data = json.load(rp)
+        assert rp_data["ok"] is True and rp_data["lado"] == 320 and rp_data["margen"] == 96
+        assert rp_data["intervalo"] == 0.5 and rp_data["t_foco"] == 1.0 and rp_data["radio"] == 400
+
+        with urllib.request.urlopen(f"{base}/activar?pista=demo&lat=40.4168&lon=-3.7038&lado=384&r_carga=500", timeout=5) as r:
+            res = json.load(r)
+        assert res["ok"] is True and res["url"] == "http://127.0.0.1:9876"
+        assert res["L"] == 384 and res["r_carga"] == 500
+        assert len(llamadas) == 1
+        assert llamadas[0][2] is False and llamadas[0][3] == [-350.0, -350.0, 350.0, 350.0]
+        assert llamadas[0][0]["calidad"] == "rapida" and llamadas[0][0]["region"] == "eu"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_vivo_params_y_cli_envivo(tmp_path, monkeypatch):
+    from openlaps.gui import ajustes, envivo
+
+    vp = ajustes.vivo_params({"vivo_lado": 999, "vivo_margen": 4, "vivo_intervalo": 0.01,
+                              "vivo_trabajadores": 12, "vivo_r_carga": 800, "vivo_r_soltar": 500})
+    assert vp["lado"] == 512 and vp["margen"] == 16 and vp["intervalo"] == 0.1
+    assert vp["trabajadores"] == 8 and vp["r_carga"] == 800 and vp["r_soltar"] == 900
+
+    captura = {}
+
+    class FalsoProc:
+        stdout = None
+
+        def poll(self):
+            return None
+
+    def falso_popen(cmd, **kw):
+        captura["cmd"] = cmd
+        return FalsoProc()
+
+    monkeypatch.setattr(envivo.subprocess, "Popen", falso_popen)
+    monkeypatch.setattr(envivo.threading, "Thread", lambda *a, **kw: type("T", (), {"start": lambda self: None})())
+    sv = envivo.EnVivo(lambda ev: None)
+    sv.iniciar({"centro": [40.4, -3.7], "nombre": "test"}, tmp_path, semilla=False,
+               excluir=[-100, -100, 100, 100],
+               params={"vivo_lado": 384, "vivo_margen": 96, "vivo_intervalo": 0.4, "vivo_trabajadores": 3})
+    cmd = captura["cmd"]
+    assert cmd[cmd.index("--pedazo-m") + 1] == "384"
+    assert cmd[cmd.index("--margen") + 1] == "96"
+    assert cmd[cmd.index("--intervalo") + 1] == "0.40"
+    assert cmd[cmd.index("--trabajadores") + 1] == "3"
+
+    assert envivo.esperar_puerto(1, timeout=0.05, proc=FalsoProc()) is False

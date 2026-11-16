@@ -123,6 +123,9 @@ def renombrar(ac, salida, viejo, nuevo):
                     ui_f.write_text(json.dumps(u, ensure_ascii=False, indent=2), encoding="utf-8")
             except (OSError, ValueError):
                 pass
+        if (ac_dst / "extension" / "vivo.lua").exists():
+            from .. import vivo
+            vivo.actualizar_control_lua(str(ac_dst), pista=nuevo)
         if enlazada:
             instalar(ac, ac_dst)
 

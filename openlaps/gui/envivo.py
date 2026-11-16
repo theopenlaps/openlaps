@@ -12,8 +12,8 @@ import subprocess
 import threading
 import time
 
-from .ajustes import RAIZ
-from .generador import MAX_KM2, _python, medidas, nombre_valido
+from .ajustes import RAIZ, vivo_params
+from .generador import CALIDADES, MAX_KM2, OPCIONES_SIN, _python, medidas, nombre_valido
 
 _NO_VENTANA = 0x08000000
 
@@ -29,6 +29,20 @@ def _puerto_libre(preferido=8790):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def esperar_puerto(puerto, timeout=15.0, proc=None):
+    """Espera a que `127.0.0.1:puerto` acepte conexiones (o aborta si el proceso cae)."""
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        if proc is not None and proc.poll() is not None:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", int(puerto)), timeout=0.3):
+                return True
+        except OSError:
+            time.sleep(0.15)
+    return False
 
 
 def zona_recortada(op):
@@ -57,16 +71,49 @@ class EnVivo:
     def activo(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def iniciar(self, op, salida, ac=None, semilla=True):
+    def iniciar(self, op, salida, ac=None, semilla=True, excluir=None, params=None):
         """Arranca el servicio. `ac`: carpeta de Assetto Corsa donde instalar la pista semilla (o None)."""
         self.detener()
+        vp = vivo_params(params)
         lat, lon = (float(v) for v in op["centro"])
-        ancho, alto = zona_recortada(op)
         self.nombre = nombre_valido(op.get("nombre") or "vivo")
         self.puerto = _puerto_libre()
         carpeta = os.path.join(str(salida), "vivo", self.nombre)
-        argv = ["-u", "-m", "openlaps.vivo", "--centro", f"{lat:.6f},{lon:.6f}", "--puerto", str(self.puerto),
-                "--zona", f"{ancho:.0f},{alto:.0f}", "--carpeta", carpeta]
+        argv = ["-u", "-m", "openlaps.vivo", f"--centro={lat:.6f},{lon:.6f}", "--puerto", str(self.puerto),
+                "--carpeta", carpeta, "--pedazo-m", str(vp["lado"]), "--margen", str(vp["margen"]),
+                "--pad-osm", str(vp["pad_osm"]), "--tesela-osm", str(vp["tesela_osm"]),
+                "--intervalo", f"{vp['intervalo']:.2f}", "--radio", str(vp["radio"]),
+                "--radio-fondo", str(vp["radio_fondo"]), "--r-carga", str(vp["r_carga"]),
+                "--r-soltar", str(vp["r_soltar"]), "--t-foco", f"{vp['t_foco']:.2f}"]
+        if vp["trabajadores"] > 0:
+            argv += ["--trabajadores", str(vp["trabajadores"])]
+        if excluir is not None:
+            ex0, ey0, ex1, ey1 = (float(v) for v in excluir)
+            argv.append(f"--excluir={ex0:.2f},{ey0:.2f},{ex1:.2f},{ey1:.2f}")
+            ancho, alto = max(1.0, ex1 - ex0), max(1.0, ey1 - ey0)
+        else:
+            ancho, alto = zona_recortada(op)
+            argv += ["--zona", f"{ancho:.0f},{alto:.0f}"]
+        calidad = op.get("calidad", "normal")
+        argv += CALIDADES.get(calidad, [])
+        if calidad != "borrador":
+            if op.get("res") is not None:
+                argv += ["--res", str(op["res"])]
+            if op.get("mpp") is not None:
+                argv += ["--mpp", str(op["mpp"])]
+            if op.get("vegetacion") not in (None, "", 1, 1.0):
+                argv += ["--vegetacion", f"{float(op['vegetacion']):.2f}"]
+            for k in op.get("sin") or []:
+                if k in OPCIONES_SIN:
+                    argv.append(f"--sin-{k}")
+        if op.get("temporada") in ("seca", "lluvias"):
+            argv += ["--temporada", op["temporada"]]
+        if op.get("region") and op["region"] != "auto":
+            argv += ["--region", str(op["region"])]
+        if op.get("dem"):
+            argv += ["--dem", str(op["dem"])]
+        if op.get("tuneles") in ("principales", "todos", "ninguno"):
+            argv += ["--tuneles", op["tuneles"]]
         if semilla:
             argv += ["--semilla-ac", "--nombre-ac", f"{self.nombre}_vivo", "--ac-carpeta", ac or ""]
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
@@ -80,7 +127,8 @@ class EnVivo:
         threading.Thread(target=self._leer, daemon=True).start()
         self.info = {"puerto": self.puerto, "nombre": self.nombre, "pista_ac": f"{self.nombre}_vivo" if semilla else None,
                      "zona": [round(ancho), round(alto)], "url": f"http://127.0.0.1:{self.puerto}/?vivo=1",
-                     "centro": [lat, lon]}
+                     "centro": [lat, lon], "excluir": [float(v) for v in excluir] if excluir is not None else None,
+                     "params": vp}
         return {"puerto": self.puerto, "nombre": self.nombre, "pista_ac": f"{self.nombre}_vivo" if semilla else None,
                 "zona": [round(ancho), round(alto)], "url": f"http://127.0.0.1:{self.puerto}/?vivo=1"}
 
@@ -121,16 +169,6 @@ class EnVivo:
                 pass
         self.proc = None
         return True
-
-
-def esperar_puerto(puerto, segundos=20):
-    t0 = time.time()
-    while time.time() - t0 < segundos:
-        with socket.socket() as s:
-            if s.connect_ex(("127.0.0.1", puerto)) == 0:
-                return True
-        time.sleep(0.3)
-    return False
 
 
 _ = re  # (re se deja por si se amplía el análisis de la salida)

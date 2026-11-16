@@ -37,16 +37,34 @@ local function aplicarVisible(vis)
   end
 end
 
-if ui and ui.addSettings then
+local shared = nil
+if ac.connect and ac.StructItem then
+  local ok, res = pcall(function ()
+    return ac.connect({
+      ac.StructItem.key('openlaps.config.v1'),
+      vivoUi = ac.StructItem.boolean(),
+      g3dActivo = ac.StructItem.boolean(),
+      g3dMostrar = ac.StructItem.boolean(),
+    }, true)
+  end)
+  if ok then
+    shared = res
+    shared.g3dActivo = true
+    shared.g3dMostrar = mostrar
+  end
+end
+
+if not (shared and shared.vivoUi) and ui and ui.addSettings then
   ui.addSettings({
-    name = 'OpenLaps · Google 3D',
-    id = 'openlaps_google3d',
+    name = 'OpenLaps · Configuraciones',
+    id = 'openlaps_config',
     category = 'main',
     icon = ui.Icons.AppWindow,
     size = { automatic = true }
   }, function ()
     if ui.checkbox('Edificios de Google 3D', mostrar) then
       aplicarVisible(not mostrar)
+      if shared then shared.g3dMostrar = mostrar end
     end
     ui.textDisabled(mostrar and 'Visibles (se ocultan los de OpenLaps)' or 'Ocultos (usando edificios de OpenLaps)')
   end)
@@ -186,6 +204,9 @@ local function quitar(id)
 end
 
 function script.update(dt)
+  if shared and shared.g3dMostrar ~= mostrar then
+    aplicarVisible(shared.g3dMostrar)
+  end
   if not mostrar then return end
   local t = os.clock()
   if not pidiendoLista and t - ultimaLista > 1 then

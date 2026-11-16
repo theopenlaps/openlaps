@@ -12,12 +12,13 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__, URL
-from .. import regions
+from .. import regions, vivo
 from . import ajustes, assetto, servidor
-from .envivo import EnVivo
+from .envivo import EnVivo, _puerto_libre, esperar_puerto
 from .google3d import Google3D
 from .generador import MAX_KM2, Trabajo, argumentos, nombre_valido
 from .precarga import Precarga, _clave, caja_de
@@ -38,6 +39,9 @@ class Api:
         self._precarga = Precarga()
         self._n = 0             # id de trabajo: la interfaz descarta los eventos de uno ya sustituido
         self._vivo = EnVivo(self._emitir)
+        self._vivo_ac = EnVivo(lambda ev: None)
+        self._vivo_ac_lock = threading.Lock()
+        self._puerto_control_ac = None
         self._g3d = Google3D()
         self._rev_cache = {}
 
@@ -56,7 +60,10 @@ class Api:
         return self._marco.accion(str(que)) if self._marco else {"marco": False}
 
     def guardar_ajustes(self, cambios):
-        return ajustes.guardar(cambios or {})
+        res = ajustes.guardar(cambios or {})
+        if any(str(k).startswith("vivo_") for k in (cambios or {})):
+            self._notificar_vivo_config(ajustes.vivo_params(res))
+        return res
 
     def _lugar_cerca(self, lat, lon):
         k = (round(lat, 2), round(lon, 2), idioma())
@@ -190,13 +197,15 @@ class Api:
             self._emitir(ev)
 
         antes = None
+        trabajo_ref = [None]
         try:
             k = _clave(caja_de(op))
             if self._precarga.descargando(k):
-                antes = lambda: self._precarga.esperar(k)  # noqa: E731
+                antes = lambda: self._precarga.esperar(k, cancelar=lambda: bool(trabajo_ref[0] and trabajo_ref[0].cancelado))  # noqa: E731
         except (ValueError, KeyError, TypeError):
             pass
         self._trabajo = Trabajo(tipo, argv, al_evento, antes=antes, prioridad_baja=tipo == "borrador")
+        trabajo_ref[0] = self._trabajo
         try:
             self._trabajo.iniciar()
         except OSError as e:
@@ -280,6 +289,107 @@ class Api:
         except RuntimeError as e:
             return {"error": str(e)}
 
+    def _buscar_geo_pista(self, pista):
+        a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
+        cand = []
+        raw = str(pista or "").strip()
+        for nm in [nombre_valido(raw) if raw else "", raw]:
+            if nm and nm not in cand:
+                cand.append(nm)
+        for nm in cand:
+            rutas = [ajustes.salida(a) / "assetto_corsa" / nm / "openlaps_geo.json"]
+            if ac:
+                rutas.append(Path(ac) / "content" / "tracks" / nm / "openlaps_geo.json")
+            for f in rutas:
+                if f.is_file():
+                    try:
+                        return json.loads(f.read_text(encoding="utf-8")), nm
+                    except (OSError, ValueError):
+                        pass
+        return None, cand[0] if cand else "vivo"
+
+    def _aplicar_vivo_overrides(self, query):
+        claves = {"lado": "vivo_lado", "margen": "vivo_margen", "intervalo": "vivo_intervalo",
+                  "trabajadores": "vivo_trabajadores", "radio": "vivo_radio", "radio_fondo": "vivo_radio_fondo",
+                  "pad_osm": "vivo_pad_osm", "tesela_osm": "vivo_tesela_osm",
+                  "r_carga": "vivo_r_carga", "r_soltar": "vivo_r_soltar"}
+        cambios = {}
+        for k, ak in claves.items():
+            if k in query and query[k] != "":
+                try:
+                    cambios[ak] = float(query[k])
+                except ValueError:
+                    pass
+        if cambios:
+            base = dict(ajustes.cargar(), **cambios)
+            vp = ajustes.vivo_params(base)
+            ajustes.guardar({ak: vp[k] for k, ak in claves.items()})
+            return vp
+        return ajustes.vivo_params()
+
+    def _notificar_vivo_config(self, vp):
+        q = urllib.parse.urlencode({"intervalo": vp["intervalo"], "radio": vp["radio"],
+                                    "radio_fondo": vp["radio_fondo"]})
+        for inst in (self._vivo_ac, self._vivo):
+            if inst.activo and inst.puerto:
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{inst.puerto}/vivo/config?{q}", timeout=1.5).close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _parametros_vivo_ac(self, query=None):
+        vp = self._aplicar_vivo_overrides(query or {})
+        if query:
+            self._notificar_vivo_config(vp)
+        return 200, {"ok": True, **vp}
+
+    def _activar_vivo_ac(self, pista, lat=None, lon=None, query=None):
+        with self._vivo_ac_lock:
+            geo, nombre = self._buscar_geo_pista(pista)
+            if not geo:
+                return 404, {"ok": False, "error": "No se encontro openlaps_geo.json para esta pista"}
+            try:
+                if "lat0" in geo and "lon0" in geo:
+                    lat0, lon0 = float(geo["lat0"]), float(geo["lon0"])
+                else:
+                    c = geo.get("centro") or {}
+                    lat0, lon0 = float(c["lat"]), float(c["lon"])
+            except (KeyError, TypeError, ValueError):
+                return 400, {"ok": False, "error": "openlaps_geo.json sin centro valido"}
+            if lat is not None and lon is not None:
+                try:
+                    if abs(lat0 - float(lat)) > 1e-4 or abs(lon0 - float(lon)) > 1e-4:
+                        return 409, {"ok": False, "error": "Las coordenadas de la pista no coinciden con OpenLaps"}
+                except (TypeError, ValueError):
+                    return 400, {"ok": False, "error": "Coordenadas invalidas"}
+            rect = geo.get("rect")
+            if not (isinstance(rect, (list, tuple)) and len(rect) == 4):
+                return 400, {"ok": False, "error": "Regenera esta pista en OpenLaps para usar el modo en vivo"}
+            try:
+                rect = [float(v) for v in rect]
+            except (TypeError, ValueError):
+                return 400, {"ok": False, "error": "Rectangulo de pista invalido"}
+            vp = self._aplicar_vivo_overrides(query or {})
+            a_cfg = ajustes.cargar()
+            if self._vivo_ac.activo:
+                info = self._vivo_ac.info
+                ic = info.get("centro") or []
+                if (info.get("nombre") == nombre and len(ic) == 2
+                        and abs(ic[0] - lat0) < 1e-5 and abs(ic[1] - lon0) < 1e-5
+                        and info.get("params") == vp):
+                    if esperar_puerto(info["puerto"], timeout=10.0, proc=self._vivo_ac.proc):
+                        return 200, {"ok": True, "url": f"http://127.0.0.1:{info['puerto']}",
+                                     "L": vp["lado"], **vp}
+            op = dict(geo.get("vivo_opc") or {})
+            op["centro"] = [lat0, lon0]
+            op["nombre"] = nombre
+            r = self._vivo_ac.iniciar(op, ajustes.salida(), semilla=False, excluir=rect, params=a_cfg)
+            if not esperar_puerto(r["puerto"], timeout=15.0, proc=self._vivo_ac.proc):
+                self._vivo_ac.detener()
+                return 500, {"ok": False, "error": "El servidor de modo en vivo no pudo arrancar"}
+            return 200, {"ok": True, "url": f"http://127.0.0.1:{r['puerto']}", "L": vp["lado"], **vp}
+
     def jugar_ac(self, nombre):
         """Instala la pista (si hace falta) y abre Assetto Corsa en ella."""
         a = ajustes.cargar()
@@ -293,6 +403,9 @@ class Api:
         try:
             if assetto.estado(ac, origen) != "enlazada":
                 assetto.instalar(ac, origen)
+            vp = ajustes.vivo_params(a)
+            ctrl = f"http://127.0.0.1:{self._puerto_control_ac or vivo.PUERTO_CONTROL_AC}"
+            vivo.actualizar_control_lua(str(origen), control_url=ctrl, pista=nombre, params=vp)
             # edificios de Google 3D (opcional): con la opción apagada se quita el script y la pista queda tal cual
             aviso = self._g3d.preparar(origen, ajustes.salida() / f"{nombre}.glb", bool(a.get("google3d")),
                                        str(a.get("token_cesium") or "").strip())
@@ -328,7 +441,7 @@ class Api:
         ac = assetto.detectar(a.get("ac"))
         try:
             r = self._vivo.iniciar(op, ajustes.salida(), ac=ac if op.get("ac", True) else None,
-                                   semilla=bool(op.get("ac", True)))
+                                   semilla=bool(op.get("ac", True)), params=a)
         except (ValueError, KeyError, TypeError) as e:
             return {"error": str(e) or t("faltan_datos")}
         except OSError as e:
@@ -353,6 +466,7 @@ class Api:
     def detener_todo(self):
         self.cancelar()
         self._vivo.detener()
+        self._vivo_ac.detener()
         self._g3d.detener()
 
     def vivo_jugar(self):
@@ -365,6 +479,9 @@ class Api:
             return {"error": t("faltan_datos")}
         try:
             nombre = f"{self._vivo.nombre}_vivo"
+            ctrl = f"http://127.0.0.1:{self._puerto_control_ac or vivo.PUERTO_CONTROL_AC}"
+            vivo.actualizar_control_lua(str(Path(ac) / "content" / "tracks" / nombre), control_url=ctrl,
+                                        pista=nombre, params=ajustes.vivo_params(a))
             # edificios de Google 3D (opcional): sobre la semilla ya instalada en AC, con los pedazos como calzada
             aviso = self._g3d.preparar(Path(ac) / "content" / "tracks" / nombre, None, bool(a.get("google3d")),
                                        str(a.get("token_cesium") or "").strip(),
@@ -407,6 +524,55 @@ class Api:
         return True
 
 
+def _iniciar_control_ac(api, puerto=None):
+    """Servidor local para que el script de Assetto Corsa active el modo en vivo al pulsar en CSP."""
+    class ControlAC(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _json(self, codigo, obj):
+            cuerpo = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(codigo)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(cuerpo)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(cuerpo)
+
+        def do_GET(self):  # noqa: N802
+            u = urllib.parse.urlparse(self.path)
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+            try:
+                if u.path == "/activar":
+                    codigo, obj = api._activar_vivo_ac(q.get("pista"), q.get("lat"), q.get("lon"), q)
+                    return self._json(codigo, obj)
+                if u.path == "/parametros":
+                    codigo, obj = api._parametros_vivo_ac(q)
+                    return self._json(codigo, obj)
+                return self._json(404, {"ok": False, "error": "no existe"})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:  # noqa: BLE001
+                try:
+                    self._json(500, {"ok": False, "error": str(e)})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+    preferido = vivo.PUERTO_CONTROL_AC if puerto is None else puerto
+    for candidato in (preferido, _puerto_libre(vivo.PUERTO_CONTROL_AC)):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", candidato), ControlAC)
+            break
+        except OSError:
+            continue
+    else:
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), ControlAC)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_port
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="openlaps-gui", description="Interfaz de escritorio de openlaps")
     p.add_argument("--navegador", action="store_true", help="abrir en el navegador en vez de en una ventana propia")
@@ -416,6 +582,8 @@ def main(argv=None):
 
     eventos = servidor.Eventos()
     api = Api(eventos)
+    srv_ctrl, puerto_ctrl = _iniciar_control_ac(api)
+    api._puerto_control_ac = puerto_ctrl
     token = secrets.token_urlsafe(24)
     srv, puerto = servidor.iniciar({
         "app": ajustes.WEB, "viewer": ajustes.VISOR,
@@ -434,12 +602,18 @@ def main(argv=None):
         except KeyboardInterrupt:
             pass
         api.detener_todo()
+        srv_ctrl.shutdown()
+        srv_ctrl.server_close()
+        srv.shutdown()
         return 0
 
     try:
         import webview
     except ImportError:
         print("Falta pywebview (python -m pip install pywebview). Mientras tanto: --navegador", file=sys.stderr)
+        srv_ctrl.shutdown()
+        srv_ctrl.server_close()
+        srv.shutdown()
         return 1
     try:
         # icono y grupo propios en la barra de tareas (si no, sale agrupado con Python)
@@ -458,5 +632,7 @@ def main(argv=None):
     webview.start(gui="edgechromium", debug=bool(os.environ.get("OPENLAPS_DEBUG")),
                   private_mode=False, storage_path=str(ajustes.DATOS / "webview"),
                   icon=str(Path(__file__).with_name("openlaps.ico")))
+    srv_ctrl.shutdown()
+    srv_ctrl.server_close()
     srv.shutdown()
     return 0

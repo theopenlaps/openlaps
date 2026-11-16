@@ -56,6 +56,11 @@ def _num(v, default=None):
         return default
 
 
+def _layer(v):
+    vals = re.findall(r"-?\d+(?:\.\d+)?", str(v or ""))
+    return max((int(float(x)) for x in vals), default=0)
+
+
 def resample(pts, step):
     pts = np.asarray(pts, float)
     seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
@@ -458,7 +463,7 @@ class RoadNetwork:
         e.phys = C.PHYS_KEY[e.mat]
         e.bridge = t.get("bridge") not in (None, "no")
         e.tunnel = t.get("tunnel") not in (None, "no", "building_passage")
-        e.layer = int(_num(t.get("layer"), 0) or 0)
+        e.layer = _layer(t.get("layer"))
         width = _num(t.get("width"))
         carriage = lanes * lane_w
         if e.cls in C.PAVED_PATHS:

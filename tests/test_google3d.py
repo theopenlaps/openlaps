@@ -169,5 +169,5 @@ def test_instalar_incluye_interruptor_ac(tmp_path):
     (tmp_path / "extension").mkdir()
     G.instalar(str(tmp_path), 8772)
     lua = (tmp_path / "extension" / G.LUA).read_text(encoding="utf-8")
-    assert "openlaps_google3d" in lua and "aplicarVisible" in lua
+    assert "openlaps_config" in lua and "aplicarVisible" in lua
 

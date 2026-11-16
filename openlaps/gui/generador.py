@@ -82,9 +82,9 @@ def argumentos(op, salida, nombre=None):
     nombre = nombre or nombre_valido(op.get("nombre"))
     a = ["--nombre", nombre, "--salida", str(salida), "--modo", modo]
     tipo, valor, extra = zona_args(op)
-    a += ["--bbox", valor]
+    a.append(f"--bbox={valor}")
     if extra:
-        a += ["--ruta", extra]
+        a.append(f"--ruta={extra}")
     if modo == "libre":
         ancho, alto = medidas(op)
         if ancho * alto / 1e6 > MAX_KM2 + 1e-6:
