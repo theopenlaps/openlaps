@@ -42,6 +42,11 @@ function slug(t) {
   return (t || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^\x00-\x7f]/g, "").toLowerCase()
     .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
 }
+function nombreRegionZona(pais, zona) {
+  const p = slug(pais), z = slug(zona);
+  if (p && z && p !== z && !z.startsWith(`${p}_`) && !p.startsWith(`${z}_`)) return slug(`${pais} ${zona}`);
+  return z || p || "";
+}
 const nombreFinal = () => slug(S.nombre) || S.nombreAuto || "pista";
 const fmt = (n, d = 0) => Number(n).toLocaleString(LOCALE[IDIOMA], { maximumFractionDigits: d, minimumFractionDigits: d });
 const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
@@ -271,13 +276,13 @@ function cambiarModo(m) {
   sync();
 }
 
-function irA(lat, lon, nombre, cajaBusqueda) {
+function irA(lat, lon, nombre, cajaBusqueda, pais = "", zona = "") {
   if (avisarBloqueo()) return;
   S.lugar = nombre;
   S.lugarEsPunto = false;
   S.lugarElegido = true;
   S.osm = null;          // otro sitio: las cifras de la zona anterior ya no valen
-  S.nombreAuto = slug(nombre) || "zona";
+  S.nombreAuto = nombreRegionZona(pais, zona || nombre) || slug(nombre) || "zona";
   let zoom = 15;
   if (cajaBusqueda && cajaBusqueda.length === 4) {
     const [s, n, w, e] = cajaBusqueda;
@@ -334,7 +339,13 @@ async function pedirRegion() {
   const p = S.modo === "libre" ? S.centro : S.ruta[0];
   if (!p) return;
   const r = await api("region", p[0], p[1]);
-  if (r && !r.error) { S.regionInfo = r; sync(); }
+  if (r && !r.error) {
+    S.regionInfo = r;
+    const zona = S.lugarEsPunto ? (r.zona || "") : (S.lugar || r.zona || "");
+    const auto = nombreRegionZona(r.pais, zona);
+    if (auto) S.nombreAuto = auto;
+    sync();
+  }
 }
 
 let tVista = null;
@@ -598,7 +609,7 @@ function prepararBuscador(raiz) {
     res = []; pintar();
     input.blur();
     errorPaso("");
-    irA(r.lat, r.lon, r.nombre, r.caja);
+    irA(r.lat, r.lon, r.nombre, r.caja, r.pais, r.zona);
   };
   const buscar = async () => {
     const q = input.value.trim();
@@ -866,11 +877,49 @@ function mostrarResultado(p) {
 
 async function jugarAC(nombre, salidaMsg) {
   const r = await api("jugar_ac", nombre);
+  if (r?.ac_otra) {
+    abrirRenombrar(r.nombre || nombre, { accion: "jugar", salidaMsg, motivoAc: true });
+    return;
+  }
   const txt = [r?.error || r?.mensaje || "", r?.aviso || ""].filter(Boolean).join(" ");
   if (salidaMsg) { salidaMsg.textContent = txt; salidaMsg.className = `ayuda ${r?.error ? "res-mal" : "res-ok"}`; }
   else aviso(txt, { mal: !!r?.error, ms: 8000 });
   refrescarPistas();
 }
+
+let renCtx = null;
+function abrirRenombrar(viejo, ctx = {}) {
+  renCtx = { viejo, ...ctx };
+  $("#ren-texto").textContent = t(ctx.motivoAc ? "ren.texto_ac" : "ren.texto", { n: viejo });
+  const sugerido = ctx.motivoAc ? `${viejo.slice(0, 37)}_2` : viejo;
+  $("#ren-input").value = sugerido;
+  $("#ren-error").hidden = true;
+  $("#b-renombrar").textContent = t(ctx.accion === "jugar" ? "ren.e_jugar" : ctx.accion === "instalar" ? "ren.e_instalar" : "ren.guardar");
+  $("#modal-renombrar").hidden = false;
+  setTimeout(() => { $("#ren-input").focus(); $("#ren-input").select(); }, 30);
+}
+async function confirmarRenombrar() {
+  if (!renCtx) return;
+  const nuevo = slug($("#ren-input").value);
+  const errEl = $("#ren-error");
+  if (!nuevo) { errEl.textContent = t("ren.vacio"); errEl.hidden = false; return; }
+  errEl.hidden = true;
+  const ctx = renCtx;
+  const r = await api("renombrar_pista", ctx.viejo, nuevo);
+  if (!r || r.error) { errEl.textContent = r?.error || t("err.respuesta", { s: "?" }); errEl.hidden = false; return; }
+  $("#modal-renombrar").hidden = true;
+  renCtx = null;
+  if (S.ultimaPista && S.ultimaPista.nombre === ctx.viejo && r.pista) {
+    S.ultimaPista = r.pista;
+    if (!$("#resultado").hidden) mostrarResultado(r.pista);
+  }
+  await refrescarPistas();
+  if (ctx.accion === "instalar") return instalarAC(r.nombre, ctx.salidaMsg);
+  if (ctx.accion === "jugar") return jugarAC(r.nombre, ctx.salidaMsg);
+  if (ctx.salidaMsg) { ctx.salidaMsg.textContent = r.mensaje; ctx.salidaMsg.className = "ayuda res-ok"; }
+  else aviso(r.mensaje);
+}
+$("#ren-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); confirmarRenombrar(); } });
 
 // ------------------------------------------------------------------ modo en vivo
 // Zona de más de 5 km²: Python arranca `openlaps.vivo` con la zona (a escala, 5 km²) para prepararla entera, crea e
@@ -936,6 +985,10 @@ function pintarVivo() {
 
 async function instalarAC(nombre, salidaMsg) {
   const r = await api("instalar_ac", nombre);
+  if (r?.ac_otra) {
+    abrirRenombrar(r.nombre || nombre, { accion: "instalar", salidaMsg, motivoAc: true });
+    return;
+  }
   if (r.error) {
     if (salidaMsg) { salidaMsg.textContent = r.error; salidaMsg.className = "ayuda res-mal"; }
     else aviso(r.error, { mal: true, ms: 8000 });
@@ -972,12 +1025,14 @@ function pintarPistas() {
         <button class="boton chico" data-p="manejar">${t("pistas.conducir")}</button>
         ${p.centro ? `<button class="boton chico" data-p="mapa">${t("pistas.mapa")}</button>` : ""}
         <button class="boton chico" data-p="carpeta">${t("pistas.carpeta")}</button>
+        <button class="boton chico" data-p="renombrar">${t("pistas.renombrar")}</button>
         ${p.ac ? `<button class="boton chico" data-p="ac">${t(p.ac_estado === "enlazada" ? "pistas.en_ac" : "pistas.instalar")}</button>` : ""}
       </div></div>`;
     li.addEventListener("click", (e) => {
       const a = e.target.closest("[data-p]")?.dataset.p;
       if (a === "manejar") abrirVisor(p.glb);
       else if (a === "carpeta") api("abrir_carpeta", p.nombre);
+      else if (a === "renombrar") abrirRenombrar(p.nombre);
       else if (a === "ac") instalarAC(p.nombre);
       else if (a === "mapa") { cerrarCajones(); map.flyTo(p.centro, 15, { duration: 0.8 }); }
     });
@@ -1030,6 +1085,9 @@ const ACCIONES = {
   "manejar-resultado": () => S.ultimaPista && abrirVisor(S.ultimaPista.glb),
   "instalar-resultado": () => S.ultimaPista && instalarAC(S.ultimaPista.nombre, $("#res-mensaje")),
   "jugar-resultado": () => S.ultimaPista && jugarAC(S.ultimaPista.nombre, $("#res-mensaje")),
+  "renombrar-resultado": () => S.ultimaPista && abrirRenombrar(S.ultimaPista.nombre, { salidaMsg: $("#res-mensaje") }),
+  "cerrar-renombrar": () => { $("#modal-renombrar").hidden = true; renCtx = null; },
+  "confirmar-renombrar": () => confirmarRenombrar(),
   "abrir-cesium": () => api("abrir_enlace", "https://ion.cesium.com/signup"),
   "vivo-conducir": () => {
     if (!S.vivo) return;
@@ -1164,6 +1222,7 @@ document.addEventListener("keydown", (e) => {
     (S.asistente && S.paso === 1 ? $("#panel-asistente [data-buscador] input") : $(".top [data-buscador] input")).focus();
   } else if (e.key === "Escape") {
     if (!$("#visor-completo").hidden) ACCIONES["cerrar-visor"]();
+    else if (!$("#modal-renombrar").hidden) ACCIONES["cerrar-renombrar"]();
     else if (!$("#modal-registro").hidden) ACCIONES["cerrar-registro"]();
     else cerrarCajones();
   }

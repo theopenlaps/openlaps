@@ -99,7 +99,12 @@ const TEXTOS = {
 
     "res.cerrar": "Cerrar", "res.img": "Vista aérea de la pista", "res.lista": "Pista lista",
     "res.conducir": "Conducir", "res.instalar": "Instalar en Assetto Corsa", "res.ya_ac": "Ya está en Assetto Corsa",
-    "res.carpeta": "Abrir carpeta",
+    "res.carpeta": "Abrir carpeta", "res.renombrar": "Cambiar nombre",
+    "ren.titulo": "Cambiar nombre de la pista",
+    "ren.texto": "Escribe el nuevo nombre para «{n}» (se cambia al instante sin volver a generar):",
+    "ren.texto_ac": "Ya hay otra pista llamada «{n}» en Assetto Corsa. Cambia el nombre para usarla sin regenerar toda la zona:",
+    "ren.guardar": "Cambiar nombre", "ren.e_instalar": "Renombrar e instalar", "ren.e_jugar": "Renombrar y jugar",
+    "ren.vacio": "Escribe un nombre válido.",
 
     "aj.salida": "Carpeta de las pistas", "aj.cambiar": "Cambiar…", "aj.abrir": "Abrir",
     "aj.ac": "Assetto Corsa", "aj.elegir_carpeta": "Elegir carpeta…",
@@ -113,7 +118,7 @@ const TEXTOS = {
 
     "pistas.vacia": "Aquí aparecerán las pistas que generes.",
     "pistas.conducir": "Conducir", "pistas.mapa": "En el mapa", "pistas.carpeta": "Carpeta",
-    "pistas.instalar": "Instalar en AC", "pistas.en_ac": "En AC ✓",
+    "pistas.instalar": "Instalar en AC", "pistas.en_ac": "En AC ✓", "pistas.renombrar": "Renombrar",
 
     "zona.sin_elegir": "Sin elegir",
     "res.pais": "País", "res.orto": "Ortofoto", "res.relieve": "Relieve", "res.area": "Área", "res.ruta": "Ruta",
@@ -253,7 +258,12 @@ const TEXTOS = {
 
     "res.cerrar": "Close", "res.img": "Aerial view of the track", "res.lista": "Track ready",
     "res.conducir": "Drive", "res.instalar": "Install in Assetto Corsa", "res.ya_ac": "Already in Assetto Corsa",
-    "res.carpeta": "Open folder",
+    "res.carpeta": "Open folder", "res.renombrar": "Rename",
+    "ren.titulo": "Rename track",
+    "ren.texto": "Enter the new name for “{n}” (updated right away without regenerating):",
+    "ren.texto_ac": "There's already another track called “{n}” in Assetto Corsa. Rename this one to use it without regenerating the whole area:",
+    "ren.guardar": "Rename", "ren.e_instalar": "Rename & install", "ren.e_jugar": "Rename & play",
+    "ren.vacio": "Enter a valid name.",
 
     "aj.salida": "Tracks folder", "aj.cambiar": "Change…", "aj.abrir": "Open",
     "aj.ac": "Assetto Corsa", "aj.elegir_carpeta": "Choose folder…",
@@ -267,7 +277,7 @@ const TEXTOS = {
 
     "pistas.vacia": "Tracks you generate will show up here.",
     "pistas.conducir": "Drive", "pistas.mapa": "On the map", "pistas.carpeta": "Folder",
-    "pistas.instalar": "Install in AC", "pistas.en_ac": "In AC ✓",
+    "pistas.instalar": "Install in AC", "pistas.en_ac": "In AC ✓", "pistas.renombrar": "Rename",
 
     "zona.sin_elegir": "Not chosen",
     "res.pais": "Country", "res.orto": "Orthophoto", "res.relieve": "Elevation", "res.area": "Area", "res.ruta": "Route",

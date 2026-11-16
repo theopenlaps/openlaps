@@ -468,6 +468,7 @@ class Vivo:
         self.radio_fondo = radio_fondo
         # zona fija que se precalienta entera (ancho, alto en m, centrada en el origen): la app la usa para "genera
         # estos km² y lo demás en vivo"
+        self.zona_tam = tuple(zona) if zona else None
         self.zona = None
         if zona:
             w, h = zona
@@ -960,6 +961,26 @@ class Vivo:
         self.piloto = {"id": int(time.time() * 1000) % 1_000_000_000, "kmh": kmh, "puntos": puntos}
         self.log(f"piloto automático de AC: ruta de {len(puntos) * 2} m a {kmh:.0f} km/h")
 
+    def camino_ac(self, x, z, vx, vz):
+        """Puntos previstos por delante del coche en coordenadas de AC ([x, z, metros_desde_coche])."""
+        pil = self.piloto
+        if pil.get("id") and pil.get("puntos"):
+            pts = pil["puntos"]
+            cerca = min(range(len(pts)), key=lambda i: (pts[i][0] - x) ** 2 + (pts[i][1] - z) ** 2)
+            out, s = [], 0.0
+            px0, pz0 = x, z
+            for px, pz in pts[cerca::10]:
+                s += math.hypot(px - px0, pz - pz0)
+                out.append([round(px, 1), round(pz, 1), round(s, 1)])
+                px0, pz0 = px, pz
+                if s >= 1200.0:
+                    break
+            return out
+        if math.hypot(vx, vz) < 2.0:
+            return []
+        return [[round(px, 1), round(-py, 1), round(s, 1)]
+                for px, py, s in self.camino((x, -z, vx, -vz))]
+
     # ------------------------------------------------------------------ estado
     def estado(self):
         with self.lock:
@@ -968,6 +989,7 @@ class Vivo:
         zona = sum(1 for k in fondo if k in self.listos) / max(1, len(fondo))
         return {"origen": {"lat": self.proj.lat0, "lon": self.proj.lon0, "epsg": self.proj.epsg}, "L": L,
                 "zona_lista": round(zona, 2),
+                "zona_tam": list(self.zona_tam) if self.zona_tam else None,
                 "listos": listos, "en_curso": [list(k) for k in self.en_curso],
                 "osm_pendientes": len(self.osm.pedidas), "salida": self.salida,
                 "t_medio": round(float(np.mean(self.tiempos[-10:])), 1) if self.tiempos else None,
@@ -1154,6 +1176,16 @@ def servidor(vivo, puerto):
                     return self._json(vivo.piloto)
                 if u.path == "/vivo/estado":
                     return self._json(vivo.estado())
+                if u.path == "/vivo/camino":
+                    if "x" in q and "z" in q:
+                        x, z = float(q["x"]), float(q["z"])
+                        vx, vz = float(q.get("vx", 0)), float(q.get("vz", 0))
+                    else:
+                        f = next(iter(vivo.activos().values()), (0.0, 0.0, 0.0, 0.0, 0.0))
+                        x, z, vx, vz = f[0], -f[1], f[2], -f[3]
+                    return self._json({"camino": vivo.camino_ac(x, z, vx, vz),
+                                       "zona_tam": list(vivo.zona_tam) if vivo.zona_tam else None,
+                                       "salida": vivo.salida})
                 if u.path == "/vivo/ruta":
                     return self._json({"puntos": vivo.ruta(float(q.get("metros", 2500)), float(q.get("espera", 120)))})
                 if u.path.startswith("/vivo/p/"):

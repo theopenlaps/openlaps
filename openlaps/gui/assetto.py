@@ -84,6 +84,49 @@ def instalar(ac, origen):
     return t("ac_ok")
 
 
+def renombrar(ac, salida, viejo, nuevo):
+    """Renombra una pista ya generada (sin volver a generarla) y actualiza su enlace en AC si lo tenía."""
+    import json
+    salida = Path(salida)
+    if not viejo or not nuevo or viejo == nuevo:
+        return
+    if (salida / f"{nuevo}.glb").exists() or (salida / "assetto_corsa" / nuevo).exists() \
+            or (ac and os.path.lexists(Path(ac) / "content" / "tracks" / nuevo)):
+        raise RuntimeError(t("nombre_existe", n=nuevo))
+    ac_src = salida / "assetto_corsa" / viejo
+    enlazada = bool(ac and ac_src.is_dir() and estado(ac, ac_src) == "enlazada")
+    if enlazada:
+        try:
+            os.rmdir(Path(ac) / "content" / "tracks" / viejo)
+        except OSError:
+            enlazada = False
+    for suf in (".glb", ".json", "_cenital.jpg", "_cobertura.jpg"):
+        p = salida / f"{viejo}{suf}"
+        if p.exists():
+            p.rename(salida / f"{nuevo}{suf}")
+    if ac_src.is_dir():
+        ac_dst = salida / "assetto_corsa" / nuevo
+        ac_src.rename(ac_dst)
+        kn5 = ac_dst / f"{viejo}.kn5"
+        if kn5.exists():
+            kn5.rename(ac_dst / f"{nuevo}.kn5")
+        ini = ac_dst / "models.ini"
+        if ini.exists():
+            txt = ini.read_text(encoding="utf-8", errors="replace")
+            ini.write_text(txt.replace(f"FILE={viejo}.kn5", f"FILE={nuevo}.kn5"), encoding="utf-8")
+        ui_f = ac_dst / "ui" / "ui_track.json"
+        if ui_f.exists():
+            try:
+                u = json.loads(ui_f.read_text(encoding="utf-8"))
+                if u.get("name") == viejo:
+                    u["name"] = nuevo
+                    ui_f.write_text(json.dumps(u, ensure_ascii=False, indent=2), encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+        if enlazada:
+            instalar(ac, ac_dst)
+
+
 def csp(ac):
     """¿Tiene Custom Shaders Patch? (hace falta para el modo en vivo: scripts de pista con física)."""
     return bool(ac) and (Path(ac) / "extension" / "config").is_dir() and (Path(ac) / "dwrite.dll").exists()

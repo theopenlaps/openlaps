@@ -284,6 +284,7 @@
       <button class="boton primario" data-accion="manejar-resultado" data-i18n="res.conducir"></button>
       <button class="boton" data-accion="jugar-resultado" id="res-jugar" data-i18n="res.jugar"></button>
       <button class="boton" data-accion="instalar-resultado" id="res-ac"></button>
+      <button class="boton" data-accion="renombrar-resultado" data-i18n="res.renombrar"></button>
       <button class="boton" data-accion="carpeta-resultado" data-i18n="res.carpeta"></button>
     </div>
     <p class="ayuda" id="res-mensaje"></p>
@@ -346,6 +347,19 @@
   <div class="modal-caja">
     <div class="cajon-cabeza"><h2 data-i18n="registro"></h2><button class="cerrar" data-accion="cerrar-registro" data-i18n-aria="res.cerrar">×</button></div>
     <pre id="registro"></pre>
+  </div>
+</div>
+
+<div class="modal" id="modal-renombrar" hidden>
+  <div class="modal-caja" style="max-width:440px;height:auto">
+    <div class="cajon-cabeza"><h2 data-i18n="ren.titulo"></h2><button class="cerrar" data-accion="cerrar-renombrar" data-i18n-aria="res.cerrar">×</button></div>
+    <p class="ayuda" id="ren-texto"></p>
+    <input type="text" id="ren-input" maxlength="40" autocomplete="off" spellcheck="false" style="width:100%;margin-top:8px;box-sizing:border-box">
+    <p class="ayuda res-mal" id="ren-error" hidden></p>
+    <div class="fila-botones" style="justify-content:flex-end;margin-top:12px">
+      <button class="boton" data-accion="cerrar-renombrar" data-i18n="accion.cancelar"></button>
+      <button class="boton primario" data-accion="confirmar-renombrar" id="b-renombrar"></button>
+    </div>
   </div>
 </div>
 

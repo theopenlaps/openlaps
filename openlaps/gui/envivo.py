@@ -85,7 +85,10 @@ class EnVivo:
                 "zona": [round(ancho), round(alto)], "url": f"http://127.0.0.1:{self.puerto}/?vivo=1"}
 
     def _leer(self):
-        for linea in self.proc.stdout:
+        proc = self.proc
+        if proc is None or proc.stdout is None:
+            return
+        for linea in proc.stdout:
             linea = linea.rstrip()
             if not linea:
                 continue
@@ -101,7 +104,7 @@ class EnVivo:
                 self.semilla = "error"
                 ev["estado"] = "semilla_error"
             self.al_evento(ev)
-        code = self.proc.wait()
+        code = proc.wait()
         self.al_evento({"tipo": "vivo", "estado": "fin", "codigo": code, "registro": self.lineas[-200:]})
 
     def estado(self):

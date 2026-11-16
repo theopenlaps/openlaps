@@ -23,7 +23,9 @@ Hace falta un token de Cesium ion (cuenta gratis, solo correo: https://ion.cesiu
 import argparse
 import collections
 import concurrent.futures
+import gzip
 import hashlib
+import http.client
 import http.server
 import json
 import math
@@ -102,40 +104,102 @@ def _sin_registro(texto):
 # ============================================================ Cesium ion → Google 3D Tiles
 class Google:
     def __init__(self, token):
+        self._local_http = threading.local()
         ep = json.loads(self._get(f"https://api.cesium.com/v1/assets/{ACTIVO_GOOGLE}/endpoint?access_token={token}"))
         self.raiz_url = ep["options"]["url"]
         self.llave = urllib.parse.parse_qs(urllib.parse.urlparse(self.raiz_url).query)["key"][0]
         self.sesion = None
         self.pedidas = 0
         self.subarboles = {}
+        self._sub_vuelo = {}
+        self._lock = threading.Lock()
 
-    @staticmethod
-    def _get(url):
-        req = urllib.request.Request(url, headers={"User-Agent": "OpenLaps"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.read()
+    def _conn(self, scheme, netloc):
+        conns = getattr(self._local_http, "conns", None)
+        if conns is None:
+            conns = {}
+            self._local_http.conns = conns
+        k = (scheme, netloc)
+        c = conns.get(k)
+        if c is None:
+            c = (http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection)(netloc, timeout=30)
+            conns[k] = c
+        return c
+
+    def _get(self, url):
+        """GET con conexiones persistentes (HTTP keep-alive) y compresión gzip para reutilizar TLS."""
+        for intento in range(2):
+            u = urllib.parse.urlparse(url)
+            ruta = (u.path or "/") + ("?" + u.query if u.query else "")
+            c = self._conn(u.scheme, u.netloc)
+            try:
+                c.request("GET", ruta, headers={"User-Agent": "OpenLaps", "Accept-Encoding": "gzip",
+                                                "Connection": "keep-alive"})
+                r = c.getresponse()
+                datos = r.read()
+                if r.status in (301, 302, 303, 307, 308):
+                    loc = r.getheader("Location")
+                    if loc:
+                        url = urllib.parse.urljoin(url, loc)
+                        continue
+                if r.status >= 400:
+                    raise RuntimeError(f"HTTP {r.status} en {u.netloc}{u.path}")
+                if r.getheader("Content-Encoding", "").lower() == "gzip":
+                    datos = gzip.decompress(datos)
+                return datos
+            except (http.client.HTTPException, OSError, EOFError):
+                c.close()
+                conns = getattr(self._local_http, "conns", None)
+                if conns is not None:
+                    conns.pop((u.scheme, u.netloc), None)
+                if intento == 1:
+                    raise
 
     def url(self, uri, base):
         u = urllib.parse.urlparse(urllib.parse.urljoin(base, uri))
         q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         q["key"] = self.llave
-        if "session" in q:
-            self.sesion = q["session"]
-        elif self.sesion:
-            q["session"] = self.sesion
+        with self._lock:
+            if "session" in q:
+                self.sesion = q["session"]
+            elif self.sesion:
+                q["session"] = self.sesion
         return u._replace(query=urllib.parse.urlencode(q)).geturl()
 
     def get(self, url):
-        self.pedidas += 1
+        with self._lock:
+            self.pedidas += 1
         return self._get(url)
 
     def subarbol(self, url):
         """Raíz de un subárbol JSON, guardada en memoria por su ruta (al moverse se vuelven a usar). Google da rutas
         opacas que cambian cada vez que se pide el root.json: por eso también se guarda la raíz."""
         ruta = urllib.parse.urlparse(url).path
-        if ruta not in self.subarboles:
-            self.subarboles[ruta] = json.loads(self.get(url))["root"]
-        return self.subarboles[ruta]
+        ev = None
+        soy_dueno = False
+        with self._lock:
+            if ruta in self.subarboles:
+                return self.subarboles[ruta]
+            ev = self._sub_vuelo.get(ruta)
+            if ev is None:
+                ev = threading.Event()
+                self._sub_vuelo[ruta] = ev
+                soy_dueno = True
+        if not soy_dueno:
+            ev.wait(30)
+            with self._lock:
+                if ruta in self.subarboles:
+                    return self.subarboles[ruta]
+        try:
+            raiz = json.loads(self.get(url))["root"]
+            with self._lock:
+                self.subarboles[ruta] = raiz
+            return raiz
+        finally:
+            if soy_dueno:
+                with self._lock:
+                    self._sub_vuelo.pop(ruta, None)
+                ev.set()
 
 
 def distancia(bv, punto):
@@ -154,36 +218,52 @@ def distancia(bv, punto):
     return math.sqrt(fuera)
 
 
-def seleccionar(google, centro, radio, error_por_metro, max_teselas):
+def seleccionar(google, centro, radio, error_por_metro, max_teselas, error_cerca=0.01, radio_cerca=150.0,
+                foco_actual=None, padres=None):
     """Teselas glb a dibujar alrededor de `centro` (ECEF): como Cesium, se baja de nivel mientras el error
-    geométrico sea grande para su distancia (refinamiento REPLACE). Por niveles, con peticiones en paralelo."""
+    geométrico sea grande para su distancia (refinamiento REPLACE). En los primeros `radio_cerca` m usa un error más
+    fino (`error_cerca`). Por niveles (ordenados por cercanía), con peticiones en paralelo."""
     elegidas = []
-    frente = [(google.subarbol(google.raiz_url), google.raiz_url)]
+    frente = [(google.subarbol(google.raiz_url), google.raiz_url, ())]
 
     def expandir(item):
-        tile, base = item
+        tile, base, anc = item
         d = distancia(tile["boundingVolume"], centro)
-        if d > radio:
+        d_foco = distancia(tile["boundingVolume"], foco_actual) if foco_actual is not None else d
+        if min(d, d_foco) > radio:
             return [], []
         uri = tile.get("content", {}).get("uri")
         if uri and ".json" in uri:
             url = google.url(uri, base)
-            return [], [(google.subarbol(url), url)]
+            return [], [(google.subarbol(url), url, anc)]
         hijos = tile.get("children", [])
-        suficiente = tile["geometricError"] <= max(0.5, d * error_por_metro)
-        if uri and ".glb" in uri and (suficiente or not hijos):
-            return [(google.url(uri, base), d)], []
-        return [], [(h, base) for h in hijos]
+        d_lod = min(d, d_foco)
+        tol = max(0.2, d_lod * min(error_por_metro, error_cerca)) if d_lod < radio_cerca \
+            else max(0.5, d_lod * error_por_metro)
+        if uri and ".glb" in uri:
+            u = google.url(uri, base)
+            if tile["geometricError"] <= tol or not hijos:
+                return [(u, d_lod, anc)], []
+            anc = anc + (tid(u),)
+        return [], [(h, base, anc) for h in hijos]
 
-    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+    with concurrent.futures.ThreadPoolExecutor(16) as ex:
         while frente and len(elegidas) < max_teselas:
             nuevos = []
             for sel, sig in ex.map(expandir, frente):
                 elegidas += sel
                 nuevos += sig
+            # si hay muchas ramas abiertas, prioriza las más cercanas al coche
+            if len(nuevos) > max_teselas:
+                nuevos.sort(key=lambda it: distancia(it[0]["boundingVolume"], foco_actual if foco_actual is not None else centro))
             frente = nuevos
     # las más cercanas primero: son las que se ven y las que se publican antes
-    return [u for u, _ in sorted(elegidas[:max_teselas], key=lambda e: e[1])]
+    elegidas.sort(key=lambda e: e[1])
+    elegidas = elegidas[:max_teselas]
+    if padres is not None:
+        for u, _, anc in elegidas:
+            padres[tid(u)] = frozenset(anc)
+    return [u for u, _, _ in elegidas]
 
 
 # ============================================================ glb de Google → mallas en coordenadas de AC
@@ -258,22 +338,83 @@ def primitivas(datos):
 
 class Marco:
     """ECEF → coordenadas de la pista de AC (x este, y arriba, z sur), con el desfase de altura de Google (≈ la
-    ondulación del geoide: Google da alturas elipsoidales y OpenLaps sobre el nivel del mar)."""
+    ondulación del geoide más corrección local suave cuando el MDE de superficie varía por manzanas, p. ej. en México).
+    Cada hilo tiene sus propios transformadores de pyproj."""
 
     def __init__(self, lat0, lon0, epsg):
-        self.a_geo = Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True)
-        self.a_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
-        self.a_ll = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
-        self.x0, self.y0 = self.a_utm.transform(lon0, lat0)
+        self._epsg = epsg
+        self._local = threading.local()
+        _, a_utm, _ = self._trans()
+        self.x0, self.y0 = a_utm.transform(lon0, lat0)
         self.desfase = None
+        self._ancla_lock = threading.Lock()
+        self.anclas = {}          # (ix, iz) cada 128 m -> (mx, mz, desfase_local)
+        self._ancla_arr = None    # tupla atómica (ax, az, ad) para lectura sin cerrojo
 
-    def ac(self, ecef):
-        lon, lat, h = self.a_geo.transform(ecef[:, 0], ecef[:, 1], ecef[:, 2])
-        e, n = self.a_utm.transform(lon, lat)
-        return np.c_[e - self.x0, h - (self.desfase or 0.0), -(n - self.y0)]
+    def _trans(self):
+        t = getattr(self._local, "t", None)
+        if t is None:
+            t = (
+                Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True),
+                Transformer.from_crs("EPSG:4326", f"EPSG:{self._epsg}", always_xy=True),
+                Transformer.from_crs(f"EPSG:{self._epsg}", "EPSG:4326", always_xy=True),
+            )
+            self._local.t = t
+        return t
+
+    def registrar_ancla(self, xs, zs, difs):
+        """Guarda un ancla local `(mx, mz, desfase)` a partir de muestras sobre la calle y actualiza la
+        superficie suave de alineación."""
+        if len(difs) == 0:
+            return
+        mx, mz = float(np.median(xs)), float(np.median(zs))
+        val = float(np.percentile(difs, 25))
+        celda = (int(round(mx / 128.0)), int(round(mz / 128.0)))
+        with self._ancla_lock:
+            if len(self.anclas) >= 3:
+                med = float(np.median([v[2] for v in self.anclas.values()]))
+                if abs(val - med) > 35.0:
+                    return
+            self.anclas[celda] = (mx, mz, val)
+            vals = list(self.anclas.values())
+            ax = np.array([v[0] for v in vals], float)
+            az = np.array([v[1] for v in vals], float)
+            ad = np.array([v[2] for v in vals], float)
+            self._ancla_arr = (ax, az, ad)
+            self.desfase = float(np.median(ad))
+
+    def desfase_en(self, x, z):
+        """Desfase interpolado suavemente en `(x, z)` para que todas las teselas vecinas empalmen sin escalón."""
+        arr = self._ancla_arr
+        if arr is None:
+            v = self.desfase or 0.0
+            return np.full_like(np.asarray(x, float), v, dtype=float) if np.ndim(x) else v
+        ax, az, ad = arr
+        if len(ad) == 1:
+            v = float(ad[0])
+            return np.full_like(np.asarray(x, float), v, dtype=float) if np.ndim(x) else v
+        x_arr = np.atleast_1d(np.asarray(x, float))
+        z_arr = np.atleast_1d(np.asarray(z, float))
+        r0_2 = 90.0 * 90.0
+        out = np.empty(len(x_arr), float)
+        for s in range(0, len(x_arr), 8192):
+            dx = x_arr[s:s + 8192, None] - ax[None, :]
+            dz = z_arr[s:s + 8192, None] - az[None, :]
+            w = 1.0 / (dx * dx + dz * dz + r0_2)
+            out[s:s + 8192] = (w @ ad) / w.sum(axis=1)
+        return out if np.ndim(x) else float(out[0])
+
+    def ac(self, ecef, desfase=True):
+        a_geo, a_utm, _ = self._trans()
+        lon, lat, h = a_geo.transform(ecef[:, 0], ecef[:, 1], ecef[:, 2])
+        e, n = a_utm.transform(lon, lat)
+        dx, dz = e - self.x0, -(n - self.y0)
+        dh = self.desfase_en(dx, dz) if desfase else 0.0
+        return np.c_[dx, h - dh, dz]
 
     def lonlat(self, x, z):
-        return self.a_ll.transform(self.x0 + x, self.y0 - z)
+        _, _, a_ll = self._trans()
+        return a_ll.transform(self.x0 + x, self.y0 - z)
 
     @staticmethod
     def ecef(lat, lon, h):
@@ -391,8 +532,6 @@ class Calles:
         alto = np.full((nx, nz), -1e9)
         cubre = np.zeros((nx, nz), bool)
         _rasterizar(T, self.x0, self.z0, nx, nz, CELDA, alto, cubre)
-        disco = lambda r: np.hypot(*np.mgrid[-r:r + 1, -r:r + 1]) <= r  # noqa: E731
-
         def mascara(lista):
             m = np.zeros((nx, nz), bool)
             if lista:
@@ -400,19 +539,30 @@ class Calles:
             return m
         # donde se quita TODO lo de Google: la calzada encogida 2 m y lejos de las plantas de los edificios. La
         # malla de Google es una cáscara hueca y las fachadas caen a menudo sobre la banqueta: recortar ahí (o
-        # junto a un edificio) se llevaba la fachada y quedaban techos y astillas sueltas
+        # junto a un edificio) se llevaba la fachada y quedaban techos y astillas sueltas.
+        # 3 transformadas de distancia (rápidas) en vez de 5 dilataciones/erosiones de núcleo grande
         calz = mascara(tris_calz)
         edif = mascara(tris_edif)
-        self.via = ndimage.binary_erosion(calz, disco(int(2.0 / CELDA))) &             ~ndimage.binary_dilation(edif, disco(int(1.5 / CELDA)))
-        # alrededor (banquetas incluidas): solo lo que queda entero por debajo de 2 m (coches, gente, suelo)
-        self.franja = ndimage.binary_dilation(cubre, disco(int(FRANJA / CELDA))) & ~self.via
-        self.limpieza = ndimage.binary_dilation(cubre, disco(int((FRANJA + 2.0) / CELDA)))
+        d_cubre, (ii, jj) = ndimage.distance_transform_edt(~cubre, return_indices=True)
+        d_edif = ndimage.distance_transform_edt(~edif) if edif.any() else None
+        edif_protec = (d_edif <= (1.0 / CELDA)) if d_edif is not None else edif
+        d_calz = ndimage.distance_transform_edt(calz) if calz.any() else None
+        via_calz = (d_calz > (2.0 / CELDA)) if d_calz is not None else calz
+        self.edif = edif
+        self.cubre = cubre
+        self.via = (via_calz & ~(d_edif <= (1.5 / CELDA))) if d_edif is not None else via_calz
+        # alrededor (banquetas incluidas): solo lo que queda entero por debajo de 2 m (coches, gente, suelo),
+        # sin meterse nunca en las plantas de los edificios de OpenLaps (si no, les corta los bajos)
+        self.franja = (d_cubre <= (FRANJA / CELDA)) & ~self.via & ~edif_protec
+        self.limpieza = (d_cubre <= ((FRANJA + 2.0) / CELDA)) & ~edif
         # altura del suelo en toda la rejilla: la de la calzada más cercana
-        _, (ii, jj) = ndimage.distance_transform_edt(~cubre, return_indices=True)
         self.suelo_r = alto[ii, jj]
         self.nx, self.nz = nx, nz
         if avisar:
             log(f"calzada de OpenLaps: {cubre.sum() * CELDA * CELDA:,.0f} m²")
+
+    def tiene_edif(self):
+        return bool(self.edif.any())
 
     def _ij(self, x, z):
         i = np.clip(((np.asarray(x) - self.x0) / CELDA).astype(np.int64), 0, self.nx - 1)
@@ -439,27 +589,59 @@ class CallesVivo:
         self.pedazos = {}            # (i, j) -> Calles
         self.salida = (0.0, 0.0)
         self.materiales = set()
+        self._lock = threading.Lock()
+
+    def tiene_edif(self):
+        with self._lock:
+            return any(c.tiene_edif() for c in self.pedazos.values())
 
     def cargar_cerca(self, x, z, radio):
         L = self.L
         n = int(math.ceil(radio / L)) + 1
         ci, cj = int(math.floor(x / L + 0.5)), int(math.floor(-z / L + 0.5))
-        nuevos = 0
-        for i in range(ci - n, ci + n + 1):
-            for j in range(cj - n, cj + n + 1):
-                if (i, j) in self.pedazos:
-                    continue
-                f = os.path.join(self.carpeta, f"p_{i}_{j}.glb")
-                if os.path.isfile(f):
-                    try:
-                        c = Calles(f, avisar=False)
-                    except (SystemExit, OSError, ValueError, KeyError):
-                        continue            # pedazo sin calles (campo, agua) o a medio escribir
-                    self.pedazos[(i, j)] = c
-                    self.materiales |= c.materiales
-                    nuevos += 1
-        if nuevos:
-            log(f"calzada: {nuevos} pedazos nuevos ({len(self.pedazos)} en total)")
+        faltan = []
+        with self._lock:
+            for i in range(ci - n, ci + n + 1):
+                for j in range(cj - n, cj + n + 1):
+                    if (i, j) not in self.pedazos:
+                        f = os.path.join(self.carpeta, f"p_{i}_{j}.glb")
+                        if os.path.isfile(f):
+                            faltan.append((i, j, f))
+        cargados = []
+        if len(faltan) > 1:
+            def _leer(item):
+                i, j, f = item
+                try:
+                    return (i, j), Calles(f, avisar=False)
+                except (SystemExit, OSError, ValueError, KeyError):
+                    return None
+            with concurrent.futures.ThreadPoolExecutor(min(8, len(faltan))) as ex:
+                cargados = [r for r in ex.map(_leer, faltan) if r is not None]
+        elif faltan:
+            i, j, f = faltan[0]
+            try:
+                cargados.append(((i, j), Calles(f, avisar=False)))
+            except (SystemExit, OSError, ValueError, KeyError):
+                pass
+        nuevos_k = []
+        if cargados:
+            with self._lock:
+                for k, c in cargados:
+                    if k not in self.pedazos:
+                        self.pedazos[k] = c
+                        self.materiales |= c.materiales
+                        nuevos_k.append(k)
+                total = len(self.pedazos)
+            if nuevos_k:
+                log(f"calzada: {len(nuevos_k)} pedazos nuevos ({total} en total)")
+        return nuevos_k
+
+    def faltantes_en(self, x, z, margen=80.0):
+        """Claves de pedazos alrededor de `(x, z)` que aún no se han cargado."""
+        ci0, cj0 = self._claves(np.array([x - margen, x + margen]), np.array([z - margen, z + margen]))
+        with self._lock:
+            return {(i, j) for i in range(int(ci0.min()), int(ci0.max()) + 1)
+                    for j in range(int(cj0.min()), int(cj0.max()) + 1) if (i, j) not in self.pedazos}
 
     def _claves(self, x, z):
         x, z = np.asarray(x, float), np.asarray(z, float)
@@ -468,20 +650,22 @@ class CallesVivo:
     def _consulta(self, que, x, z, mascara=None):
         x, z = np.atleast_1d(np.asarray(x, float)), np.atleast_1d(np.asarray(z, float))
         out = np.zeros(len(x), bool) if que == "en" else np.full(len(x), np.nan)
-        if not self.pedazos:
+        with self._lock:
+            pedazos = dict(self.pedazos)
+        if not pedazos:
             return out if que == "en" else np.zeros(len(x))
         ki, kj = self._claves(x, z)
-        claves = list(self.pedazos)
+        claves = list(pedazos)
         cent = np.array([(i * self.L, -j * self.L) for i, j in claves])
         for a, b in set(zip(ki.tolist(), kj.tolist())):
             sel = (ki == a) & (kj == b)
-            c = self.pedazos.get((a, b))
+            c = pedazos.get((a, b))
             if c is None:
                 if que == "en":
                     continue
                 # sin pedazo: la altura del pedazo cargado más cercano (fuera de su rejilla se recorta al borde)
                 k = int(np.argmin(np.hypot(cent[:, 0] - a * self.L, cent[:, 1] + b * self.L)))
-                c = self.pedazos[claves[k]]
+                c = pedazos[claves[k]]
             if que == "en":
                 out[sel] = c.en(getattr(c, mascara), x[sel], z[sel])
             else:
@@ -489,7 +673,7 @@ class CallesVivo:
         return out
 
     # misma interfaz que Calles (las máscaras se piden por nombre)
-    via, franja, limpieza = "via", "franja", "limpieza"
+    via, franja, limpieza, edif, cubre = "via", "franja", "limpieza", "edif", "cubre"
 
     def en(self, mascara, x, z):
         return self._consulta("en", x, z, mascara)
@@ -529,7 +713,13 @@ class Mundo:
         self.teselas = collections.OrderedDict()   # tid -> [ids de malla]  (las más recientes al final)
         self.mallas = {}                             # id -> {"geo", "tex"}
         self.centro_malla = {}                       # id -> (x, z) en la pista
-        self.completo = []                           # mallas del último conjunto entero
+        self.tid_meta = {}                           # tid -> (cx, cz, d_usado, set_pedazos_faltantes)
+        self.padres_de = {}                          # tid -> frozenset(tids ancestros)
+        self.completo_tids = []                      # tids del último conjunto entero
+        self.tapa = {}                               # tid_viejo -> [tids nuevos que lo sustituyen]
+        self.vigentes_set = set()
+        self.en_proceso = set()                      # tids bajándose/convirtiéndose (evita trabajo doble entre hilos)
+        self.bucle_activo = False
         # versiones numeradas desde la hora de arranque: si se reinicia, AC no confunde la nueva v1 con la anterior
         self.version, self.publicadas = int(time.time()) % 10_000_000 * 100, []
         self.inicial = self.version
@@ -538,6 +728,9 @@ class Mundo:
         self.despertar = threading.Event()
         self.despertar.set()
         self.error = None
+        self._vivo_url = getattr(args, "vivo_url", None) or ("http://127.0.0.1:8790" if getattr(args, "vivo", None) else None)
+        self._t_camino, self._zona_tam = 0.0, (1200.0, 1200.0)
+        self._hechas_zona = set()
 
     def prevista(self):
         """Dónde estará el coche en ~6 s (como mucho 150 m por delante)."""
@@ -561,10 +754,72 @@ class Mundo:
         if self.centro is None or math.hypot(px - self.centro[0], pz - self.centro[1]) > UMBRAL_MOVIDO:
             self.despertar.set()
         elif isinstance(self.calles, CallesVivo) and time.time() - getattr(self, "t_revisado", 0) > 15:
-            # los pedazos de alrededor van llegando: cada 15 s se vuelve a recortar con los nuevos
-            # (solo para las teselas que se bajen desde ahora: volver a recortar todas costaba 30 s cada vez)
+            # los pedazos de alrededor van llegando: cada 15 s se revisan los nuevos y se invalidan solo las
+            # teselas que se convirtieron antes de que existiera su calle
             self.t_revisado = time.time()
-            self.calles.cargar_cerca(x, z, self.args.radio)
+            if self.calles.cargar_cerca(x, z, self.args.radio):
+                self.despertar.set()
+
+    def _ecef_de(self, x, z):
+        lon, lat = self.marco.lonlat(x, z)
+        d = self.marco.desfase_en(x, z) if self.marco.desfase is not None else 0.0
+        h = float(np.ravel(self.calles.suelo(x, z))[0]) + float(d) + 1.5
+        return self.marco.ecef(lat, lon, h)
+
+    def _reemplazos(self, viejos, vigentes):
+        reemp = {}
+        for t_old in viejos:
+            desc = [t for t in vigentes if t_old in self.padres_de.get(t, ())]
+            if desc:
+                reemp[t_old] = desc
+                continue
+            anc = [t for t in vigentes if t in self.padres_de.get(t_old, ())]
+            if anc:
+                reemp[t_old] = anc
+        return reemp
+
+    def _invalidar(self, nuevos_pedazos=()):
+        """Quita de la caché las teselas que ya quedaron desfasadas (> 1,5 m frente a nuevas anclas) o cuyo pedazo
+        de calle acaba de llegar."""
+        nset = set(nuevos_pedazos)
+        borrar = []
+        with self.cerrojo:
+            for t, (cx, cz, d_u, falt) in self.tid_meta.items():
+                if (nset and (falt & nset)) or (self.marco.desfase is not None
+                                               and abs(float(self.marco.desfase_en(cx, cz)) - d_u) > 1.5):
+                    borrar.append(t)
+            for t in borrar:
+                self.tid_meta.pop(t, None)
+                for i in self.teselas.pop(t, ()):
+                    self.mallas.pop(i, None)
+                    self.centro_malla.pop(i, None)
+        return len(borrar)
+
+    def _guardar_teselas(self, grupo, convertidas):
+        with self.cerrojo:
+            for u, res in zip(grupo, convertidas):
+                mallas, meta = res if isinstance(res, tuple) else (res, None)
+                t = tid(u)
+                if t in self.teselas:
+                    continue
+                ids = []
+                for k, m in enumerate(mallas):
+                    i = f"{self.inicial}_{t}_{k}"
+                    self.mallas[i] = m
+                    self.centro_malla[i] = m.pop("centro")
+                    ids.append(i)
+                self.teselas[t] = ids
+                if meta is not None:
+                    self.tid_meta[t] = meta
+            while len(self.teselas) > self.args.cache:
+                t, ids = next(iter(self.teselas.items()))
+                if t in self.vigentes_set:
+                    break
+                self.teselas.popitem(last=False)
+                self.tid_meta.pop(t, None)
+                for i in ids:
+                    self.mallas.pop(i, None)
+                    self.centro_malla.pop(i, None)
 
     def bucle(self):
         while True:
@@ -582,86 +837,301 @@ class Mundo:
     def actualizar(self, x, z):
         t0 = time.time()
         self.centro = (x, z)
+        fx, fz = self.foco
         if isinstance(self.calles, CallesVivo):
-            self.calles.cargar_cerca(x, z, self.args.radio)
-        lon, lat = self.marco.lonlat(x, z)
-        h = float(np.ravel(self.calles.suelo(x, z))[0]) + (self.marco.desfase or 50.0) + 1.5
-        urls = seleccionar(self.google, self.marco.ecef(lat, lon, h), self.args.radio, self.args.error, self.args.max)
-        nuevas = [u for u in urls if tid(u) not in self.teselas]
+            nuevos_p = self.calles.cargar_cerca(x, z, self.args.radio)
+            nuevos_p += self.calles.cargar_cerca(fx, fz, 250.0)
+            if nuevos_p:
+                self._invalidar(nuevos_p)
+        padres = {}
+        err_cerca = getattr(self.args, "error_cerca", 0.01)
+        urls = seleccionar(self.google, self._ecef_de(x, z), self.args.radio, self.args.error, self.args.max,
+                           error_cerca=err_cerca, radio_cerca=150.0, foco_actual=self._ecef_de(fx, fz), padres=padres)
         vigentes = list(dict.fromkeys(tid(u) for u in urls))
-        # lo anterior que se sigue enseñando mientras carga lo nuevo: solo el último conjunto COMPLETO y solo lo que
-        # sigue dentro del radio (antes se iban acumulando las tandas a medias: 2.300 mallas, viejas encima de nuevas)
-        anteriores = [i for i in getattr(self, "completo", [])
-                      if math.hypot(*(np.subtract(self.centro_malla.get(i, (1e9, 1e9)), (x, z)))) < self.args.radio]
-        # por tandas, de la más cercana a la más lejana, publicando cada tanda: antes no salía nada hasta tener
-        # las ~300 teselas (20-30 s) y a 70 km/h el coche ya iba 500 m más allá. Mientras tanto se siguen
-        # publicando también las mallas anteriores (si no, AC quitaría las viejas antes de tener las nuevas)
-        TANDA = 24
-        for k0 in range(0, max(len(nuevas), 1), TANDA):
-            grupo = nuevas[k0:k0 + TANDA]
-            with concurrent.futures.ThreadPoolExecutor(8) as ex:
-                crudas = list(ex.map(self.google.get, grupo))
-            prims = [primitivas(d) for d in crudas]
-            if self.marco.desfase is None and prims:
-                self.marco.desfase = self.medir_desfase([p for ps in prims for p in ps], (x, z))
-                log(f"desfase de altura Google - OpenLaps: {self.marco.desfase:.2f} m")
-            # en un solo hilo: los transformadores de pyproj no se pueden compartir entre hilos
-            convertidas = [self.convertir(p) for p in prims]
-            ultima = k0 + TANDA >= len(nuevas)
-            with self.cerrojo:
-                for u, mallas in zip(grupo, convertidas):
-                    ids = []
-                    for k, m in enumerate(mallas):
-                        i = f"{self.inicial}_{tid(u)}_{k}"
-                        self.mallas[i] = m
-                        self.centro_malla[i] = m.pop("centro")
-                        ids.append(i)
-                    self.teselas[tid(u)] = ids
-                listas = [i for t in vigentes if t in self.teselas for i in self.teselas[t]]
-                self.publicadas = listas if ultima else list(dict.fromkeys(listas + anteriores))
-                if ultima:
-                    self.completo = listas
-                self.version += 1
-            if not ultima and math.hypot(*np.subtract(self.prevista(), (x, z))) > 2 * UMBRAL_MOVIDO:
-                break                    # el coche ya se fue lejos: mejor empezar otra selección desde donde está
         with self.cerrojo:
-            for t in vigentes:
-                if t in self.teselas:
-                    self.teselas.move_to_end(t)
-            while len(self.teselas) > self.args.cache:      # memoria: fuera las más viejas que ya no se usan
-                t, ids = next(iter(self.teselas.items()))
-                if t in vigentes:
-                    break
-                self.teselas.popitem(last=False)
-                for i in ids:
-                    self.mallas.pop(i, None)
-                    self.centro_malla.pop(i, None)
+            self.padres_de.update(padres)
+            self.vigentes_set = set(vigentes)
+            nuevas = [u for u in urls if tid(u) not in self.teselas]
+            viejos = [t for t in self.completo_tids if t not in self.vigentes_set]
+            reemp = self._reemplazos(viejos, vigentes)
+            self.tapa = reemp
+
+        # por tandas, de la más cercana a la más lejana, publicando cada tanda; los viejos que ya tienen todos sus
+        # sustitutos listos dejan de publicarse al instante (nunca coexiste una tesela burda encima de sus hijas)
+        TANDA = 24
+        self.bucle_activo = True
+        try:
+            pend_sin_desfase = []
+            for k0 in range(0, max(len(nuevas), 1), TANDA):
+                candidatas = nuevas[k0:k0 + TANDA]
+                grupo = []
+                with self.cerrojo:
+                    for u in candidatas:
+                        t = tid(u)
+                        if t not in self.teselas and t not in self.en_proceso:
+                            self.en_proceso.add(t)
+                            grupo.append(u)
+                if grupo:
+                    try:
+                        with concurrent.futures.ThreadPoolExecutor(16) as ex:
+                            crudas = list(ex.map(self.google.get, grupo))
+                        prims = [primitivas(d) for d in crudas]
+                        n_anc_antes = len(self.marco.anclas)
+                        if self.marco.desfase is None and prims:
+                            d0 = self.medir_desfase([p for ps in prims for p in ps], (x, z))
+                            if d0 is not None:
+                                self.marco.desfase = d0
+                                log(f"desfase de altura Google - OpenLaps: {self.marco.desfase:.2f} m")
+                        if self.marco.desfase is None:
+                            pend_sin_desfase.extend(zip(grupo, prims))
+                        else:
+                            if pend_sin_desfase:
+                                gs, ps = zip(*pend_sin_desfase)
+                                pend_sin_desfase.clear()
+                                self._guardar_teselas(gs, [self.convertir(p) for p in ps])
+                            convertidas = [self.convertir(p) for p in prims]
+                            self._guardar_teselas(grupo, convertidas)
+                            if len(self.marco.anclas) > n_anc_antes:
+                                self._invalidar()
+                    finally:
+                        with self.cerrojo:
+                            for u in grupo:
+                                self.en_proceso.discard(tid(u))
+                ultima = k0 + TANDA >= len(nuevas)
+                if ultima and pend_sin_desfase:
+                    if self.marco.desfase is None:
+                        # ninguna tesela tocó calle aún (p. ej. pedazos aún generándose): usar 0 provisional sin fijar ancla
+                        self.marco.desfase = 0.0
+                    gs, ps = zip(*pend_sin_desfase)
+                    pend_sin_desfase.clear()
+                    self._guardar_teselas(gs, [self.convertir(p) for p in ps])
+                    if not self.marco.anclas:
+                        self.marco.desfase = None    # que la próxima tanda real sí calibre el desfase
+                with self.cerrojo:
+                    listas = [i for t in vigentes if t in self.teselas for i in self.teselas[t]]
+                    if ultima:
+                        self.publicadas = listas
+                        self.completo_tids = vigentes
+                    else:
+                        anteriores = []
+                        for t_old in viejos:
+                            rep = reemp.get(t_old)
+                            if rep and all(r in self.teselas for r in rep):
+                                continue
+                            for i in self.teselas.get(t_old, ()):
+                                if math.hypot(*np.subtract(self.centro_malla.get(i, (1e9, 1e9)), (x, z))) < self.args.radio:
+                                    anteriores.append(i)
+                        self.publicadas = list(dict.fromkeys(listas + anteriores))
+                    self.version += 1
+                if not ultima and math.hypot(*np.subtract(self.prevista(), (x, z))) > 2 * UMBRAL_MOVIDO:
+                    break                    # el coche ya se fue lejos: mejor empezar otra selección desde donde está
+            with self.cerrojo:
+                for t in vigentes:
+                    if t in self.teselas:
+                        self.teselas.move_to_end(t)
+                while len(self.teselas) > self.args.cache:      # memoria: fuera las más viejas que ya no se usan
+                    t, ids = next(iter(self.teselas.items()))
+                    if t in self.vigentes_set:
+                        break
+                    self.teselas.popitem(last=False)
+                    self.tid_meta.pop(t, None)
+                    for i in ids:
+                        self.mallas.pop(i, None)
+                        self.centro_malla.pop(i, None)
+        finally:
+            self.bucle_activo = False
         if math.hypot(*np.subtract(self.prevista(), (x, z))) > UMBRAL_MOVIDO:
             self.despertar.set()
         log(f"v{self.version - self.inicial}: {len(vigentes)} teselas ({len(nuevas)} nuevas, "
             f"{self.google.pedidas} peticiones), {len(self.publicadas)} mallas, {time.time() - t0:.1f} s")
 
-    def medir_desfase(self, prims, centro, radio=150.0):
-        """Altura de la superficie de Google menos la de la calzada de OpenLaps cerca del coche (percentil 30:
-        coches y árboles solo pueden subirla)."""
-        self.marco.desfase = 0.0
-        difs = []
+    def _camino_vivo(self, fx, fz, vx, vz):
+        """Puntos previstos sobre las calles de OSM (desde el servidor en vivo) y tamaño de la zona preparada."""
+        if not self._vivo_url:
+            return [], self._zona_tam
+        try:
+            u = f"{self._vivo_url}/vivo/camino?x={fx:.1f}&z={fz:.1f}&vx={vx:.2f}&vz={vz:.2f}"
+            with urllib.request.urlopen(u, timeout=1.5) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            if d.get("zona_tam"):
+                self._zona_tam = tuple(float(v) for v in d["zona_tam"])
+            return d.get("camino") or [], self._zona_tam
+        except Exception:  # noqa: BLE001
+            return [], self._zona_tam
+
+    def _precargar_punto(self, tx, tz, radio=240.0):
+        if self.bucle_activo:
+            return 0
+        if isinstance(self.calles, CallesVivo):
+            nuevos_p = self.calles.cargar_cerca(tx, tz, radio + 60.0)
+            if nuevos_p:
+                self._invalidar(nuevos_p)
+        padres = {}
+        err_cerca = getattr(self.args, "error_cerca", 0.01)
+        urls = seleccionar(self.google, self._ecef_de(tx, tz), radio, self.args.error, 400,
+                           error_cerca=err_cerca, radio_cerca=radio, padres=padres)
+        with self.cerrojo:
+            self.padres_de.update(padres)
+            pend = [u for u in urls if tid(u) not in self.teselas and tid(u) not in self.en_proceso]
+        if not pend:
+            return 0
+        hechas = 0
+        for k0 in range(0, len(pend), 12):
+            if self.bucle_activo:
+                break
+            grupo = []
+            with self.cerrojo:
+                if len(self.teselas) >= int(self.args.cache * 0.92):
+                    break
+                for u in pend[k0:k0 + 12]:
+                    t = tid(u)
+                    if t not in self.teselas and t not in self.en_proceso:
+                        self.en_proceso.add(t)
+                        grupo.append(u)
+            if not grupo:
+                continue
+            try:
+                with concurrent.futures.ThreadPoolExecutor(8) as ex:
+                    crudas = list(ex.map(self.google.get, grupo))
+                convertidas = [self.convertir(primitivas(d)) for d in crudas]
+                self._guardar_teselas(grupo, convertidas)
+                hechas += len(grupo)
+            finally:
+                with self.cerrojo:
+                    for u in grupo:
+                        self.en_proceso.discard(tid(u))
+            time.sleep(0.02)
+        return hechas
+
+    def precarga_bucle(self):
+        """Hilo en segundo plano: precarga con detalle fino 300-600 m por delante al conducir, o la zona entera
+        (1200x1200 m) con el coche parado."""
+        while self.marco.desfase is None:
+            time.sleep(0.5)
+        while True:
+            try:
+                if self.bucle_activo:
+                    time.sleep(0.25)
+                    continue
+                fx, fz = self.foco
+                vx, vz = getattr(self, "vel", (0.0, 0.0))
+                rap = math.hypot(vx, vz)
+                hechas = 0
+                if rap >= 2.0:
+                    camino, _ = self._camino_vivo(fx, fz, vx, vz)
+                    blancos = []
+                    if len(camino) >= 2:
+                        for dist in (320.0, 480.0, 600.0):
+                            cerca = min(camino, key=lambda p: abs((p[2] if len(p) > 2 else math.hypot(p[0] - fx, p[1] - fz)) - dist))
+                            s = cerca[2] if len(cerca) > 2 else math.hypot(cerca[0] - fx, cerca[1] - fz)
+                            if 220.0 <= s <= 700.0:
+                                blancos.append((cerca[0], cerca[1]))
+                    if not blancos:
+                        ux, uz = vx / rap, vz / rap
+                        blancos = [(fx + ux * 350.0, fz + uz * 350.0), (fx + ux * 550.0, fz + uz * 550.0)]
+                    vistos = set()
+                    for bx, bz in blancos:
+                        cl = (round(bx / 60), round(bz / 60))
+                        if cl in vistos:
+                            continue
+                        vistos.add(cl)
+                        hechas += self._precargar_punto(bx, bz, radio=240.0)
+                        if math.hypot(self.foco[0] - fx, self.foco[1] - fz) > 80.0 or self.bucle_activo:
+                            break
+                else:
+                    w, h = self._zona_tam
+                    cx0, cz0 = (0.0, 0.0) if getattr(self.args, "vivo", None) else self.calles.salida
+                    paso = 240.0
+                    xs = np.arange(cx0 - w / 2 + paso / 2, cx0 + w / 2, paso)
+                    zs = np.arange(cz0 - h / 2 + paso / 2, cz0 + h / 2, paso)
+                    pts = sorted([(float(a), float(b)) for a in xs for b in zs],
+                                 key=lambda p: math.hypot(p[0] - fx, p[1] - fz))
+                    for bx, bz in pts:
+                        if math.hypot(*getattr(self, "vel", (0.0, 0.0))) >= 2.0 or self.bucle_activo:
+                            break
+                        k = (round(bx), round(bz))
+                        if k in self._hechas_zona:
+                            continue
+                        n = self._precargar_punto(bx, bz, radio=220.0)
+                        hechas += n
+                        if not self.bucle_activo:
+                            self._hechas_zona.add(k)
+                        if len(self.teselas) >= int(self.args.cache * 0.92):
+                            break
+                if hechas:
+                    log(f"precarga: +{hechas} teselas en caché ({len(self.teselas)}/{self.args.cache})")
+                else:
+                    time.sleep(1.0)
+            except Exception as e:  # noqa: BLE001
+                log(f"precarga: {e!r}")
+                time.sleep(2.0)
+
+    def _cargados_mask(self, xs, zs):
+        """En modo en vivo: qué puntos caen en pedazos ya generados (fuera de ellos la altura es extrapolada)."""
+        cl = self.calles
+        if not isinstance(cl, CallesVivo):
+            return np.ones(len(xs), bool)
+        ki, kj = cl._claves(xs, zs)
+        with cl._lock:
+            peds = set(cl.pedazos)
+        return np.array([(int(a), int(b)) in peds for a, b in zip(ki, kj)], bool)
+
+    def medir_desfase(self, prims, centro, radio=250.0):
+        """Altura de la superficie de Google menos la de la calzada de OpenLaps (percentil 25: coches y árboles
+        solo pueden subirla). Registra también anclas locales y devuelve None si aún no toca ninguna calle."""
+        difs_cerca, difs_todo, difs_plaza = [], [], []
+        cl = self.calles
         for pos_ecef, _, tris, _ in prims:
-            p = self.marco.ac(pos_ecef)
+            p = self.marco.ac(pos_ecef, desfase=False)
             c = (p[tris[:, 0]] + p[tris[:, 1]] + p[tris[:, 2]]) / 3
-            cerca = (np.hypot(c[:, 0] - centro[0], c[:, 2] - centro[1]) < radio) & self.calles.en(self.calles.via, c[:, 0], c[:, 2])
-            if cerca.any():
-                difs += list(c[cerca, 1] - self.calles.suelo(c[cerca, 0], c[cerca, 2]))
-        self.marco.desfase = None
-        return float(np.percentile(difs, 30)) if difs else 50.0
+            en_ped = self._cargados_mask(c[:, 0], c[:, 2])
+            if not en_ped.any():
+                continue
+            en_via = en_ped & cl.en(cl.via, c[:, 0], c[:, 2])
+            if en_via.any():
+                sv = cl.suelo(c[en_via, 0], c[en_via, 2])
+                d = c[en_via, 1] - sv
+                if en_via.sum() >= 15:
+                    self.marco.registrar_ancla(c[en_via, 0], c[en_via, 2], d)
+                difs_todo.extend(d.tolist())
+                m_cerca = np.hypot(c[en_via, 0] - centro[0], c[en_via, 2] - centro[1]) < radio
+                if m_cerca.any():
+                    difs_cerca.extend(d[m_cerca].tolist())
+            else:
+                en_plaza = en_ped & cl.en(cl.cubre, c[:, 0], c[:, 2]) & ~cl.en(cl.edif, c[:, 0], c[:, 2])
+                if en_plaza.any():
+                    sv = cl.suelo(c[en_plaza, 0], c[en_plaza, 2])
+                    d = c[en_plaza, 1] - sv
+                    if en_plaza.sum() >= 30 and not self.marco.anclas:
+                        self.marco.registrar_ancla(c[en_plaza, 0], c[en_plaza, 2], d)
+                    difs_plaza.extend(d.tolist())
+        eleg = difs_cerca or difs_todo or difs_plaza
+        return float(np.percentile(eleg, 25)) if eleg else None
 
     def convertir(self, prims):
-        """Mallas empacadas de una tesela: en coordenadas de AC y sin lo que cae sobre la calle de OpenLaps."""
+        """Mallas empacadas de una tesela: en coordenadas de AC (alineadas suavemente a la altura local de las
+        calles) y sin lo que cae sobre la calle de OpenLaps."""
         salida = []
         cl = self.calles
+        pts_raw = []
         for pos_ecef, uv, tris, jpeg in prims:
-            p = self.marco.ac(pos_ecef)
+            p = self.marco.ac(pos_ecef, desfase=False)
             c = (p[tris[:, 0]] + p[tris[:, 1]] + p[tris[:, 2]]) / 3
+            en_ped = self._cargados_mask(c[:, 0], c[:, 2])
+            if en_ped.any():
+                en_via = en_ped & cl.en(cl.via, c[:, 0], c[:, 2])
+                if en_via.sum() >= 15:
+                    d = c[en_via, 1] - cl.suelo(c[en_via, 0], c[en_via, 2])
+                    self.marco.registrar_ancla(c[en_via, 0], c[en_via, 2], d)
+            pts_raw.append((p, uv, tris, jpeg))
+
+        cxs, czs = [], []
+        for p_raw, uv, tris, jpeg in pts_raw:
+            p = p_raw.copy()
+            p[:, 1] -= self.marco.desfase_en(p[:, 0], p[:, 2])
+            c = (p[tris[:, 0]] + p[tris[:, 1]] + p[tris[:, 2]]) / 3
+            cxs.append(float(c[:, 0].mean()))
+            czs.append(float(c[:, 2].mean()))
             # sobre la calzada y las banquetas se va todo (si no, árboles derretidos y "telarañas" entre edificios
             # hacen túneles)
             en_via = cl.en(cl.via, c[:, 0], c[:, 2])
@@ -676,14 +1146,26 @@ class Mundo:
             if len(tris):
                 tris = self.sin_flotantes(p, tris)
             if len(tris):
+                if len(p) >= len(tris) * 2:
+                    # soldar vértices duplicados (mallas sin indexar) para aliviar AC
+                    _, idx_u, inv = np.unique(np.c_[np.round(p, 3), np.round(uv, 4)], axis=0,
+                                              return_index=True, return_inverse=True)
+                    p, uv, tris = p[idx_u], uv[idx_u], inv[tris]
                 cen = p[np.unique(tris)][:, [0, 2]].mean(axis=0)
                 salida += [{"geo": empacar(pp, uu, tt), "tex": jpeg, "centro": (float(cen[0]), float(cen[1]))}
                            for pp, uu, tt in partir(p, uv, tris)]
-        return salida
+        if cxs:
+            mx, mz = float(np.mean(cxs)), float(np.mean(czs))
+            falt = cl.faltantes_en(mx, mz, 90.0) if isinstance(cl, CallesVivo) else set()
+            meta = (mx, mz, float(self.marco.desfase_en(mx, mz)), falt)
+        else:
+            meta = None
+        return salida, meta
 
     def sin_flotantes(self, p, tris, alto_min=2.5, area_max=20.0):
-        """Quita los pedazos sueltos que dejan los recortes cerca de la calle: componentes chicos que ya no tocan
-        el suelo (copas de árboles derretidas, trozos de fachada). Fachadas y techos siguen pegados a su edificio."""
+        """Quita los pedazos sueltos que dejan los recortes cerca de la calle: componentes chicos (y grandes si no
+        tocan ninguna planta de edificio de OpenLaps) que ya no tocan el suelo (copas de árboles, toldos, trozos de
+        fachada sueltos)."""
         n = len(p)
         a = np.r_[tris[:, 0], tris[:, 1], tris[:, 2]]
         b = np.r_[tris[:, 1], tris[:, 2], tris[:, 0]]
@@ -698,17 +1180,20 @@ class Mundo:
         cuenta = np.bincount(lab[usados], minlength=lab.max() + 1)
         cx = np.bincount(lab[usados], p[usados, 0], lab.max() + 1) / np.maximum(cuenta, 1)
         cz = np.bincount(lab[usados], p[usados, 2], lab.max() + 1) / np.maximum(cuenta, 1)
-        chicos = comps[area_c[comps] < area_max]
-        chicos = chicos[self.calles.en(self.calles.limpieza, cx[chicos], cz[chicos])] if len(chicos) else chicos
-        if not len(chicos):
+        v_edif = self.calles.en(self.calles.edif, p[usados, 0], p[usados, 2])
+        frac_edif = np.bincount(lab[usados], v_edif.astype(float), lab.max() + 1) / np.maximum(cuenta, 1)
+        tope_area = 200.0 if self.calles.tiene_edif() else area_max
+        cand = comps[(area_c[comps] < tope_area) & (frac_edif[comps] < 0.4)]
+        cand = cand[self.calles.en(self.calles.limpieza, cx[cand], cz[cand])] if len(cand) else cand
+        if not len(cand):
             return tris
-        fuera = chicos[bajo[chicos] > self.calles.suelo(cx[chicos], cz[chicos]) + alto_min]
+        fuera = cand[bajo[cand] > self.calles.suelo(cx[cand], cz[cand]) + alto_min]
         return tris[~np.isin(comp_t, fuera)]
 
     def lista(self):
         with self.cerrojo:
             return {"listo": self.version > self.inicial, "version": self.version, "material": self.material,
-                    "creditos": CREDITOS, "error": self.error,
+                    "creditos": CREDITOS, "error": self.error, "tapa": self.tapa,
                     "mallas": [{"id": i, "tex": self.mallas[i]["tex"] is not None} for i in self.publicadas]}
 
     def malla(self, i):
@@ -718,6 +1203,7 @@ class Mundo:
 
 def servir(args, mundo):
     class Manejador(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
         def do_GET(self):
             u = urllib.parse.urlparse(self.path)
             partes = u.path.strip("/").split("/")
@@ -726,6 +1212,11 @@ def servir(args, mundo):
                 if "x" in q and "z" in q:  # dónde está el coche (coordenadas de la pista)
                     mundo.mover_foco(float(q["x"][0]), float(q["z"][0]))
                 cuerpo, tipo = json.dumps(mundo.lista()).encode(), "application/json"
+            elif len(partes) == 2 and partes[0] == "malla" and mundo.malla(partes[1]):
+                m = mundo.malla(partes[1])
+                geo = m["geo"]
+                cuerpo = struct.pack("<I", len(geo)) + geo + (m["tex"] or b"")
+                tipo = "application/octet-stream"
             elif len(partes) == 2 and partes[0] in ("geo", "tex") and mundo.malla(partes[1]):
                 m = mundo.malla(partes[1])
                 cuerpo, tipo = (m["geo"], "application/octet-stream") if partes[0] == "geo" else (m["tex"] or b"", "image/jpeg")
@@ -755,9 +1246,11 @@ def main(argv=None):
     p.add_argument("--token", default=os.environ.get("CESIUM_ION_TOKEN"), help="token de Cesium ion")
     p.add_argument("--radio", type=float, default=500.0, help="m alrededor del coche")
     p.add_argument("--error", type=float, default=0.03, help="error geométrico aceptable por metro de distancia")
+    p.add_argument("--error-cerca", type=float, default=0.01, help="error geométrico en los primeros 150 m")
     p.add_argument("--max", type=int, default=1200, help="máximo de teselas a la vez")
     p.add_argument("--cache", type=int, default=3000, help="teselas convertidas que se guardan en memoria")
     p.add_argument("--vivo", help="modo en vivo: carpeta de los pedazos (salida/vivo/<nombre>) en lugar de --glb")
+    p.add_argument("--vivo-url", help="URL del servidor openlaps.vivo (para la ruta prevista al precargar)")
     p.add_argument("--puerto", type=int, default=PUERTO)
     p.add_argument("--instalar", action="store_true", help="solo poner el script en la pista de AC")
     p.add_argument("--quitar", action="store_true", help="solo quitar el script de la pista de AC")
@@ -776,6 +1269,7 @@ def main(argv=None):
         a.glb = os.path.join(os.path.dirname(os.path.dirname(real)), f"{nombre}.glb")
     mundo = Mundo(a)
     threading.Thread(target=mundo.bucle, daemon=True).start()
+    threading.Thread(target=mundo.precarga_bucle, daemon=True).start()
     servir(a, mundo)
 
 

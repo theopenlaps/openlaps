@@ -6,6 +6,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -38,6 +39,7 @@ class Api:
         self._n = 0             # id de trabajo: la interfaz descarta los eventos de uno ya sustituido
         self._vivo = EnVivo(self._emitir)
         self._g3d = Google3D()
+        self._rev_cache = {}
 
     # ------------------------------------------------------------------ estado
     def iniciar(self):
@@ -56,9 +58,34 @@ class Api:
     def guardar_ajustes(self, cambios):
         return ajustes.guardar(cambios or {})
 
+    def _lugar_cerca(self, lat, lon):
+        k = (round(lat, 2), round(lon, 2), idioma())
+        if k in self._rev_cache:
+            return self._rev_cache[k]
+        res = ("", "")
+        try:
+            q = urllib.parse.urlencode({"lat": f"{lat:.5f}", "lon": f"{lon:.5f}", "format": "jsonv2",
+                                        "zoom": 10, "addressdetails": 1, "accept-language": idioma()})
+            req = urllib.request.Request(f"https://nominatim.openstreetmap.org/reverse?{q}", headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=3.5) as r:
+                addr = json.load(r).get("address") or {}
+            zona = (addr.get("city") or addr.get("town") or addr.get("village") or addr.get("municipality")
+                    or addr.get("county") or addr.get("state") or "")
+            res = (addr.get("country") or "", zona)
+        except Exception:  # noqa: BLE001
+            pass
+        if len(self._rev_cache) > 64:
+            self._rev_cache.pop(next(iter(self._rev_cache)))
+        self._rev_cache[k] = res
+        return res
+
     def region(self, lat, lon):
-        r = regions.detect(float(lat), float(lon))
-        return {"codigo": r.code, "nombre": r.name, "orto": r.ortho or "", "relieve": r.dem or ""}
+        la, lo = float(lat), float(lon)
+        r = regions.detect(la, lo)
+        pais_nom, zona = self._lugar_cerca(la, lo)
+        pais = r.name if r.code not in ("eu", "generic") else (pais_nom or "")
+        return {"codigo": r.code, "nombre": r.name, "orto": r.ortho or "", "relieve": r.dem or "",
+                "pais": pais, "zona": zona}
 
     # ------------------------------------------------------------------ vista previa de OSM
     def vista_osm(self, op):
@@ -96,7 +123,8 @@ class Api:
                 return [{"nombre": f"{lat:.5f}, {lon:.5f}", "detalle": t("coordenadas"), "lat": lat, "lon": lon}]
         if len(texto) < 2:
             return []
-        q = urllib.parse.urlencode({"q": texto, "format": "jsonv2", "limit": 6, "accept-language": idioma()})
+        q = urllib.parse.urlencode({"q": texto, "format": "jsonv2", "limit": 6, "addressdetails": 1,
+                                    "accept-language": idioma()})
         req = urllib.request.Request(f"https://nominatim.openstreetmap.org/search?{q}", headers={"User-Agent": _UA})
         try:
             with urllib.request.urlopen(req, timeout=12) as r:
@@ -106,7 +134,11 @@ class Api:
         res = []
         for d in datos:
             partes = d.get("display_name", "").split(", ")
+            addr = d.get("address") or {}
+            zona = (addr.get("city") or addr.get("town") or addr.get("village") or addr.get("municipality")
+                    or partes[0])
             res.append({"nombre": partes[0], "detalle": ", ".join(partes[1:4]),
+                        "pais": addr.get("country") or "", "zona": zona,
                         "lat": float(d["lat"]), "lon": float(d["lon"]),
                         "caja": [float(v) for v in d.get("boundingbox", [])] or None})
         return res
@@ -172,7 +204,26 @@ class Api:
         return {"ok": True, "id": ident, "nombre": nombre, "comando": "openlaps " + " ".join(argv)}
 
     def _emitir(self, ev):
+        if ev.get("tipo") == "vivo" and ev.get("estado") == "semilla":
+            self._precalentar_google()
         self._eventos.emitir(ev)
+
+    def _precalentar_google(self):
+        a = ajustes.cargar()
+        token = str(a.get("token_cesium") or "").strip()
+        if not a.get("google3d") or not token or not self._vivo.activo or not self._vivo.nombre:
+            return
+        ac = assetto.detectar(a.get("ac"))
+        if not ac:
+            return
+        nombre = f"{self._vivo.nombre}_vivo"
+        pista = Path(ac) / "content" / "tracks" / nombre
+        vivo_dir = ajustes.salida() / "vivo" / self._vivo.nombre
+        vivo_url = f"http://127.0.0.1:{self._vivo.puerto}" if self._vivo.puerto else None
+        threading.Thread(
+            target=lambda: self._g3d.preparar(pista, None, True, token, vivo=vivo_dir, vivo_url=vivo_url),
+            daemon=True,
+        ).start()
 
     # ------------------------------------------------------------------ pistas
     def pistas(self):
@@ -220,8 +271,12 @@ class Api:
         ac = assetto.detectar(a.get("ac"))
         if not ac:
             return {"error": t("ac_no")}
+        nombre = nombre_valido(nombre)
+        origen = ajustes.salida() / "assetto_corsa" / nombre
+        if assetto.estado(ac, origen) == "otra":
+            return {"error": t("ac_otra", n=nombre), "ac_otra": True, "nombre": nombre}
         try:
-            return {"ok": True, "mensaje": assetto.instalar(ac, ajustes.salida() / "assetto_corsa" / nombre_valido(nombre))}
+            return {"ok": True, "mensaje": assetto.instalar(ac, origen)}
         except RuntimeError as e:
             return {"error": str(e)}
 
@@ -232,8 +287,10 @@ class Api:
         if not ac:
             return {"error": t("ac_no")}
         nombre = nombre_valido(nombre)
+        origen = ajustes.salida() / "assetto_corsa" / nombre
+        if assetto.estado(ac, origen) == "otra":
+            return {"error": t("ac_otra", n=nombre), "ac_otra": True, "nombre": nombre}
         try:
-            origen = ajustes.salida() / "assetto_corsa" / nombre
             if assetto.estado(ac, origen) != "enlazada":
                 assetto.instalar(ac, origen)
             # edificios de Google 3D (opcional): con la opción apagada se quita el script y la pista queda tal cual
@@ -245,6 +302,21 @@ class Api:
             return r
         except RuntimeError as e:
             return {"error": str(e)}
+
+    def renombrar_pista(self, viejo, nuevo):
+        """Renombra una pista ya generada sin volver a generarla."""
+        viejo = nombre_valido(viejo)
+        nuevo_s = nombre_valido(nuevo)
+        if not (str(nuevo or "").strip()) or viejo == nuevo_s:
+            return {"ok": True, "nombre": viejo, "pista": self._pista(ajustes.salida() / f"{viejo}.glb")}
+        a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
+        try:
+            assetto.renombrar(ac, ajustes.salida(), viejo, nuevo_s)
+        except RuntimeError as e:
+            return {"error": str(e)}
+        return {"ok": True, "nombre": nuevo_s, "mensaje": t("renombrada", n=nuevo_s),
+                "pista": self._pista(ajustes.salida() / f"{nuevo_s}.glb")}
 
     # ------------------------------------------------------------------ modo en vivo
     def vivo_iniciar(self, op):
@@ -272,6 +344,7 @@ class Api:
         return dict(self._vivo.estado(), ac=bool(ac), csp=assetto.csp(ac))
 
     def vivo_detener(self):
+        self._g3d.detener()
         return self._vivo.detener()
 
     def google3d_estado(self):
@@ -295,7 +368,8 @@ class Api:
             # edificios de Google 3D (opcional): sobre la semilla ya instalada en AC, con los pedazos como calzada
             aviso = self._g3d.preparar(Path(ac) / "content" / "tracks" / nombre, None, bool(a.get("google3d")),
                                        str(a.get("token_cesium") or "").strip(),
-                                       vivo=ajustes.salida() / "vivo" / self._vivo.nombre)
+                                       vivo=ajustes.salida() / "vivo" / self._vivo.nombre,
+                                       vivo_url=f"http://127.0.0.1:{self._vivo.puerto}" if self._vivo.puerto else None)
             r = {"ok": True, "mensaje": assetto.jugar(ac, nombre)}
             if aviso:
                 r["aviso"] = t(aviso)

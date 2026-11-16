@@ -10,6 +10,7 @@ import functools
 import json
 import math
 import os
+import threading
 from datetime import date
 
 import numpy as np
@@ -84,16 +85,32 @@ class Raster:
         return out.reshape(x.shape)
 
 
-def _cacheado(nombre, mensual=False):
+def _macro(bbox, paso, tam):
+    """Para cajas chicas (pedazos del modo en vivo): encaja en una macro-tesela fija de lado `tam` y paso `paso`,
+    así docenas de pedazos cercanos comparten una sola descarga S3/STAC."""
+    if bbox.north - bbox.south > tam - paso or bbox.east - bbox.west > tam - paso:
+        return bbox
+    from ..geo import BBox
+    s0 = math.floor(bbox.south / paso) * paso
+    w0 = math.floor(bbox.west / paso) * paso
+    n0, e0 = s0 + tam, w0 + tam
+    if bbox.north <= n0 and bbox.east <= e0:
+        return BBox(round(s0, 6), round(w0, 6), round(n0, 6), round(e0, 6))
+    return bbox
+
+
+def _cacheado(nombre, mensual=False, macro=None):
     """Guarda en disco (~/.cache/openlaps) el recorte ráster que devuelve la función.
 
     Los COG remotos (Copernicus, WorldCover, dosel, Sentinel-2) se leían por HTTP en cada
     ejecución: ~45 s de cada generación. La clave es la caja redondeada y los argumentos; con
-    `mensual`, también el mes en curso (Sentinel-2 busca las escenas más recientes)."""
+    `mensual`, también el mes en curso (Sentinel-2 busca las escenas más recientes). Con `macro=(paso, tam)`,
+    las cajas chicas comparten macro-teselas ya cacheadas para acelerar el modo en vivo."""
     def deco(fn):
         @functools.wraps(fn)
         def wrap(bbox, *args, log=print, **kw):
-            key = json.dumps([nombre, [round(v, 6) for v in (bbox.south, bbox.west, bbox.north, bbox.east)],
+            b_req = _macro(bbox, *macro) if macro else bbox
+            key = json.dumps([nombre, [round(v, 6) for v in (b_req.south, b_req.west, b_req.north, b_req.east)],
                               list(args), kw, date.today().strftime("%Y-%m") if mensual else None])
             path = cache_path(key, ".raster.npz")
             if os.path.exists(path):
@@ -107,12 +124,13 @@ def _cacheado(nombre, mensual=False):
                 except Exception:  # noqa: BLE001 - caché corrupta: se vuelve a descargar
                     os.remove(path)
             antes = set(S2_YEARS)
-            r = fn(bbox, *args, log=log, **kw)
+            r = fn(b_req, *args, log=log, **kw)
             if r is not None:
                 meta = {"transform": list(r.transform)[:6], "crs": str(r.crs), "nodata": r.nodata,
                         "s2_years": sorted(S2_YEARS - antes)}
-                np.savez(path + ".part.npz", data=r.data, meta=json.dumps(meta))
-                os.replace(path + ".part.npz", path)
+                tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.part.npz"
+                np.savez(tmp, data=r.data, meta=json.dumps(meta))
+                os.replace(tmp, path)
             return r
         return wrap
     return deco
@@ -148,7 +166,7 @@ def _read_tiles(urls, bbox, fill, log):
     return Raster(arr[0], tr, crs, nodata=fill)
 
 
-@_cacheado("relieve Copernicus")
+@_cacheado("relieve Copernicus", macro=(0.02, 0.036))
 def copernicus_dem(bbox, log=print):
     urls = []
     for la in range(math.floor(bbox.south), math.floor(bbox.north) + 1):
@@ -160,7 +178,7 @@ def copernicus_dem(bbox, log=print):
     return r
 
 
-@_cacheado("WorldCover")
+@_cacheado("WorldCover", macro=(0.02, 0.036))
 def worldcover(bbox, log=print):
     urls = []
     for la in range(math.floor(bbox.south / 3) * 3, math.floor(bbox.north / 3) * 3 + 1, 3):
@@ -193,16 +211,33 @@ S2_YEARS = set()   # años de las escenas usadas en esta ejecución
 
 
 def _s2_items(bbox, season, log):
-    """Escenas Sentinel-2 L2A de la temporada pedida, de menos a más nubes."""
+    """Escenas Sentinel-2 L2A de la temporada pedida, de menos a más nubes (búsqueda STAC cacheada por mes y
+    celda de 0,1° para no repetir consultas en pedazos vecinos)."""
     import json
     import urllib.request
     from datetime import date
+    lat_c = round((bbox.south + bbox.north) / 2, 1)
+    lon_c = round((bbox.west + bbox.east) / 2, 1)
+    ym = date.today().strftime("%Y-%m")
+    grande = (bbox.north - bbox.south > 0.1) or (bbox.east - bbox.west > 0.1)
+    key = json.dumps(["s2-stac", round(bbox.south, 2), round(bbox.west, 2), round(bbox.north, 2), round(bbox.east, 2),
+                      season, ym] if grande else ["s2-stac-c", lat_c, lon_c, season, ym])
+    cpath = cache_path(key, ".stac.json")
+    if os.path.exists(cpath):
+        try:
+            with open(cpath, encoding="utf-8") as f:
+                feats = json.load(f)
+            if isinstance(feats, list):
+                return feats
+        except Exception:  # noqa: BLE001
+            pass
     y = date.today().year
     ranges = ([(f"{y - 1}-11-01", f"{y}-04-30"), (f"{y - 2}-11-01", f"{y - 1}-04-30")] if season == "seca"
               else [(f"{y - 1}-07-01", f"{y - 1}-10-31"), (f"{y - 2}-07-01", f"{y - 2}-10-31")])
+    qbox = [bbox.west, bbox.south, bbox.east, bbox.north] if grande else [lon_c - 0.06, lat_c - 0.06, lon_c + 0.06, lat_c + 0.06]
     feats = []
     for a, b in ranges:
-        body = {"collections": ["sentinel-2-l2a"], "bbox": [bbox.west, bbox.south, bbox.east, bbox.north],
+        body = {"collections": ["sentinel-2-l2a"], "bbox": qbox,
                 "datetime": f"{a}T00:00:00Z/{b}T23:59:59Z", "query": {"eo:cloud_cover": {"lt": 10}},
                 "limit": 8, "sortby": [{"field": "properties.eo:cloud_cover", "direction": "asc"}]}
         req = urllib.request.Request(STAC, data=json.dumps(body).encode(),
@@ -214,6 +249,11 @@ def _s2_items(bbox, season, log):
             log(f"  aviso: búsqueda Sentinel-2 falló ({e})")
         if len(feats) >= 3:
             break
+    if feats:
+        tmp = f"{cpath}.{os.getpid()}.part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(feats, f)
+        os.replace(tmp, cpath)
     return feats
 
 
@@ -224,7 +264,7 @@ def _read_window(href, bbox):
         return ds.read(window=win, boundless=True, fill_value=0), ds.window_transform(win), ds.crs
 
 
-@_cacheado("Sentinel-2", mensual=True)
+@_cacheado("Sentinel-2", mensual=True, macro=(0.02, 0.036))
 def sentinel2(bbox, season="seca", log=print):
     """Imagen en color real de 10 m sin nubes (TCI de Sentinel-2 L2A en COG público).
 
@@ -263,7 +303,7 @@ def sentinel2(bbox, season="seca", log=print):
     return Raster(acc, acc_tr, acc_crs)
 
 
-@_cacheado("NDWI Sentinel-2", mensual=True)
+@_cacheado("NDWI Sentinel-2", mensual=True, macro=(0.02, 0.036))
 def sentinel2_ndwi(bbox, season="seca", log=print):
     """Índice de agua NDWI = (verde - infrarrojo) / (verde + infrarrojo) a 10 m (bandas B03 y B08).
 
@@ -312,7 +352,7 @@ def _qk(lat, lon, z=9):
     return q
 
 
-@_cacheado("altura de dosel")
+@_cacheado("altura de dosel", macro=(0.01, 0.018))
 def canopy_height(bbox, log=print):
     """Altura de dosel de 1 m (Tolan et al. 2024, Meta / WRI), en metros."""
     keys = sorted({_qk(la, lo) for la in (bbox.south, bbox.north) for lo in (bbox.west, bbox.east)})
