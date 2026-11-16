@@ -46,13 +46,29 @@ def _caja_ruta(ruta, margen=200.0):
     return min(lats) - dlat, min(lons) - dlon, max(lats) + dlat, max(lons) + dlon
 
 
+MAX_KM2 = 24.0  # zona máxima (pista normal o zona que se prepara entera en el modo en vivo)
+
+
+def medidas(op):
+    """(ancho, alto) de la zona en metros (las versiones anteriores solo tenían un cuadrado: tam)."""
+    tam = float(op.get("tam", 800))
+    return float(op.get("ancho") or tam), float(op.get("alto") or tam)
+
+
+def caja_zona(op):
+    from ..geo import BBox
+    lat, lon = (float(v) for v in op["centro"])
+    ancho, alto = medidas(op)
+    return BBox.around(lat, lon, ancho, alto)
+
+
 def zona_args(op, minimo=True):
-    """("centro", "lat,lon", tam) o ("bbox", "s,w,n,e", ruta) tal como van a la línea de comandos.
-    precarga.caja_de() reconstruye la caja desde aquí: así coincide con la del generador."""
+    """("bbox", "s,w,n,e", ruta|None) tal como va a la línea de comandos. precarga.caja_de() reconstruye la
+    caja desde aquí: así coincide con la del generador. La zona es un rectángulo de ancho × alto."""
     modo = op.get("modo", "libre")
     if modo == "libre":
-        lat, lon = (float(v) for v in op["centro"])
-        return "centro", f"{lat:.6f},{lon:.6f}", str(int(float(op.get("tam", 800))))
+        b = caja_zona(op)
+        return "bbox", f"{b.south:.6f},{b.west:.6f},{b.north:.6f},{b.east:.6f}", None
     ruta = [(float(p[0]), float(p[1])) for p in op.get("ruta") or []]
     if len(ruta) < 2 or (minimo and modo == "circuito" and len(ruta) < 3):
         raise ValueError(t("ruta_2") if len(ruta) < 2 else t("ruta_3"))
@@ -66,10 +82,15 @@ def argumentos(op, salida, nombre=None):
     nombre = nombre or nombre_valido(op.get("nombre"))
     a = ["--nombre", nombre, "--salida", str(salida), "--modo", modo]
     tipo, valor, extra = zona_args(op)
-    if tipo == "centro":
-        a += ["--centro", valor, "--tam", extra]
-    else:
-        a += ["--bbox", valor, "--ruta", extra]
+    a += ["--bbox", valor]
+    if extra:
+        a += ["--ruta", extra]
+    if modo == "libre":
+        ancho, alto = medidas(op)
+        if ancho * alto / 1e6 > MAX_KM2 + 1e-6:
+            raise ValueError(t("zona_grande", km=MAX_KM2))
+    if op.get("vivo") and modo == "libre":
+        raise ValueError(t("zona_es_vivo"))
     calidad = op.get("calidad", "normal")
     a += CALIDADES.get(calidad, [])
     if calidad != "borrador":

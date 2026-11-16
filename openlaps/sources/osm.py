@@ -1,7 +1,12 @@
 """Descarga y lectura de OpenStreetMap vía Overpass (© OpenStreetMap contributors, ODbL)."""
 import json
+import os
+import urllib.parse
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
 
-from .cache import post_form
+from .cache import UA, cache_path, post_form
 
 ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -51,6 +56,139 @@ def download(bbox, log=print):
             last = e
             log(f"  Overpass {ep} falló: {e}")
     raise RuntimeError(f"Overpass no respondió: {last}")
+
+
+# ------------------------------------------------------------------ descarga rápida (modo en vivo)
+API = "https://api.openstreetmap.org/api/0.6/map"
+# en vivo, los espejos que contestan en menos de medio minuto (medido en 2026: mail.ru ~20 s, el principal ~40 s;
+# kumi y private.coffee pasaban del minuto)
+ENDPOINTS_VIVO = [("https://maps.mail.ru/osm/tools/overpass/api/interpreter", 25),
+                  ("https://overpass-api.de/api/interpreter", 30)]
+
+
+def _respuesta_valida(data):
+    if "elements" not in data:
+        raise RuntimeError("respuesta sin elementos")
+    rem = data.get("remark", "")
+    if "error" in rem.lower():                 # Overpass corta la consulta y devuelve lo que llevaba
+        raise RuntimeError(f"Overpass incompleto: {rem[:120]}")
+    return data
+
+
+def download_fast(bbox, log=print, timeout=30):
+    """Para el modo en vivo: un espejo de Overpass tras otro con espera corta (sin reintentos largos) y, solo si
+    ninguno contesta, la API oficial de OpenStreetMap (convertida al mismo formato; es rápida, pero su uso
+    principal es la edición, así que queda de último recurso). Todo queda en caché."""
+    q = query(bbox)
+    last = None
+    # ¿ya en caché (de una generación normal o de la API)?
+    for path in [cache_path(ep + "?" + urllib.parse.urlencode({"data": q}), ".osm.json") for ep in ENDPOINTS]             + [cache_path(f"osmapi:{bbox.overpass()}", ".osm.json")]:
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return _respuesta_valida(json.load(f))
+            except Exception:  # noqa: BLE001
+                pass
+    for ep, espera in ENDPOINTS_VIVO:
+        try:
+            path = post_form(ep, {"data": q}, ext=".osm.json", log=lambda *a: None, retries=1, timeout=espera)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return _respuesta_valida(json.load(f))
+            except Exception:
+                os.remove(path)                # no dejar en caché una respuesta mala
+                raise
+        except Exception as e:  # noqa: BLE001
+            last = e
+            log(f"  Overpass {ep.split('/')[2]} falló: {str(e)[:100]}")
+    try:
+        return download_api(bbox, log=log, timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"OSM no respondió (Overpass: {last}; API: {e})") from e
+
+
+def download_api(bbox, log=print, timeout=30):
+    """API oficial de OSM (/api/0.6/map, XML): devuelve los elementos con geometría como lo haría Overpass
+    con `out geom`, filtrados a lo que pide `query`. Si la zona tiene demasiados nodos, la parte en cuatro."""
+    path = cache_path(f"osmapi:{bbox.overpass()}", ".osm.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    url = f"{API}?bbox={bbox.west:.6f},{bbox.south:.6f},{bbox.east:.6f},{bbox.north:.6f}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout) as r:
+            xml = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 400 and (bbox.north - bbox.south) > 0.0008:   # más de 50 000 nodos: en cuatro
+            from ..geo import BBox
+            ml, mo = (bbox.south + bbox.north) / 2, (bbox.west + bbox.east) / 2
+            partes = [BBox(bbox.south, bbox.west, ml, mo), BBox(bbox.south, mo, ml, bbox.east),
+                      BBox(ml, bbox.west, bbox.north, mo), BBox(ml, mo, bbox.north, bbox.east)]
+            vistos, els = set(), []
+            for b in partes:
+                for el in download_api(b, log=log, timeout=timeout)["elements"]:
+                    k = (el["type"], el["id"])
+                    if k not in vistos:
+                        vistos.add(k)
+                        els.append(el)
+            data = {"elements": els}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            return data
+        raise
+    data = {"elements": _api_a_overpass(xml)}
+    log(f"  OSM desde la API oficial: {len(data['elements'])} elementos")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    return data
+
+
+def _quiere(tipo, t):
+    """Lo mismo que selecciona `query` (para filtrar lo que trae la API, que es todo)."""
+    if tipo == "node":
+        return (t.get("traffic_calming") or t.get("highway") in ("crossing", "traffic_signals", "stop", "give_way",
+                                                                   "milestone", "bus_stop")
+                or t.get("place") in ("city", "town", "village", "hamlet", "suburb")
+                or t.get("power") in ("pole", "tower") or t.get("natural") == "tree" or "barrier" in t)
+    if tipo == "way":
+        return ("highway" in t or t.get("railway") in ("tram", "light_rail") or "building" in t or "landuse" in t
+                or "natural" in t or "waterway" in t or t.get("amenity") == "parking" or "leisure" in t
+                or t.get("power") in ("line", "minor_line")
+                or t.get("barrier") in ("guard_rail", "wall", "retaining_wall", "city_wall", "jersey_barrier", "fence"))
+    return (t.get("type") == "multipolygon" and "building" in t) or t.get("natural") == "water"
+
+
+def _api_a_overpass(xml):
+    root = ET.fromstring(xml)
+    tags = lambda e: {k.get("k"): k.get("v") for k in e.findall("tag")}  # noqa: E731
+    nodos, els, vias = {}, [], {}
+    for n in root.iter("node"):
+        i = int(n.get("id"))
+        nodos[i] = (float(n.get("lon")), float(n.get("lat")))
+        t = tags(n)
+        if t and _quiere("node", t):
+            els.append({"type": "node", "id": i, "lat": nodos[i][1], "lon": nodos[i][0], "tags": t})
+    for w in root.iter("way"):
+        refs = [int(nd.get("ref")) for nd in w.findall("nd")]
+        geom = [{"lon": nodos[r][0], "lat": nodos[r][1]} if r in nodos else None for r in refs]
+        vias[int(w.get("id"))] = geom
+        t = tags(w)
+        if _quiere("way", t) and all(geom):
+            els.append({"type": "way", "id": int(w.get("id")), "nodes": refs, "geometry": geom, "tags": t})
+    for r in root.iter("relation"):
+        t = tags(r)
+        if not _quiere("relation", t):
+            continue
+        miembros = []
+        for m in r.findall("member"):
+            if m.get("type") != "way":
+                continue
+            g = vias.get(int(m.get("ref")))
+            if g and all(g):
+                miembros.append({"type": "way", "ref": int(m.get("ref")), "role": m.get("role"), "geometry": g})
+        if miembros:
+            els.append({"type": "relation", "id": int(r.get("id")), "members": miembros, "tags": t})
+    return els
 
 
 def _join_rings(segments):

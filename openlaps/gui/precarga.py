@@ -113,8 +113,5 @@ def caja_de(op):
     """La BBox exacta que usará el generador para estas opciones (mismo redondeo que la línea de
     comandos), para que las claves de la caché coincidan."""
     from .generador import zona_args
-    tipo, valor, tam = zona_args(op, minimo=False)
-    if tipo == "centro":
-        lat, lon = (float(v) for v in valor.split(","))
-        return BBox.around(lat, lon, float(tam))
+    tipo, valor, _ = zona_args(op, minimo=False)
     return BBox.parse(valor)

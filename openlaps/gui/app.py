@@ -16,7 +16,8 @@ from pathlib import Path
 from .. import __version__, URL
 from .. import regions
 from . import ajustes, assetto, servidor
-from .generador import Trabajo, argumentos, nombre_valido
+from .envivo import EnVivo
+from .generador import MAX_KM2, Trabajo, argumentos, nombre_valido
 from .precarga import Precarga, _clave, caja_de
 from .textos import idioma, t
 
@@ -34,12 +35,15 @@ class Api:
         self._trabajo = None
         self._precarga = Precarga()
         self._n = 0             # id de trabajo: la interfaz descarta los eventos de uno ya sustituido
+        self._vivo = EnVivo(self._emitir)
 
     # ------------------------------------------------------------------ estado
     def iniciar(self):
         a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
         return {"version": __version__, "ajustes": a, "salida": str(ajustes.salida(a)),
-                "ac": assetto.detectar(a.get("ac")), "pistas": self.pistas()}
+                "ac": ac, "csp": assetto.csp(ac), "max_km2": MAX_KM2, "pistas": self.pistas(),
+                "vivo": self._vivo.estado()}
 
     def ventana_estado(self):
         return self._marco.estado() if self._marco else {"marco": False}
@@ -219,6 +223,62 @@ class Api:
         except RuntimeError as e:
             return {"error": str(e)}
 
+    def jugar_ac(self, nombre):
+        """Instala la pista (si hace falta) y abre Assetto Corsa en ella."""
+        a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
+        if not ac:
+            return {"error": t("ac_no")}
+        nombre = nombre_valido(nombre)
+        try:
+            origen = ajustes.salida() / "assetto_corsa" / nombre
+            if assetto.estado(ac, origen) != "enlazada":
+                assetto.instalar(ac, origen)
+            return {"ok": True, "mensaje": assetto.jugar(ac, nombre)}
+        except RuntimeError as e:
+            return {"error": str(e)}
+
+    # ------------------------------------------------------------------ modo en vivo
+    def vivo_iniciar(self, op):
+        """Zona de más de 5 km²: se preparan 5 km² (la zona a escala) y lo demás se genera mientras se conduce."""
+        if self._trabajo and self._trabajo.activo and self._trabajo.tipo == "generar":
+            return {"error": t("ocupado")}
+        self.cancelar("borrador")
+        a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
+        try:
+            r = self._vivo.iniciar(op, ajustes.salida(), ac=ac if op.get("ac", True) else None,
+                                   semilla=bool(op.get("ac", True)))
+        except (ValueError, KeyError, TypeError) as e:
+            return {"error": str(e) or t("faltan_datos")}
+        except OSError as e:
+            return {"error": t("no_inicia", e=e)}
+        r.update(ok=True, csp=assetto.csp(ac), ac=bool(ac))
+        if op.get("ac", True) and ac and not assetto.csp(ac):
+            r["aviso"] = t("vivo_sin_csp")
+        return r
+
+    def vivo_estado(self):
+        a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
+        return dict(self._vivo.estado(), ac=bool(ac), csp=assetto.csp(ac))
+
+    def vivo_detener(self):
+        return self._vivo.detener()
+
+    def vivo_jugar(self):
+        """Abre AC en la pista semilla del modo en vivo (ya instalada por el servicio)."""
+        a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
+        if not ac:
+            return {"error": t("ac_no")}
+        if not self._vivo.nombre:
+            return {"error": t("faltan_datos")}
+        try:
+            return {"ok": True, "mensaje": assetto.jugar(ac, f"{self._vivo.nombre}_vivo")}
+        except RuntimeError as e:
+            return {"error": str(e)}
+
     # ------------------------------------------------------------------ diálogos
     def elegir_carpeta(self, tipo):
         import webview
@@ -276,6 +336,7 @@ def main(argv=None):
         except KeyboardInterrupt:
             pass
         api.cancelar()
+        api.vivo_detener()
         return 0
 
     try:
@@ -295,7 +356,7 @@ def main(argv=None):
         shadow=True, background_color="#15171a", text_select=False)
     api._ventana = ventana
     api._marco = Marco(ventana)
-    ventana.events.closing += lambda: api.cancelar()
+    ventana.events.closing += lambda: (api.cancelar(), api.vivo_detener())
     ventana.events.shown += lambda: api._marco.preparar()
     webview.start(gui="edgechromium", debug=bool(os.environ.get("OPENLAPS_DEBUG")),
                   private_mode=False, storage_path=str(ajustes.DATOS / "webview"),

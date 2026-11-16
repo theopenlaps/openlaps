@@ -37,8 +37,9 @@ def fetch(url, data=None, ext="", retries=3, timeout=300, log=print):
             return path
         except Exception as e:  # noqa: BLE001 - reintento genérico de red
             last = e
-            log(f"  aviso: fallo descargando ({e}); reintento {attempt + 1}/{retries}")
-            time.sleep(5 * (attempt + 1))
+            if attempt + 1 < retries:      # tras el último intento no tiene sentido esperar
+                log(f"  aviso: fallo descargando ({e}); reintento {attempt + 1}/{retries}")
+                time.sleep(5 * (attempt + 1))
     raise RuntimeError(f"No se pudo descargar {url}: {last}")
 
 

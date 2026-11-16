@@ -30,8 +30,12 @@ def mesh_name(m):
     return f"1{m['phys']}_{m['name']}" if m["phys"] else m["name"]
 
 
-def write(scene, path, extras=None):
-    meshes = scene.meshes()
+def write(scene, path, extras=None, solo_usados=False, tex_cache=None, meshes=None):
+    """solo_usados: solo los materiales que usa alguna malla (los pedazos del modo en vivo); tex_cache: dict
+    nombre -> (bytes, mime) para no recomprimir en cada pedazo las texturas que se repiten."""
+    meshes = scene.meshes() if meshes is None else meshes
+    usados = {m["material"] for m in meshes} if solo_usados else None
+    materiales = {k: v for k, v in scene.materials.items() if usados is None or k in usados}
     bin_parts, views, accessors = [], [], []
     offset = 0
 
@@ -57,17 +61,22 @@ def write(scene, path, extras=None):
         return len(accessors) - 1
 
     # texturas e imágenes
-    tex_names = sorted({m["texture"] for m in scene.materials.values()})
+    tex_names = sorted({m["texture"] for m in materiales.values()})
     images, textures = [], []
     tex_index = {}
     for t in tex_names:
-        data, mime = _compact(scene, t)
+        if tex_cache is not None and t in tex_cache:
+            data, mime = tex_cache[t]
+        else:
+            data, mime = _compact(scene, t)
+            if tex_cache is not None:
+                tex_cache[t] = (data, mime)
         vi = add_view(data)
         images.append({"bufferView": vi, "mimeType": mime, "name": t})
         textures.append({"source": len(images) - 1, "sampler": 0})
         tex_index[t] = len(textures) - 1
     mats, mat_index = [], {}
-    for name, m in scene.materials.items():
+    for name, m in materiales.items():
         g = {"name": name, "pbrMetallicRoughness": {
             "baseColorTexture": {"index": tex_index[m["texture"]]},
             "metallicFactor": 0.0, "roughnessFactor": max(0.2, 1.0 - m["specular"])}}

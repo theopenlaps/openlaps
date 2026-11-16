@@ -40,14 +40,21 @@ AREA_COLORS = {
 }
 
 
-def run(args, log=print):
+def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_data=None):
+    """Genera la escena y la exporta. Modo en vivo (`pedazo` = (xmin, ymin, xmax, ymax), el centro que se conserva):
+    usa la proyección `proj` ya fijada (origen común a todos los pedazos), la escena con los materiales ya
+    registrados y los datos de OSM ya descargados, no pone muros de límite, salidas ni horizonte y devuelve
+    la escena sin exportar nada."""
     t0 = time.time()
-    if args.bbox:
+    if proj is not None:
+        bbox = proj.bbox()
+    elif args.bbox:
         bbox = BBox.parse(args.bbox)
     else:
         lat, lon = (float(v) for v in args.centro.split(","))
         bbox = BBox.around(lat, lon, args.tam)
-    proj = LocalProjection(bbox)
+    if proj is None:
+        proj = LocalProjection(bbox)
     R = regions.set_active(regions.detect(proj.lat0, proj.lon0) if args.region == "auto" else args.region)
     log(f"Región: {R.name} (rayas {R.center_mat.replace('raya_', '')}, techos {R.roof}"
         f"{', ortofoto ' + R.ortho if R.ortho else ''}{', relieve ' + R.dem if R.dem else ''})")
@@ -91,7 +98,7 @@ def run(args, log=print):
         return d, False
 
     usar_orto = bool(R.ortho) and not args.sin_orto
-    f_osm = pool.submit(lambda: OSM.parse(OSM.download(bbox.padded(200), log=log)))
+    f_osm = pool.submit(lambda: osm_data if osm_data is not None else OSM.parse(OSM.download(bbox.padded(200), log=log)))
     f_dem = pool.submit(relieve)
     f_lc = pool.submit(rasters.worldcover, big, log=log)
     f_orto = pool.submit(intento, "ortofoto", rasters.ortho, bbox.padded(60), R.ortho, mpp=R.ortho_mpp, log=log)         if usar_orto else None
@@ -100,23 +107,22 @@ def run(args, log=print):
                          log=log) if not args.sin_satelite else None
     f_chm = pool.submit(intento, "altura de dosel", rasters.canopy_height, bbox, log=log) if not args.sin_dosel else None
     f_ms = pool.submit(intento, "edificios de Microsoft", msbuildings.download, bbox, log=log)         if not args.sin_microsoft else None
-    f_cat = pool.submit(intento, "Catastro", catastro.download, bbox, log=log)         if R.cadastre == "catastro" and not getattr(args, "sin_catastro", False) else None
+    if cat_data is not None:        # modo en vivo: el servicio ya lo bajó por teselas
+        f_cat = pool.submit(lambda: cat_data)
+    else:
+        f_cat = pool.submit(intento, "Catastro", catastro.download, bbox, log=log)             if R.cadastre == "catastro" and not getattr(args, "sin_catastro", False) else None
     f_ov = pool.submit(intento, "alturas de Overture", overture.download, bbox, log=log) \
         if R.heights == "overture" and not getattr(args, "sin_overture", False) else None
     # el relieve y la imagen del horizonte (5 km) se usan al final, pero se piden ya
     far = bbox.padded(5000)
-    f_far_dem = pool.submit(rasters.copernicus_dem, far, log=log) if not args.sin_horizonte else None
-    f_far_s2 = pool.submit(intento, "Sentinel-2 del horizonte", rasters.sentinel2, far, args.temporada, log=log)         if not args.sin_horizonte and not args.sin_satelite else None
+    con_horizonte = not args.sin_horizonte and pedazo is None
+    f_far_dem = pool.submit(rasters.copernicus_dem, far, log=log) if con_horizonte else None
+    f_far_s2 = pool.submit(intento, "Sentinel-2 del horizonte", rasters.sentinel2, far, args.temporada, log=log)         if con_horizonte and not args.sin_satelite else None
 
     # mientras llegan los datos: texturas y materiales (cálculo puro, no depende de la zona salvo
     # por el perfil regional, que ya está elegido)
-    scene = Scene()
-    cc0_tex = {}
-    if not args.sin_cc0:
-        from .sources import cc0 as CC0
-        cc0_tex = CC0.load_all(1024, log=log)
-    textures.register_all(scene, args.temporada, cc0_tex)
-    RS.register_materials(scene)
+    if scene is None:
+        scene = preparar_escena(args, log)
 
     osm = f_osm.result()
     log(f"  {len(osm['ways'])} vías, {len(osm['areas'])} áreas, {len(osm['nodes'])} nodos sueltos")
@@ -213,7 +219,7 @@ def run(args, log=print):
         _place_stage(scene, net, route, route_hw, legs, closed=args.modo == "circuito", log=log)
         X.tv_cameras(scene, route)
         info_run = "clockwise" if args.modo == "circuito" else "A-B"
-    else:
+    elif pedazo is None:
         _place_free(scene, net, log=log)
 
     # ------------------------------------------------------------ terreno
@@ -235,6 +241,8 @@ def run(args, log=print):
     paths += [(c, w) for c, w in cob.secos]     # cauces secos (ramblas, arroyos intermitentes)
     painter = T.GroundPainter(lc, proj, args.temporada, rd["road_polys"], paths, areas, blds_poly, water_poly, s2=s2,
                               ortho=orto)
+    if pedazo is not None:
+        terr.solo = pedazo
     terr.build_mesh(scene, painter, tile_m=args.tesela, mpp=mpp)
     plazas_peatonales(scene, osm, proj, terr, rd["road_polys"], blds_poly, log=log)
     agua.construir(scene)
@@ -242,7 +250,8 @@ def run(args, log=print):
     m = BR.build(scene, osm.get("barriers", []), proj, terr, rect, rd["road_union"])
     if m:
         log("  barreras de OSM: " + ", ".join(f"{k} {v:.0f} m" for k, v in m.items()))
-    BR.boundary(scene, terr, rect)
+    if pedazo is None:
+        BR.boundary(scene, terr, rect)
     ns = RS.power_lines(scene, osm, proj, terr, rect)
     fm = RS.fences(scene, osm, proj, terr, rect, rd["road_union"])
     if ns or fm:
@@ -280,7 +289,7 @@ def run(args, log=print):
                      road_pts=rd["carve"][:, :2] if len(rd["carve"]) else None, chm=chm, log=log)
     if trunks is not None and len(trunks):
         log(f"  {X.trunk_colliders(scene, trunks)} troncos con colisión junto a la calle")
-    if not args.sin_horizonte:
+    if con_horizonte:
         try:
             dem_far = f_far_dem.result()
             s2_far = f_far_s2.result() if f_far_s2 else None
@@ -288,6 +297,11 @@ def run(args, log=print):
             log(f"  horizonte: {nf:,} triángulos hasta 5 km")
         except Exception as e:  # noqa: BLE001
             log(f"  aviso: sin horizonte ({e})")
+
+    if pedazo is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+        log(f"  pedazo listo en {time.time() - t0:.1f} s")
+        return {"scene": scene, "proj": proj, "net": net, "terr": terr}
 
     # ------------------------------------------------------------ exportar
     log("7/7 Exportando…")
@@ -330,6 +344,57 @@ def run(args, log=print):
     pool.shutdown(wait=False, cancel_futures=True)
     log(f"Listo en {time.time() - t0:.0f} s")
     return glb
+
+
+def precargar(args, proj, log=print):
+    """Modo en vivo: pide por adelantado los rásteres y huellas que `run` va a pedir para esta proyección, así el
+    pedazo los encuentra en la caché de disco. Tiene que pedir exactamente lo mismo que el bloque de descargas
+    de `run` (mismas cajas y argumentos): si cambia uno, cambia el otro. OSM y Catastro van aparte."""
+    R = regions.set_active(regions.detect(proj.lat0, proj.lon0) if args.region == "auto" else args.region)
+    bbox = proj.bbox()
+    big = bbox.padded(450)
+    tareas = []
+    if not args.dem:
+        if R.dem == "mdt05":
+            tareas.append((rasters.mdt05, (big,), {}))
+        elif R.dem == "3dep":
+            tareas.append((rasters.dem_3dep, (big,), {}))
+        else:
+            tareas.append((rasters.copernicus_dem, (big,), {}))
+    tareas.append((rasters.worldcover, (big,), {}))
+    usar_orto = bool(R.ortho) and not args.sin_orto
+    if usar_orto:
+        tareas.append((rasters.ortho, (bbox.padded(60), R.ortho), {"mpp": R.ortho_mpp}))
+    elif not args.sin_satelite:
+        tareas.append((rasters.sentinel2, (bbox.padded(60), args.temporada), {}))
+    if not args.sin_satelite:
+        tareas.append((rasters.sentinel2_ndwi, (bbox.padded(60), args.temporada), {}))
+    if not args.sin_dosel:
+        tareas.append((rasters.canopy_height, (bbox,), {}))
+    if not args.sin_microsoft:
+        tareas.append((msbuildings.download, (bbox,), {}))
+    if R.heights == "overture" and not getattr(args, "sin_overture", False):
+        tareas.append((overture.download, (bbox,), {}))
+    with ThreadPoolExecutor(max_workers=len(tareas)) as ex:
+        futs = [ex.submit(fn, *a, log=lambda *m: None, **kw) for fn, a, kw in tareas]
+        for f in futs:
+            try:
+                f.result()
+            except Exception as e:  # noqa: BLE001 - el pedazo lo volverá a intentar y avisará
+                log(f"  precarga: {e}")
+
+
+def preparar_escena(args, log=print):
+    """Escena vacía con todos los materiales y texturas registrados (no depende de la zona salvo por el perfil
+    regional, que ya debe estar elegido). El modo en vivo la prepara una vez y la copia para cada pedazo."""
+    scene = Scene()
+    cc0_tex = {}
+    if not args.sin_cc0:
+        from .sources import cc0 as CC0
+        cc0_tex = CC0.load_all(1024, log=log)
+    textures.register_all(scene, args.temporada, cc0_tex)
+    RS.register_materials(scene)
+    return scene
 
 
 # --------------------------------------------------------------------------------------
@@ -487,13 +552,20 @@ def _place_stage(scene, net, route, route_hw, legs, closed, log=print):
 
 
 def _place_free(scene, net, log=print):
-    best, score = None, -1
+    """Salidas del modo libre en un buen sitio: un tramo recto y largo de una calle importante, pero cerca del
+    centro de la zona (antes ganaba el tramo más largo de toda el área y la salida podía quedar en un borde, en
+    medio de la nada)."""
+    best, score = None, -1e18
     for e in net.edges:
         if e.tunnel or e.bridge:  # una salida bajo tierra hace que AC deje el coche en la calle de encima
             continue
         for a, b in net.ranges(e):
-            sc = (b - a) * (1 + e.prio)
-            if sc > score and b - a > 40:
+            if b - a <= 40:
+                continue
+            m = e.at(np.array([(a + b) / 2]), 0.0)[0]
+            centro = math.hypot(m[0], m[1])          # el origen local es el centro de la zona
+            sc = min(b - a, 150.0) * (1 + e.prio) - centro * 0.35
+            if sc > score:
                 best, score = (e, a, b), sc
     if best is None:
         for e in net.edges:

@@ -82,3 +82,53 @@ def instalar(ac, origen):
     if r.returncode != 0:
         raise RuntimeError(t("ac_enlace", d=dst.parent, e=(r.stderr or r.stdout).strip()))
     return t("ac_ok")
+
+
+def csp(ac):
+    """¿Tiene Custom Shaders Patch? (hace falta para el modo en vivo: scripts de pista con física)."""
+    return bool(ac) and (Path(ac) / "extension" / "config").is_dir() and (Path(ac) / "dwrite.dll").exists()
+
+
+def _documentos_ac():
+    from .ajustes import _documentos
+    return _documentos() / "Assetto Corsa"
+
+
+def jugando():
+    r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq acs.exe", "/NH"], capture_output=True, text=True,
+                       creationflags=_NO_VENTANA)
+    return "acs.exe" in (r.stdout or "").lower()
+
+
+def jugar(ac, pista):
+    """Abre una práctica de AC en esa pista, sin launcher (como el botón Drive): escribe TRACK en race.ini
+    (guarda una copia la primera vez) con el coche que ya tenía elegido, o el Abarth 500 si no hay ninguno, y
+    arranca acs.exe. Steam tiene que estar abierto."""
+    if jugando():
+        raise RuntimeError(t("ac_abierto"))
+    ac = Path(ac)
+    ri = _documentos_ac() / "cfg" / "race.ini"
+    if not ri.exists():
+        raise RuntimeError(t("ac_sin_race"))
+    copia = ri.with_name("race.ini.antes_openlaps")
+    if not copia.exists():
+        copia.write_bytes(ri.read_bytes())
+    txt = ri.read_text(encoding="latin-1")
+    coche = (re.search(r"(?ms)^\[RACE\].*?^MODEL=(.*?)\s*$", txt) or [None, ""])[1].strip()
+    if not coche or not (ac / "content" / "cars" / coche / "skins").is_dir():
+        coche = "abarth500"
+        skins = sorted(p.name for p in (ac / "content" / "cars" / coche / "skins").glob("*") if p.is_dir())
+        txt = re.sub(r"(?ms)^(\[RACE\].*?^)MODEL=.*?$", lambda m: m.group(1) + "MODEL=" + coche, txt, count=1)
+        if skins:
+            txt = re.sub(r"(?m)^SKIN=.*$", "SKIN=" + skins[0], txt, count=1)
+    txt = re.sub(r"(?m)^TRACK=.*$", "TRACK=" + pista, txt, count=1)
+    txt = re.sub(r"(?m)^CONFIG_TRACK=.*$", "CONFIG_TRACK=", txt, count=1)
+    ri.write_text(txt, encoding="latin-1")
+    appid = ac / "steam_appid.txt"
+    if not appid.exists():
+        try:
+            appid.write_text("244210", encoding="ascii")
+        except OSError:
+            pass
+    subprocess.Popen([str(ac / "acs.exe")], cwd=str(ac), creationflags=_NO_VENTANA)
+    return t("ac_jugando", p=pista)

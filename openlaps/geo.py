@@ -57,6 +57,20 @@ class LocalProjection:
         self.xmin, self.xmax = float(min(x0)), float(max(x0))
         self.ymin, self.ymax = float(min(y0)), float(max(y0))
 
+    @classmethod
+    def marco(cls, lat0, lon0, rect):
+        """Proyección con el origen fijo en (lat0, lon0) y límites `rect` = (xmin, ymin, xmax, ymax) en metros.
+        La usa el modo en vivo: todos los pedazos comparten el mismo origen, así encajan sin moverlos."""
+        p = cls(BBox.around(lat0, lon0, 10.0))
+        p.xmin, p.ymin, p.xmax, p.ymax = (float(v) for v in rect)
+        return p
+
+    def bbox(self):
+        """Caja geográfica (lat/lon) que contiene el rectángulo local."""
+        lon, lat = self.to_lonlat(np.array([self.xmin, self.xmax, self.xmin, self.xmax]),
+                                  np.array([self.ymin, self.ymin, self.ymax, self.ymax]))
+        return BBox(float(lat.min()), float(lon.min()), float(lat.max()), float(lon.max()))
+
     def to_local(self, lon, lat):
         x, y = self._fwd.transform(np.asarray(lon, float), np.asarray(lat, float))
         return np.asarray(x) - self.ox, np.asarray(y) - self.oy

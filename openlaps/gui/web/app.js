@@ -15,8 +15,9 @@ const NO_CONDUCIBLE = new Set(["footway", "path", "steps", "cycleway", "pedestri
 
 // ------------------------------------------------------------------ estado
 const S = {
-  modo: "libre", centro: null, tam: 800, ruta: [],
-  calidad: "normal", nombre: "", nombreAuto: "", ac: true,
+  modo: "libre", centro: null, ancho: 800, alto: 800, ruta: [],
+  calidad: "normal", nombre: "", nombreAuto: "", ac: true, jugar: false,
+  maxKm2: 24, csp: false, vivo: null, vivoModo: false,
   temporada: "seca", region: "auto", vegetacion: 1, usar: Object.fromEntries(FUENTES.map((k) => [k, true])), dem: null,
   lugar: "", lugarElegido: false, lugarEsPunto: false, regionInfo: null, osm: null,
   asistente: false, paso: 1,
@@ -90,10 +91,57 @@ const Z = { rect: null, centro: null, esquina: null, etiqueta: null };
 const R = { marcas: [], linea: null };
 let arrastre = null;
 
-function caja(centro = S.centro, tam = S.tam) {
+// la zona es un rectángulo de ancho × alto (m) centrado en S.centro
+function caja(centro = S.centro, ancho = S.ancho, alto = S.alto) {
   const [lat, lon] = centro;
-  const dlat = tam / 2 / M_POR_GRADO, dlon = tam / 2 / (M_POR_GRADO * Math.cos((lat * Math.PI) / 180));
+  const dlat = alto / 2 / M_POR_GRADO, dlon = ancho / 2 / (M_POR_GRADO * Math.cos((lat * Math.PI) / 180));
   return [[lat - dlat, lon - dlon], [lat + dlat, lon + dlon]];
+}
+const kmZona = () => (S.ancho * S.alto) / 1e6;
+// la zona no pasa de maxKm2 (24); para más, el modo en vivo (casilla): prepara esta zona y lo demás se genera
+// mientras se conduce
+const MIN_VIVO_KM2 = 2;   // el modo en vivo se puede activar a partir de 2 km² de zona
+const esVivo = () => S.modo === "libre" && !!S.centro && !!S.vivoModo && kmZona() >= MIN_VIVO_KM2 - 1e-9;
+const enElMaximo = () => kmZona() >= S.maxKm2 * 0.98;   // el recorte redondea a 50 m: se queda un poco por debajo
+const textoZona = () => esVivo() ? t("zona.area_vivo", { km: fmt(kmZona(), 2) })
+  : enElMaximo() ? t("zona.area_max", { km: fmt(kmZona(), 2), max: fmt(S.maxKm2) }) : t("zona.area", { km: fmt(kmZona(), 2) });
+// mientras se genera la zona (pista o modo en vivo) no se puede cambiar: aviso y que cancele antes
+function bloqueo() {
+  if (S.trabajo) return "bloq.zona";
+  if (S.vivo && S.vivo.activo) return "bloq.vivo";
+  return null;
+}
+function avisarBloqueo() {
+  const b = bloqueo();
+  if (b) aviso(t(b), { mal: true, ms: 6000 });
+  return !!b;
+}
+function aplicarBloqueo() {
+  const b = !!bloqueo();
+  document.body.classList.toggle("zona-bloqueada", b);
+  for (const m of [Z.centro, Z.esquina, ...R.marcas]) if (m && m.dragging) (b ? m.dragging.disable() : m.dragging.enable());
+  for (const el of $$('[data-campo="ancho"], [data-campo="alto"], [data-campo="vivoModo"], [data-grupo="modo"] button, [data-accion="deshacer-punto"], [data-accion="borrar-ruta"]')) el.disabled = b;
+  // por debajo de 2 km² no hay modo en vivo (y si se achica la zona, se desmarca)
+  const pocaZona = kmZona() < MIN_VIVO_KM2 - 1e-9;
+  if (pocaZona && S.vivoModo && !b) S.vivoModo = false;
+  for (const el of $$('[data-campo="vivoModo"]')) {
+    el.disabled = b || pocaZona;
+    el.checked = !!S.vivoModo && !pocaZona;
+    el.closest("label").title = pocaZona ? t("campo.vivo_min", { min: MIN_VIVO_KM2 }) : "";
+    el.closest("label").classList.toggle("apagada", pocaZona);
+  }
+}
+// que el rectángulo no pase del máximo: si se agranda un lado, se recorta el otro (o los dos, a escala)
+function limitarZona(cambio) {
+  const max = S.maxKm2 * 1e6;
+  if (S.ancho * S.alto <= max) return;
+  if (cambio === "ancho") S.alto = Math.max(200, Math.floor(max / S.ancho / 50) * 50);
+  else if (cambio === "alto") S.ancho = Math.max(200, Math.floor(max / S.alto / 50) * 50);
+  else {
+    const f = Math.sqrt(max / (S.ancho * S.alto));
+    S.ancho = Math.floor((S.ancho * f) / 50) * 50;
+    S.alto = Math.floor((S.alto * f) / 50) * 50;
+  }
 }
 
 function icono(clase, html = "", tam = 18) {
@@ -113,6 +161,7 @@ function dibujarZona(moviendo = null) {
       .addTo(map);
     Z.rect.on("mousedown", (e) => {
       if (e.originalEvent.button !== 0) return;
+      if (avisarBloqueo()) { L.DomEvent.stop(e); return; }
       arrastre = { ini: e.latlng, centro: [...S.centro] };
       map.dragging.disable();
       L.DomEvent.stop(e);
@@ -122,9 +171,12 @@ function dibujarZona(moviendo = null) {
     Z.centro.on("dragend", cambioZona);
     Z.esquina = L.marker(b[1], { draggable: true, icon: icono("asa"), title: t("zona.tamano"), zIndexOffset: 600 }).addTo(map);
     Z.esquina.on("drag", (e) => {
+      // ancho y alto por separado: un rectángulo como lo quiera el usuario
       const dy = Math.abs(e.latlng.lat - S.centro[0]) * M_POR_GRADO;
       const dx = Math.abs(e.latlng.lng - S.centro[1]) * M_POR_GRADO * Math.cos((S.centro[0] * Math.PI) / 180);
-      S.tam = Math.min(3000, Math.max(200, Math.round((2 * Math.max(dx, dy)) / 50) * 50));
+      S.ancho = Math.min(8000, Math.max(200, Math.round((2 * dx) / 50) * 50));
+      S.alto = Math.min(8000, Math.max(200, Math.round((2 * dy) / 50) * 50));
+      limitarZona();
       dibujarZona("esquina");
       sync();
     });
@@ -135,7 +187,8 @@ function dibujarZona(moviendo = null) {
   if (moviendo !== "centro") Z.centro.setLatLng(S.centro);
   if (moviendo !== "esquina") Z.esquina.setLatLng(b[1]);
   Z.etiqueta.setLatLng(sur);
-  Z.etiqueta.setIcon(L.divIcon({ className: "", html: `<span class="etiqueta-tam">${fmt(S.tam)} m</span>`, iconSize: [0, 0] }));
+  Z.etiqueta.setIcon(L.divIcon({ className: "", html: `<span class="etiqueta-tam${esVivo() ? " vivo" : ""}">${fmt(S.ancho)} × ${fmt(S.alto)} m · ${fmt(kmZona(), 2)} km²${esVivo() ? ` · ${t("vivo.insignia")}` : ""}</span>`, iconSize: [0, 0] }));
+  Z.rect.setStyle({ dashArray: esVivo() ? "2 6" : "7 5" });
 }
 
 map.on("mousemove", (e) => {
@@ -166,7 +219,7 @@ function dibujarRuta() {
       title: t("ruta.title"), zIndexOffset: 700 }).addTo(map);
     m.on("drag", (e) => { S.ruta[i] = [e.latlng.lat, e.latlng.lng]; actualizarLinea(); });
     m.on("dragend", () => { cambioZona(); sync(); });
-    m.on("contextmenu", () => { S.ruta.splice(i, 1); dibujarRuta(); cambioZona(); sync(); });
+    m.on("contextmenu", () => { if (avisarBloqueo()) return; S.ruta.splice(i, 1); dibujarRuta(); cambioZona(); sync(); });
     R.marcas.push(m);
   });
   actualizarLinea();
@@ -185,8 +238,10 @@ function modoClic() {
 map.on("click", (e) => {
   const p = [e.latlng.lat, e.latlng.lng];
   const m = modoClic();
+  if (m && avisarBloqueo()) return;
   if (m === "lugar" || m === "zona") {
     S.centro = p;
+    if (m === "lugar") avanzarSolo(1);
     if (m === "lugar" || !S.lugarElegido) {
       S.lugar = t("lugar.punto", { lat: p[0].toFixed(4), lon: p[1].toFixed(4) });
       S.lugarEsPunto = true;
@@ -207,6 +262,7 @@ map.on("click", (e) => {
 });
 
 function cambiarModo(m) {
+  if (m !== S.modo && avisarBloqueo()) return;
   S.modo = m;
   map.getContainer().style.cursor = m === "libre" ? "" : "crosshair";
   dibujarZona();
@@ -216,6 +272,7 @@ function cambiarModo(m) {
 }
 
 function irA(lat, lon, nombre, cajaBusqueda) {
+  if (avisarBloqueo()) return;
   S.lugar = nombre;
   S.lugarEsPunto = false;
   S.lugarElegido = true;
@@ -228,6 +285,7 @@ function irA(lat, lon, nombre, cajaBusqueda) {
   }
   map.flyTo([lat, lon], zoom, { duration: 0.8 });
   S.centro = [lat, lon];
+  avanzarSolo(1);
   if (S.modo !== "libre") { S.ruta = []; dibujarRuta(); }
   dibujarZona();
   cambioZona();
@@ -284,7 +342,7 @@ function guardarVista() {
   clearTimeout(tVista);
   tVista = setTimeout(() => {
     const c = map.getCenter();
-    api("guardar_ajustes", { vista: { lat: c.lat, lon: c.lng, zoom: map.getZoom(), centro: S.centro, tam: S.tam, lugar: S.lugar, nombreAuto: S.nombreAuto } });
+    api("guardar_ajustes", { vista: { lat: c.lat, lon: c.lng, zoom: map.getZoom(), centro: S.centro, ancho: S.ancho, alto: S.alto, lugar: S.lugar, nombreAuto: S.nombreAuto } });
   }, 800);
 }
 map.on("moveend", guardarVista);
@@ -302,7 +360,7 @@ async function cargarOSM() {
   }
   const km2 = areaKm2(b);
   if (km2 > 9) { capaOSM.clearLayers(); S.osm = { error: t("osm.grande") }; sync(); return; }
-  const zona = { modo: S.modo, centro: S.centro, tam: S.tam, ruta: S.ruta };
+  const zona = { modo: S.modo, centro: S.centro, ancho: S.ancho, alto: S.alto, ruta: S.ruta };
   const clave = JSON.stringify(zona);
   let datos = osmCache.get(clave);
   if (!datos) {
@@ -382,7 +440,8 @@ function resumenHTML() {
     filas.push([t("res.orto"), S.usar.orto ? ORTO[r.orto] || r.orto : ORTO[""]]);
     filas.push([t("res.relieve"), S.dem ? t("res.local") : RELIEVE[r.relieve] || r.relieve]);
   }
-  if (S.modo === "libre") filas.push([t("res.area"), `${fmt(e.km2, 2)} km²`]);
+  if (S.modo === "libre") filas.push([t("res.area"), `${fmt(S.ancho)} × ${fmt(S.alto)} m · ${fmt(kmZona(), 2)} km²`]);
+  if (esVivo()) filas.push([t("res.modo"), t("res.modo_vivo")]);
   else filas.push([t("res.ruta"), S.ruta.length > 1 ? t("res.linea_recta", { km: fmt(largoRuta() / 1000, 1) }) : t("res.sin_puntos")]);
   filas.push([t("res.tiempo"), `${tiempoTexto(e.seg)} ${t("res.aprox")}`]);
   filas.push([t("res.tamano"), `~${fmt(Math.max(5, e.mb))} MB`]);
@@ -405,7 +464,9 @@ function sync() {
   const nombre = nombreFinal();
   const existe = S.pistas.some((p) => p.nombre === nombre);
   const textos = {
-    tam: `${fmt(S.tam)} m`,
+    ancho: `${fmt(S.ancho)} m`,
+    alto: `${fmt(S.alto)} m`,
+    "zona-area": S.centro ? textoZona() : "",
     vegetacion: `${Math.round(S.vegetacion * 100)} %`,
     ruta: S.ruta.length ? (S.ruta.length > 1 ? `${t("ruta.puntos", { n: S.ruta.length })} · ${fmt(largoRuta() / 1000, 1)} km` : t("ruta.punto")) : "",
     "ayuda-ruta": t(S.modo === "circuito" ? "ruta.ayuda_circuito" : "ruta.ayuda_tramo"),
@@ -418,6 +479,9 @@ function sync() {
     if (el.dataset.mostrar === "nombre-aviso") el.classList.toggle("aviso-texto", existe);
   }
   for (const el of $$("[data-mostrar-si]")) el.hidden = !S[el.dataset.mostrarSi];
+  for (const el of $$(".zona-area")) el.classList.toggle("vivo", esVivo());
+  $("#b-generar").textContent = t(esVivo() ? "accion.vivo" : "accion.generar");
+  aplicarBloqueo();
   const html = resumenHTML();
   $$("[data-resumen]").forEach((el) => { el.innerHTML = html; });
   syncVista();
@@ -450,7 +514,7 @@ function syncAsistente() {
   });
   const atras = $('[data-accion="paso-atras"]');
   atras.style.visibility = S.paso === 1 ? "hidden" : "visible";
-  $('[data-accion="paso-siguiente"]').textContent = t(S.paso === 4 ? "asis.generar" : "asis.siguiente");
+  $('[data-accion="paso-siguiente"]').textContent = t(S.paso === 4 ? (esVivo() ? "asis.vivo" : "asis.generar") : "asis.siguiente");
 }
 
 // ------------------------------------------------------------------ asistente
@@ -479,14 +543,29 @@ function validarZona() {
   if (S.modo === "libre" && !S.centro) return t("err.zona");
   if (S.modo === "tramo" && S.ruta.length < 2) return t("err.tramo");
   if (S.modo === "circuito" && S.ruta.length < 3) return t("err.circuito");
-  if (areaKm2(zonaActual()) > 12) return t("err.grande");
+  // una zona grande no es error: pasa al modo en vivo; una ruta enorme sí
+  if (S.modo !== "libre" && areaKm2(zonaActual()) > 12) return t("err.grande");
   return "";
+}
+// asistente: al elegir el sitio (paso 1) o el tipo (paso 2) se pasa solo al siguiente
+let tAvance = null;
+function avanzarSolo(desde) {
+  if (!S.asistente || S.paso !== desde) return;
+  clearTimeout(tAvance);
+  tAvance = setTimeout(() => {
+    if (!S.asistente || S.paso !== desde) return;
+    errorPaso("");
+    S.paso = desde + 1;
+    if (S.paso === 3 && S.modo === "libre" && S.centro) map.flyToBounds(caja(), { padding: [80, 80], duration: 0.6 });
+    sync();
+  }, desde === 1 ? 900 : 350);
 }
 function pasoSiguiente() {
   if (S.paso === 1 && !S.lugarElegido) return errorPaso(t("err.lugar"));
   if (S.paso === 3) { const e = validarZona(); if (e) return errorPaso(e); }
   errorPaso("");
   if (S.paso === 4) { generar().then((ok) => { if (ok) cerrarAsistente(); }); return; }
+  clearTimeout(tAvance);
   S.paso++;
   if (S.paso === 3 && S.modo === "libre" && S.centro) map.flyToBounds(caja(), { padding: [80, 80], duration: 0.6 });
   sync();
@@ -552,7 +631,8 @@ const escapar = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<"
 // ------------------------------------------------------------------ generación
 function opciones() {
   return {
-    modo: S.modo, centro: S.centro, tam: S.tam, ruta: S.ruta, calidad: S.calidad, nombre: nombreFinal(),
+    modo: S.modo, centro: S.centro, ancho: S.ancho, alto: S.alto, ruta: S.ruta, calidad: S.calidad, nombre: nombreFinal(),
+    vivo: esVivo(),
     titulo: S.lugar && !S.lugarEsPunto ? S.lugar : "", ac: S.ac,
     temporada: S.temporada, region: S.region, vegetacion: S.vegetacion,
     sin: FUENTES.filter((k) => !S.usar[k]), dem: S.dem,
@@ -564,6 +644,7 @@ async function generar() {
   if (S.trabajo) { aviso(t("err.ocupado")); return false; }
   const e = validarZona();
   if (e) { aviso(e, { mal: true }); return false; }
+  if (esVivo()) return iniciarVivo();
   clearTimeout(tBorrador);
   S.bor = null;                       // Python cancela el borrador que estuviera en marcha
   // el trabajo se marca antes de la llamada: los primeros eventos pueden llegar antes que la respuesta
@@ -587,6 +668,7 @@ async function generar() {
 }
 
 function mostrarProgreso(titulo, pct) {
+  aplicarBloqueo();
   $("#acc-listo").hidden = true;
   $("#acc-progreso").hidden = false;
   $("#prog-titulo").textContent = titulo;
@@ -597,12 +679,14 @@ function ocultarProgreso() {
   $("#acc-progreso").hidden = true;
   S.trabajo = null;
   S.trabajoId = null;
+  aplicarBloqueo();
   programarBorrador();
 }
 setInterval(() => { if (S.trabajo) $("#prog-tiempo").textContent = mmss((Date.now() - S.t0) / 1000); }, 500);
 
 function manejarEvento(ev) {
   if (ev.tipo === "borrador") return eventoBorrador(ev);
+  if (ev.tipo === "vivo") return eventoVivo(ev);
   if (!S.trabajo) return;
   if (S.trabajoId == null) {
     if (ev.estado !== "inicio") return;
@@ -623,6 +707,7 @@ function manejarEvento(ev) {
     ocultarProgreso();
     mostrarResultado(ev.pista);
     refrescarPistas();
+    if (S.jugar && ev.pista && ev.pista.ac) jugarAC(ev.pista.nombre, $("#res-mensaje"));
   } else if (ev.estado === "error") {
     ocultarProgreso();
     aviso(ev.error || t("err.fallo"), { mal: true, ms: 0, accion: { texto: t("accion.ver_registro"), fn: () => verRegistro() } });
@@ -635,7 +720,7 @@ function manejarEvento(ev) {
 // ------------------------------------------------------------------ borrador 3D automático
 // Al dejar quieta la zona (1,5 s, y lo que falte de la descarga de OSM) se rehace el borrador.
 // Un borrador nuevo sustituye al que estuviera en marcha; «Generar pista» lo cancela.
-const claveZona = () => JSON.stringify({ modo: S.modo, centro: S.centro, tam: S.tam, ruta: S.ruta });
+const claveZona = () => JSON.stringify({ modo: S.modo, centro: S.centro, ancho: S.ancho, alto: S.alto, ruta: S.ruta });
 let tBorrador = null;
 const borradorPosible = () => !validarZona() && areaKm2(zonaActual()) <= 3;
 
@@ -771,11 +856,82 @@ function mostrarResultado(p) {
   const datos = [p.area_km2 ? t("dato.km2", { v: fmt(p.area_km2, 2) }) : "", p.km ? t("dato.km_calles", { v: fmt(p.km, 1) }) : "",
     t("dato.mb", { v: fmt(p.mb, 1) }), p.segundos ? t("dato.s", { v: Math.round(p.segundos) }) : ""];
   $("#res-datos").textContent = datos.filter(Boolean).join(" · ");
+  $("#res-jugar").hidden = !p.ac || !S.acRuta;
   const b = $("#res-ac");
   b.hidden = !p.ac;
   b.textContent = t(p.ac_estado === "enlazada" ? "res.ya_ac" : "res.instalar");
   $("#res-mensaje").textContent = "";
   $("#resultado").hidden = false;
+}
+
+async function jugarAC(nombre, salidaMsg) {
+  const r = await api("jugar_ac", nombre);
+  const txt = r?.error || r?.mensaje || "";
+  if (salidaMsg) { salidaMsg.textContent = txt; salidaMsg.className = `ayuda ${r?.error ? "res-mal" : "res-ok"}`; }
+  else aviso(txt, { mal: !!r?.error, ms: 8000 });
+  refrescarPistas();
+}
+
+// ------------------------------------------------------------------ modo en vivo
+// Zona de más de 5 km²: Python arranca `openlaps.vivo` con la zona (a escala, 5 km²) para prepararla entera, crea e
+// instala la pista semilla de AC y sirve los pedazos. Aquí se enseña el progreso (se le pregunta directamente al
+// servicio) y se puede conducir en el visor o abrir AC.
+let tVivo = null;
+async function iniciarVivo() {
+  if (S.vivo && S.vivo.activo) { aviso(t("err.ocupado")); return false; }
+  clearTimeout(tBorrador);
+  S.bor = null;
+  const r = await api("vivo_iniciar", opciones());
+  if (!r || r.error) { aviso(r?.error || t("err.empezar"), { mal: true, ms: 8000 }); return false; }
+  S.vivo = { activo: true, puerto: r.puerto, url: r.url, nombre: r.nombre, pistaAc: r.pista_ac, zona: r.zona,
+    ac: r.ac, csp: r.csp, semilla: r.pista_ac ? "haciendo" : null, estado: null, registro: [`> openlaps.vivo :${r.puerto}`] };
+  if (r.aviso) aviso(r.aviso, { ms: 10000 });
+  $("#resultado").hidden = true;
+  $("#vivo-panel").hidden = false;
+  pintarVivo();
+  clearInterval(tVivo);
+  tVivo = setInterval(sondearVivo, 2000);
+  return true;
+}
+async function sondearVivo() {
+  const v = S.vivo;
+  if (!v || !v.activo) return;
+  try {
+    v.estado = await (await fetch(`http://127.0.0.1:${v.puerto}/vivo/estado`)).json();
+  } catch { v.estado = null; }
+  pintarVivo();
+}
+function eventoVivo(ev) {
+  const v = S.vivo;
+  if (!v) return;
+  if (ev.linea) v.registro = [...v.registro, ev.linea].slice(-500);
+  if (ev.estado === "semilla") v.semilla = "lista";
+  else if (ev.estado === "semilla_error") v.semilla = "error";
+  else if (ev.estado === "fin") {
+    v.activo = false;
+    clearInterval(tVivo);
+    if (!v.detenido) aviso(t("vivo.fin"), { mal: ev.codigo !== 0, accion: { texto: t("accion.ver_registro"), fn: () => verRegistro(v.registro) } });
+  }
+  pintarVivo();
+}
+function pintarVivo() {
+  const v = S.vivo;
+  // el panel del modo en vivo ocupa el sitio de la vista previa 3D
+  $("#vista").hidden = !!v;
+  aplicarBloqueo();
+  if (!v) { $("#vivo-panel").hidden = true; return; }
+  $("#vivo-titulo").textContent = v.nombre;
+  $("#vivo-texto").textContent = v.activo ? t("vivo.texto", { zona: `${fmt(v.zona[0])} × ${fmt(v.zona[1])} m` }) : t("vivo.detenido");
+  const e = v.estado;
+  const pct = e ? Math.round(e.zona_lista * 100) : 0;
+  $("#vivo-barra").style.width = `${v.activo ? Math.max(2, pct) : 0}%`;
+  $("#vivo-zona").textContent = !v.activo ? "" : !e ? t("vivo.arrancando")
+    : e.t_medio ? t("vivo.zona", { pct, n: e.listos.length, s: fmt(e.t_medio, 0) }) : t("vivo.zona_espera");
+  const p = v.pistaAc;
+  $("#vivo-ac").textContent = !v.ac ? t("vivo.ac_no") : !p ? "" : v.semilla === "lista" ? (v.csp ? t("vivo.ac_lista", { p }) : t("vivo.ac_csp"))
+    : v.semilla === "error" ? t("vivo.ac_error") : t("vivo.ac_haciendo", { p });
+  $("#vivo-jugar").hidden = !(v.activo && v.semilla === "lista" && v.ac);
+  $('[data-accion="vivo-conducir"]').hidden = !v.activo || !e;
 }
 
 async function instalarAC(nombre, salidaMsg) {
@@ -862,8 +1018,8 @@ const ACCIONES = {
   cancelar: () => api("cancelar"),
   "ver-registro": () => verRegistro(),
   "cerrar-registro": () => { $("#modal-registro").hidden = true; },
-  "deshacer-punto": () => { S.ruta.pop(); dibujarRuta(); cambioZona(); },
-  "borrar-ruta": () => { S.ruta = []; dibujarRuta(); cambioZona(); },
+  "deshacer-punto": () => { if (avisarBloqueo()) return; S.ruta.pop(); dibujarRuta(); cambioZona(); },
+  "borrar-ruta": () => { if (avisarBloqueo()) return; S.ruta = []; dibujarRuta(); cambioZona(); },
   "paso-siguiente": pasoSiguiente,
   "paso-atras": () => { errorPaso(""); S.paso = Math.max(1, S.paso - 1); sync(); },
   "cerrar-asistente": cerrarAsistente,
@@ -873,6 +1029,29 @@ const ACCIONES = {
   "cerrar-resultado": () => { $("#resultado").hidden = true; },
   "manejar-resultado": () => S.ultimaPista && abrirVisor(S.ultimaPista.glb),
   "instalar-resultado": () => S.ultimaPista && instalarAC(S.ultimaPista.nombre, $("#res-mensaje")),
+  "jugar-resultado": () => S.ultimaPista && jugarAC(S.ultimaPista.nombre, $("#res-mensaje")),
+  "vivo-conducir": () => {
+    if (!S.vivo) return;
+    const f = $("#visor-iframe");
+    f.src = `${S.vivo.url}&lang=${IDIOMA}`;
+    $("#visor-completo").hidden = false;
+    f.onload = () => f.contentWindow?.focus();
+  },
+  "vivo-jugar": async () => {
+    const r = await api("vivo_jugar");
+    const m = $("#vivo-mensaje");
+    m.textContent = r?.error || r?.mensaje || "";
+    m.className = `ayuda ${r?.error ? "res-mal" : "res-ok"}`;
+  },
+  "vivo-detener": async () => {
+    if (S.vivo) S.vivo.detenido = true;
+    await api("vivo_detener");
+    clearInterval(tVivo);
+    S.vivo = null;
+    pintarVivo();
+    aviso(t("vivo.detenido"));
+  },
+  "vivo-registro": () => S.vivo && verRegistro(S.vivo.registro),
   "carpeta-resultado": () => S.ultimaPista && api("abrir_carpeta", S.ultimaPista.nombre),
   "cerrar-cajon": cerrarCajones,
   "abrir-salida": () => api("abrir_carpeta"),
@@ -916,7 +1095,7 @@ document.addEventListener("click", (e) => {
   const op = e.target.closest("[data-grupo] button[data-valor]");
   if (op) {
     const g = op.closest("[data-grupo]").dataset.grupo;
-    if (g === "modo") cambiarModo(op.dataset.valor);
+    if (g === "modo") { cambiarModo(op.dataset.valor); avanzarSolo(2); }
     else {
       S[g] = op.dataset.valor;
       if (g === "calidad") api("guardar_ajustes", { calidad: S.calidad });
@@ -930,8 +1109,16 @@ document.addEventListener("input", (e) => {
   if (el.dataset.campo) {
     const k = el.dataset.campo;
     S[k] = el.type === "checkbox" ? el.checked : el.type === "range" ? Number(el.value) : el.value;
-    if (k === "tam") { dibujarZona(); cambioZona(); }
+    if (k === "ancho" || k === "alto") {
+      limitarZona(k);
+      dibujarZona();
+      cambioZona();
+      // que se vea el rectángulo entero mientras se cambia su tamaño
+      if (S.centro && !map.getBounds().contains(L.latLngBounds(caja()))) map.fitBounds(caja(), { padding: [60, 60], animate: false });
+    }
     if (k === "ac") api("guardar_ajustes", { exportar_ac: S.ac });
+    if (k === "jugar") api("guardar_ajustes", { jugar_al_terminar: S.jugar });
+    if (k === "vivoModo") dibujarZona();
     if (k === "region") pedirRegion();
     sync();
   } else if (el.dataset.usar) {
@@ -1040,6 +1227,9 @@ $(".bordes").addEventListener("mousedown", (e) => {
   ponerCapa(a.capa || "mapa");
   S.calidad = a.calidad || "normal";
   S.ac = a.exportar_ac !== false;
+  S.jugar = !!a.jugar_al_terminar;
+  S.maxKm2 = r?.max_km2 || 24;
+  S.csp = !!r?.csp;
   S.autoBorrador = a.borrador_auto !== false;
   S.verOsm = a.ver_osm !== false;
   $("#auto-3d").checked = S.autoBorrador;
@@ -1050,7 +1240,8 @@ $(".bordes").addEventListener("mousedown", (e) => {
     map.setView(Array.isArray(v.centro) ? v.centro : [v.lat, v.lon], v.zoom || 14);
     if (Array.isArray(v.centro)) {
       S.centro = v.centro;
-      S.tam = v.tam || 800;
+      S.ancho = v.ancho || v.tam || 800;
+      S.alto = v.alto || v.tam || 800;
       S.lugar = v.lugar || "";
       S.lugarElegido = true;
       S.nombreAuto = v.nombreAuto || "";
@@ -1064,6 +1255,18 @@ $(".bordes").addEventListener("mousedown", (e) => {
   }
   sync();
   if (S.centro) cambioZona();
+  // el modo en vivo sigue en marcha (la ventana se recargó): se recupera su panel y la zona queda bloqueada
+  const ev = await api("vivo_estado");
+  if (ev && ev.activo) {
+    S.vivo = { activo: true, puerto: ev.puerto, url: ev.url, nombre: ev.nombre, pistaAc: ev.pista_ac, zona: ev.zona || [0, 0],
+      ac: ev.ac, csp: ev.csp, semilla: ev.semilla, estado: null, registro: ev.registro || [] };
+    if (ev.centro) { S.centro = ev.centro; S.ancho = ev.zona[0]; S.alto = ev.zona[1]; S.modo = "libre"; S.vivoModo = true; dibujarZona(); }
+    $("#vivo-panel").hidden = false;
+    pintarVivo();
+    clearInterval(tVivo);
+    tVivo = setInterval(sondearVivo, 2000);
+    sync();
+  }
   if (!r) aviso(t("err.arranque"), { mal: true, ms: 0 });
   else if (!a.asistente_visto) abrirAsistente();
 })();

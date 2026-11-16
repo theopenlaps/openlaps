@@ -55,10 +55,10 @@ static class Lanzador
                     "Program files are missing next to OpenLaps.exe. Extract the whole .zip again."));
             return 2;
         }
-        if (!HayWebView2())
+        if (!HayWebView2() && !InstalarWebView2())
         {
-            var r = MessageBox.Show(T("OpenLaps necesita Microsoft Edge WebView2 (viene con Windows 11). ¿Abrir la página de descarga?",
-                                      "OpenLaps needs Microsoft Edge WebView2 (included with Windows 11). Open the download page?"),
+            var r = MessageBox.Show(T("OpenLaps necesita Microsoft Edge WebView2 y no se pudo instalar solo. ¿Abrir la página de descarga?",
+                                      "OpenLaps needs Microsoft Edge WebView2 and it couldn't be installed automatically. Open the download page?"),
                                     "OpenLaps", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (r == DialogResult.Yes) Process.Start(WebView2Url);
             return 3;
@@ -100,6 +100,32 @@ static class Lanzador
             if (!string.IsNullOrEmpty(v) && v != "0.0.0.0") return true;
         }
         return false;
+    }
+
+    // WebView2 (lo trae Windows 11; en Windows 10 puede faltar): con permiso del usuario se baja el instalador
+    // oficial de Microsoft (el "Evergreen bootstrapper", ~2 MB, firmado por Microsoft) y se ejecuta.
+    const string WebView2Instalador = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+    static bool InstalarWebView2()
+    {
+        var r = MessageBox.Show(T("OpenLaps necesita Microsoft Edge WebView2 (viene con Windows 11). ¿Instalarlo ahora? Se descarga de Microsoft (unos 2 MB y un par de minutos).",
+                                  "OpenLaps needs Microsoft Edge WebView2 (included with Windows 11). Install it now? It is downloaded from Microsoft (about 2 MB and a couple of minutes)."),
+                                "OpenLaps", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (r != DialogResult.Yes) return false;
+        try
+        {
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)12288;
+            string exe = Path.Combine(Path.GetTempPath(), "MicrosoftEdgeWebview2Setup.exe");
+            using (var wc = new WebClient()) wc.DownloadFile(WebView2Instalador, exe);
+            // solo se ejecuta si lo firma Microsoft
+            var firma = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(exe);
+            if (firma == null || firma.Subject.IndexOf("Microsoft Corporation", StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            var p = Process.Start(new ProcessStartInfo(exe, "/install") { UseShellExecute = true });
+            p.WaitForExit(10 * 60 * 1000);
+            return HayWebView2();
+        }
+        catch (Exception) { return false; }
     }
 
     static bool Abrir()

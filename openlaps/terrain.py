@@ -33,8 +33,11 @@ class Terrain:
         self.log = log
         # rejilla de trabajo de 10 m, con margen para calles que se salen del área
         self.wres = 10.0
-        x0, x1 = proj.xmin - pad, proj.xmax + pad
-        y0, y1 = proj.ymin - pad, proj.ymax + pad
+        # alineada a múltiplos de 10 m: así dos áreas vecinas (pedazos del modo en vivo) muestrean el relieve en
+        # los mismos puntos y sus bordes casan
+        x0 = math.floor((proj.xmin - pad) / self.wres) * self.wres
+        y0 = math.floor((proj.ymin - pad) / self.wres) * self.wres
+        x1, y1 = proj.xmax + pad, proj.ymax + pad
         nx = int(math.ceil((x1 - x0) / self.wres)) + 1
         ny = int(math.ceil((y1 - y0) / self.wres)) + 1
         self.wx0, self.wy0 = x0, y0
@@ -290,6 +293,9 @@ class Terrain:
                 pos = np.column_stack([GX.ravel(), GY.ravel(), Z.ravel()])
                 nrm = N[j0:j1 + 1, i0:i1 + 1].reshape(-1, 3)
                 x0, x1, y0, y1 = xs[0], xs[-1], ys[0], ys[-1]
+                solo = getattr(self, "solo", None)    # modo en vivo: solo las teselas del centro del pedazo
+                if solo is not None and not (solo[0] <= (x0 + x1) / 2 <= solo[2] and solo[1] <= (y0 + y1) / 2 <= solo[3]):
+                    continue
                 uv = np.column_stack([(GX.ravel() - x0) / (x1 - x0), (y1 - GY.ravel()) / (y1 - y0)])
                 w, h = len(xs), len(ys)
                 idx = np.arange(w * h).reshape(h, w)

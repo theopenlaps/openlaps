@@ -272,3 +272,22 @@ input[type="checkbox"] { accent-color: var(--amarillo); width: 16px; height: 16p
 .vista-estado .progreso { height: 4px; }
 .vista-estado .fila-botones:empty { display: none; }
 .vista-estado.mal #ve-texto { color: var(--rojo); }
+
+/* ---------- zona rectangular y modo en vivo */
+.medidas { display: grid; gap: 4px; }
+.zona-area { font-variant-numeric: tabular-nums; }
+.zona-area.vivo { color: var(--amarillo); }
+.etiqueta-tam.vivo { background: var(--asfalto, #15171a); color: var(--amarillo); outline: 2px solid var(--amarillo); }
+.insignia-vivo { display: inline-block; font: 700 12px/1 var(--f-display); letter-spacing: 0.08em; padding: 3px 6px; border-radius: 4px;
+  background: var(--amarillo); color: var(--sobre-amarillo, #15171a); vertical-align: middle; animation: latido 2s ease-in-out infinite; }
+@keyframes latido { 50% { opacity: 0.55; } }
+@media (prefers-reduced-motion: reduce) { .insignia-vivo { animation: none; } }
+.vivo-panel .progreso { margin: 10px 0 6px; }
+.vivo-estado { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 4px; font-size: 13px; color: var(--texto-2, #a9adb3); }
+.vivo-estado li:empty { display: none; }
+
+/* zona bloqueada mientras se genera */
+.zona-bloqueada .leaflet-interactive { cursor: not-allowed !important; }
+.casilla-vivo { margin-top: 4px; }
+input:disabled, button:disabled { opacity: 0.45; cursor: not-allowed; }
+.casilla.apagada { opacity: 0.55; }

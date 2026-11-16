@@ -26,6 +26,13 @@ TEXTOS = {
         "ac_enlace": "No se pudo crear el enlace en {d}: {e}",
         "ac_ok": "Instalada. En Content Manager busca «openlaps» en la lista de pistas (pulsa F5 si ya estaba abierto).",
         "dem_tipo": "Relieve GeoTIFF (*.tif;*.tiff)",
+        "zona_grande": "La zona pasa del máximo de {km:g} km². Para más, activa el modo en vivo.",
+        "zona_es_vivo": "Con el modo en vivo activado la zona se prepara en vivo.",
+        "ac_abierto": "Assetto Corsa ya está abierto. Ciérralo y vuelve a pulsar «Jugar».",
+        "ac_sin_race": "No encontré la configuración de Assetto Corsa (Documentos\\Assetto Corsa\\cfg\\race.ini). Abre el juego una vez desde Steam.",
+        "ac_jugando": "Abriendo Assetto Corsa en «{p}»… (Steam tiene que estar abierto)",
+        "vivo_ocupado": "El modo en vivo ya está en marcha.",
+        "vivo_sin_csp": "El modo en vivo en Assetto Corsa necesita Custom Shaders Patch (gratis, se instala con Content Manager). En el navegador funciona igual.",
     },
     "en": {
         "ocupado": "A generation is already running.",
@@ -49,6 +56,13 @@ TEXTOS = {
         "ac_enlace": "Couldn't create the link in {d}: {e}",
         "ac_ok": "Installed. In Content Manager, search for “openlaps” in the track list (press F5 if it was already open).",
         "dem_tipo": "GeoTIFF elevation (*.tif;*.tiff)",
+        "zona_grande": "The area is over the {km:g} km² maximum. For more, turn on live mode.",
+        "zona_es_vivo": "With live mode on, the area is prepared live.",
+        "ac_abierto": "Assetto Corsa is already running. Close it and press «Play» again.",
+        "ac_sin_race": "Couldn't find Assetto Corsa's settings (Documents\\Assetto Corsa\\cfg\\race.ini). Start the game once from Steam.",
+        "ac_jugando": "Opening Assetto Corsa on «{p}»… (Steam must be running)",
+        "vivo_ocupado": "Live mode is already running.",
+        "vivo_sin_csp": "Live mode in Assetto Corsa needs Custom Shaders Patch (free, installed with Content Manager). It works in the browser anyway.",
     },
 }
 

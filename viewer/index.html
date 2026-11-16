@@ -176,6 +176,8 @@ const TX = {
     no_abre: "No se pudo abrir la pista", ayuda_abrir: "Abre un archivo .glb generado con OpenLaps usando el botón “Abrir .glb”.",
     abre_una: "Abre una pista generada", genera: "Genera una pista con OpenLaps y ábrela con el botón “Abrir .glb”.",
     triangulos: "triángulos", cruza: "Cruza la salida",
+    vivo_titulo: "Tramo en vivo", vivo_gen: "Generando los primeros pedazos alrededor de la salida (la primera vez tarda un poco: hay que bajar los datos)…",
+    vivo_espera: "esperando terreno", vivo_en_vivo: "en vivo", vivo_pedazos: "pedazos", vivo_generando: "generando", vivo_sin: "Sin servidor del tramo en vivo", vivo_zona: "zona lista",
     sup: { ROAD: "Asfalto", MXCOBBLE: "Empedrado", LOOSE: "Tierra", MXDIRT: "Tierra", PAVEMENT: "Acera", GRASS: "Hierba / tierra" },
   },
   en: {
@@ -188,6 +190,8 @@ const TX = {
     no_abre: "Couldn't open the track", ayuda_abrir: "Open a .glb file generated with OpenLaps using the “Open .glb” button.",
     abre_una: "Open a generated track", genera: "Generate a track with OpenLaps and open it with the “Open .glb” button.",
     triangulos: "triangles", cruza: "Cross the start line",
+    vivo_titulo: "Live stage", vivo_gen: "Generating the first pieces around the start (the first time takes a while: the data has to be downloaded)…",
+    vivo_espera: "waiting for terrain", vivo_en_vivo: "live", vivo_pedazos: "pieces", vivo_generando: "generating", vivo_sin: "No live stage server", vivo_zona: "area ready",
     sup: { ROAD: "Asphalt", MXCOBBLE: "Cobblestone", LOOSE: "Dirt", MXDIRT: "Dirt", PAVEMENT: "Sidewalk", GRASS: "Grass / dirt" },
   },
 }[LANG];
@@ -286,8 +290,10 @@ const ray = new THREE.Raycaster();
 ray.firstHitOnly = true;
 const ABAJO = new THREE.Vector3(0, -1, 0);
 
-function alturaEn(x, z, y0) {
-  ray.set(new THREE.Vector3(x, y0 + 40, z), ABAJO);
+// `sobre`: desde cuánto más arriba se busca el suelo. Para el coche, poco (3 m): con 40 m, al pasar bajo un puente
+// el rayo encontraba primero el tablero y subía el coche encima, contra el pretil.
+function alturaEn(x, z, y0, sobre = 40) {
+  ray.set(new THREE.Vector3(x, y0 + sobre, z), ABAJO);
   ray.far = 200;
   const h = ray.intersectObjects(suelo, false)[0];
   return h || null;
@@ -460,8 +466,9 @@ for (const el of document.querySelectorAll(".tecla")) {
 const tmpF = new THREE.Vector3(), tmpR = new THREE.Vector3(), q = new THREE.Quaternion(), m4 = new THREE.Matrix4();
 let dirGiro = 0;
 function fisica(dt) {
+  if (piloto.ruta) pilotoAutomatico();
   const acel = keys.acel ? 1 : 0, fren = keys.freno ? 1 : 0;
-  const giro = (keys.izq ? 1 : 0) - (keys.der ? 1 : 0);
+  const giro = piloto.ruta ? piloto.giro : (keys.izq ? 1 : 0) - (keys.der ? 1 : 0);
   dirGiro += (giro - dirGiro) * Math.min(1, dt * 6);
   const vmax = VMAX[st.superficie] ?? 30, agarre = AGARRE[st.superficie] ?? 0.8;
   if (acel) st.v += (st.v < 0 ? 12 : 6.5 * agarre) * dt;
@@ -474,6 +481,17 @@ function fisica(dt) {
   st.yaw += (st.v / 2.6) * Math.tan(delta) * dt;
   tmpF.set(Math.sin(st.yaw), 0, Math.cos(st.yaw));
   const paso = st.v * dt;
+  // tramo en vivo: si delante aún no hay suelo (el pedazo no ha llegado), el coche espera
+  if (VIVO && Math.abs(paso) > 0) {
+    const s = Math.sign(paso);
+    if (!alturaEn(st.pos.x + tmpF.x * (paso + 3 * s), st.pos.z + tmpF.z * (paso + 3 * s), st.pos.y, 3)) {
+      vivo.espera = true; st.v = 0; return;            // justo delante no hay nada: alto
+    }
+    // más allá (lo que se recorre en ~1.5 s más la frenada): si falta, frenar a fondo desde ya
+    const ade = s * (Math.abs(st.v) * 1.5 + st.v * st.v / 16 + 5);
+    vivo.espera = !alturaEn(st.pos.x + tmpF.x * ade, st.pos.z + tmpF.z * ade, st.pos.y, 3 + Math.abs(ade) * 0.15);
+    if (vivo.espera) st.v -= Math.sign(st.v) * Math.min(Math.abs(st.v), 9 * dt);
+  }
   // choque con muros, defensas, vallas y edificios
   if (muros.length && Math.abs(paso) > 0) {
     const dir = tmpF.clone().multiplyScalar(Math.sign(paso));
@@ -484,14 +502,14 @@ function fisica(dt) {
   st.pos.addScaledVector(tmpF, paso);
   // altura e inclinación con cuatro rayos (adelante, atrás, izquierda, derecha)
   tmpR.set(tmpF.z, 0, -tmpF.x);
-  const c = alturaEn(st.pos.x, st.pos.z, st.pos.y);
+  const c = alturaEn(st.pos.x, st.pos.z, st.pos.y, 3);
   if (c) {
     st.superficie = (c.object.name.match(/^\d([A-Z]+)/) || [])[1] || "GRASS";
     st.pos.y += (c.point.y - st.pos.y) * Math.min(1, dt * 18);
-    const f = alturaEn(st.pos.x + tmpF.x * 1.4, st.pos.z + tmpF.z * 1.4, st.pos.y);
-    const b = alturaEn(st.pos.x - tmpF.x * 1.4, st.pos.z - tmpF.z * 1.4, st.pos.y);
-    const l = alturaEn(st.pos.x + tmpR.x * 0.8, st.pos.z + tmpR.z * 0.8, st.pos.y);
-    const r = alturaEn(st.pos.x - tmpR.x * 0.8, st.pos.z - tmpR.z * 0.8, st.pos.y);
+    const f = alturaEn(st.pos.x + tmpF.x * 1.4, st.pos.z + tmpF.z * 1.4, st.pos.y, 3);
+    const b = alturaEn(st.pos.x - tmpF.x * 1.4, st.pos.z - tmpF.z * 1.4, st.pos.y, 3);
+    const l = alturaEn(st.pos.x + tmpR.x * 0.8, st.pos.z + tmpR.z * 0.8, st.pos.y, 3);
+    const r = alturaEn(st.pos.x - tmpR.x * 0.8, st.pos.z - tmpR.z * 0.8, st.pos.y, 3);
     if (f && b && l && r) {
       const vf = new THREE.Vector3().subVectors(f.point, b.point).normalize();
       const vl = new THREE.Vector3().subVectors(l.point, r.point).normalize();
@@ -558,6 +576,167 @@ redimensionar();
 ajustarCalidad();
 ciclo();
 
+// ---------------------------------------------------------------- tramo en vivo (?vivo=1)
+// El servidor (python -m openlaps.vivo) genera la pista a pedazos de 256 m alrededor del coche. Aquí se
+// le dice dónde está el coche y se cargan los pedazos listos cercanos (y se sueltan los lejanos). Todos
+// comparten origen: cada .glb cae en su sitio sin moverlo.
+const QS = new URLSearchParams(location.search);
+const VIVO = QS.has("vivo");
+const vivo = { id: "web-" + Math.random().toString(36).slice(2, 8), piezas: new Map(), cargando: new Set(), mats: new Map(), espera: false, estado: null, R_CARGA: 520, R_SOLTAR: 760 };
+const piloto = { ruta: null, i: 0, giro: 0, vmax: (Number(QS.get("vmax")) || 50) / 3.6 };   // ?vmax en km/h
+
+function distPedazo(i, j, x, z) {
+  const L = vivo.estado.L, y = -z;              // local: x este, y norte (z del glb = -norte)
+  const x0 = (i - 0.5) * L, x1 = (i + 0.5) * L, y0 = (j - 0.5) * L, y1 = (j + 0.5) * L;
+  return Math.hypot(Math.max(x0 - x, 0, x - x1), Math.max(y0 - y, 0, y - y1));
+}
+
+function rehacerColisiones() {
+  suelo = []; muros = [];
+  for (const p of vivo.piezas.values()) { suelo.push(...p.suelo); muros.push(...p.muros); }
+}
+
+function cargarPedazo(i, j) {
+  const k = `${i}_${j}`;
+  vivo.cargando.add(k);
+  loader.load(`vivo/p/p_${k}.glb`, (gltf) => {
+    vivo.cargando.delete(k);
+    const g = gltf.scene, p = { g, suelo: [], muros: [] };
+    g.traverse((o) => {
+      if (!o.isMesh) return;
+      const n = o.name, m = o.material;
+      o.receiveShadow = true;
+      o.castShadow = /edificios|vegetacion|defensa|puente/.test(n);
+      // los materiales de la biblioteca (asfalto, banqueta, fachadas…) se repiten en cada pedazo: uno solo
+      if (!m.name.startsWith("tv_")) {
+        const ya = vivo.mats.get(m.name);
+        if (ya) { m.map?.dispose(); m.emissiveMap?.dispose(); m.dispose(); o.material = ya; }
+        else { if (m.map) m.map.anisotropy = renderer.capabilities.getMaxAnisotropy(); vivo.mats.set(m.name, m); }
+      } else if (m.map) m.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      if (/^\d(?!WALL)[A-Z]+_/.test(n)) { o.geometry.computeBoundsTree(); p.suelo.push(o); }
+      else if (/^\dWALL/.test(n)) { o.geometry.computeBoundsTree(); p.muros.push(o); }
+    });
+    mundo.add(g);
+    vivo.piezas.set(k, p);
+    rehacerColisiones();
+  }, undefined, () => { vivo.cargando.delete(k); });
+}
+
+function soltarPedazo(k) {
+  const p = vivo.piezas.get(k);
+  mundo.remove(p.g);
+  p.g.traverse((o) => {
+    if (!o.isMesh) return;
+    o.geometry.dispose();
+    if (o.material.name.startsWith("tv_")) { o.material.map?.dispose(); o.material.dispose(); }
+  });
+  vivo.piezas.delete(k);
+  rehacerColisiones();
+}
+
+function alturaLibre(x, z) {
+  ray.set(new THREE.Vector3(x, 9000, z), ABAJO);
+  ray.far = 20000;
+  return ray.intersectObjects(suelo, false)[0] || null;
+}
+
+async function pulsoVivo() {
+  const v = st.manejar ? st.v : 0;
+  const ref = st.spawn ? (st.manejar ? st.pos : orbit.target) : null;
+  const q = (ref ? `?x=${ref.x.toFixed(1)}&z=${ref.z.toFixed(1)}&vx=${(Math.sin(st.yaw) * v).toFixed(2)}&vz=${(Math.cos(st.yaw) * v).toFixed(2)}&` : "?")
+    + `c=${vivo.id}`;   // cada visor es un cliente: el servidor atiende a todos los coches a la vez
+  let e;
+  try { e = await (await fetch(`vivo/foco${q}`)).json(); }
+  catch { $("info").textContent = TX.vivo_sin; $("info").hidden = false; return; }
+  vivo.estado = e;
+  const S = e.salida;
+  const px = ref ? ref.x : (S ? S.x : 0), pz = ref ? ref.z : (S ? S.z : 0);
+  // cargar los listos cercanos (de dos en dos, el más cercano primero) y soltar los lejanos
+  const rCarga = vivo.R_CARGA + Math.abs(v) * 6;
+  const ax = px + Math.sin(st.yaw) * v * 4, az = pz + Math.cos(st.yaw) * v * 4;   // dónde estará en ~4 s
+  const urg = (i, j) => Math.min(distPedazo(i, j, px, pz), distPedazo(i, j, ax, az) * 0.8);
+  const faltan = e.listos.filter(([i, j]) => !vivo.piezas.has(`${i}_${j}`) && !vivo.cargando.has(`${i}_${j}`)
+    && urg(i, j) < rCarga).sort((a, b) => urg(a[0], a[1]) - urg(b[0], b[1]));
+  for (const [i, j] of faltan.slice(0, Math.max(0, 3 - vivo.cargando.size))) cargarPedazo(i, j);
+  for (const k of [...vivo.piezas.keys()]) {
+    const [i, j] = k.split("_").map(Number);
+    if (distPedazo(i, j, px, pz) > vivo.R_SOLTAR + Math.abs(v) * 6) soltarPedazo(k);
+  }
+  // la salida, en cuanto hay suelo debajo
+  if (!st.spawn && S) {
+    const h = alturaLibre(S.x, S.z);
+    if (h) {
+      st.spawn = { pos: new THREE.Vector3(S.x, h.point.y, S.z), fwd: new THREE.Vector3(S.fx, 0, S.fz).normalize() };
+      $("vacio").hidden = true;
+      colocarEnSalida();
+      camera.position.copy(st.pos).add(new THREE.Vector3(-8, 4, -8));
+      modo(true);
+      if (QS.has("auto")) pedirRuta();
+    }
+  }
+  $("info").textContent = `${TX.vivo_en_vivo} · ${vivo.piezas.size} ${TX.vivo_pedazos}` +
+    (e.en_curso.length ? ` · ${TX.vivo_generando} ${e.en_curso.length}` : "") + (e.t_medio ? ` · ${e.t_medio} s` : "") +
+    (vivo.espera ? ` · ${TX.vivo_espera}` : "") +
+    (e.zona_lista != null && e.zona_lista < 0.97 ? ` · ${TX.vivo_zona} ${Math.round(e.zona_lista * 100)} %` : "");
+  $("info").hidden = false;
+}
+
+// piloto automático (?auto=metros): sigue la ruta de prueba del servidor; sirve para probar sin manos. La ruta
+// llega a trozos: el servidor da lo que ya tiene bajado de OSM y se vuelve a pedir hasta tenerla entera.
+async function pedirRuta() {
+  const quiero = Number(QS.get("auto")) || 3000;
+  try {
+    const r = await (await fetch(`vivo/ruta?metros=${quiero}&espera=2`)).json();
+    if (!piloto.ruta || r.puntos.length > piloto.ruta.length) piloto.ruta = r.puntos;
+  } catch { /* se reintenta */ }
+  if (!piloto.ruta || piloto.ruta.length * 2 < quiero - 20) setTimeout(pedirRuta, 4000);
+}
+
+function pilotoAutomatico() {
+  const R = piloto.ruta;
+  let best = piloto.i, bd = Infinity;
+  for (let i = piloto.i; i < Math.min(R.length, piloto.i + 60); i++) {
+    const d = Math.hypot(R[i][0] - st.pos.x, R[i][1] - st.pos.z);
+    if (d < bd) { bd = d; best = i; }
+  }
+  piloto.i = best;
+  // al final de la ruta: frenar hasta parar (sin pasar a reversa, que es lo que hace el freno a 0 km/h)
+  if (best >= R.length - 3) { keys.acel = false; keys.freno = st.v > 0.3; piloto.giro = 0; return; }
+  const ade = Math.round((7 + Math.abs(st.v) * 0.75) / 2);      // puntos cada 2 m: mira más lejos cuanto más rápido
+  const t = R[Math.min(R.length - 1, best + ade)];
+  const err = ((Math.atan2(t[0] - st.pos.x, t[1] - st.pos.z) - st.yaw + 3 * Math.PI) % (2 * Math.PI)) - Math.PI;
+  piloto.giro = Math.max(-1, Math.min(1, err * (st.v > 20 ? 1.5 : 2.2)));
+  // velocidad: la máxima con la que se toma cada curva de lo que viene (curvatura en tramos de 16 m, aceleración
+  // lateral de 3.5 m/s²), contando lo que hace falta para frenar hasta ella (5 m/s²)
+  const rumbo = (k) => { const p = R[Math.min(R.length - 1, k)], q = R[Math.min(R.length - 1, k + 8)]; return Math.atan2(q[0] - p[0], q[1] - p[1]); };
+  let vObj = piloto.vmax;
+  const alcance = Math.min(R.length - best - 1, Math.ceil((st.v * st.v / 10 + 40) / 2));
+  for (let k = 0; k < alcance; k += 4) {
+    const dA = Math.abs(((rumbo(best + k + 8) - rumbo(best + k) + 3 * Math.PI) % (2 * Math.PI)) - Math.PI);
+    const vCurva = Math.sqrt(3.5 * 16 / Math.max(dA, 1e-3));
+    vObj = Math.min(vObj, Math.sqrt(vCurva * vCurva + 2 * 5 * k * 2));
+  }
+  vObj = Math.max(5, vObj);
+  if (best >= R.length - 25) vObj = 3;      // fin del trozo de ruta que hay: despacio hasta que llegue más
+  keys.acel = st.v < vObj - 0.5;
+  keys.freno = st.v > vObj + 2 && st.v > 0.3;
+}
+
+function iniciarVivo() {
+  mundo = new THREE.Group();
+  scene.add(mundo);
+  scene.fog.near = 180; scene.fog.far = vivo.R_CARGA;
+  $("nombre").textContent = TX.vivo_titulo;
+  $("v-titulo").textContent = TX.vivo_titulo;
+  $("v-texto").textContent = TX.vivo_gen;
+  $("barra").parentElement.hidden = true;
+  $("archivo").parentElement.hidden = true;
+  $("b-reinicio").onclick = () => { if (st.spawn) colocarEnSalida(); };
+  window.openlapsVivo = { st, camera, orbit, vivo, piloto, modo, scene };   // para las pruebas automáticas
+  pulsoVivo();
+  setInterval(pulsoVivo, 500);
+}
+
 // ---------------------------------------------------------------- arranque
 // La escena puede venir como .glb o, donde solo se sirven archivos de texto, como partes
 // base64 (escena.parte1.txt, escena.parte2.txt, …) que se reconstruyen aquí.
@@ -578,7 +757,8 @@ async function cargarPartes() {
 
 const param = new URLSearchParams(location.search).get("glb");
 const porDefecto = param || "escena.glb";
-fetch(porDefecto, { method: "HEAD" }).then((r) => {
+if (VIVO) iniciarVivo();
+else fetch(porDefecto, { method: "HEAD" }).then((r) => {
   if (r.ok) cargar(porDefecto);
   else return cargarPartes();
 }).catch(() => cargarPartes()).catch(() => {

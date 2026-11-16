@@ -52,6 +52,7 @@ version = { attr = "openlaps.__version__" }
 include = ["openlaps*"]
 
 [tool.setuptools.package-data]
+"openlaps" = ["vivo_ac.lua"]
 "openlaps.gui" = ["web/*", "openlaps.ico"]
 
 [tool.pytest.ini_options]

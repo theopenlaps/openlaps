@@ -69,6 +69,56 @@ Useful options: `--modo libre|tramo|circuito` (free / stage / circuit), `--ruta 
 `--res` (terrain mesh), `--mpp` (ground texture resolution), `--sin-orto`, `--sin-satelite`,
 `--sin-dosel`, `--sin-horizonte`, `--sin-microsoft`, `--sin-catastro`, `--sin-cc0`.
 
+## Live stage (experimental)
+
+A separate option (the normal generation is unchanged): the track is generated in 256 m pieces
+around the car while you drive, with no area limit.
+
+```bash
+python -m openlaps.vivo --centro 40.41680,-3.70380
+```
+
+Open `http://127.0.0.1:8790/?vivo=1` to drive in the browser; `&auto=3000` adds an autopilot that
+follows 3 km of streets (handy for hands-free testing) and `&vmax=100` sets its top speed in km/h (it
+brakes on its own before each bend). With `--semilla-ac` it also builds and installs
+the `openlaps_vivo` Assetto Corsa track: the pieces around the start baked into the `.kn5`, a library
+with every material and the `vivo.lua` script, which creates the other pieces in-game (meshes with
+`createMesh`, physics with `physics.addTrackSurface`). If the car reaches a piece that isn't there yet,
+the viewer holds it and AC brakes it until it arrives. To test in AC hands-free, `--piloto-ac 4000
+--piloto-kmh 100` (or `http://127.0.0.1:8790/vivo/piloto?metros=4000&kmh=100` with the game running; `?apagar=1`
+removes it): the track script itself drives that route. Nothing but OpenLaps and Assetto Corsa with CSP is
+needed; the server console shows where the AC car is.
+
+- All pieces share one origin (the starting point), so each lands in place. They are generated with a
+  64 m margin and cropped to their core; small things (trees, posts, signs) go whole to the piece their
+  center falls in, and the terrain is sampled on a common grid, so the edges match.
+- OpenStreetMap is fetched in 1 km tiles and the Spanish Cadastre in 512 m tiles, ahead of the car
+  (from its position and speed). Overpass first (the mail.ru mirror and the main one, with short
+  timeouts); if neither answers, the official OSM API as a last resort. Everything is cached.
+- Several processes generate at once, always the most urgent piece. The server predicts where the car is
+  going by following the OSM streets (the straightest continuation, without dropping to a smaller road)
+  about 30 s ahead and generates those pieces first; the data (OSM, Cadastre and the rasters: terrain,
+  orthophoto, canopy…) is requested even further ahead, in separate processes, so each piece finds it
+  cached. A piece takes about 8-10 s (4 processes on a 12-thread machine): along Madrid's Castellana you
+  can drive at ~100 km/h almost without waiting. The first time in an area, the OSM download dominates.
+- Pre-warming: spare processes (one is always kept for urgent work) generate rings around each car up to
+  `--radio-fondo` (1200 m by default). AC shows "preparando la zona: N %" while you are stopped and the viewer
+  "area ready N %": the first time somewhere, wait until it is close to 100 % to drive at 100 km/h in any
+  direction (it stays cached afterwards). If you reach a piece that isn't there yet, AC brakes hard enough to
+  stop before it (even with the throttle held) and, if you still get in, puts you back, stopped, at the last
+  place with ground instead of letting you fall. The server serves several cars at once (the viewer and AC,
+  for example), each with its own predicted path.
+- In AC, CSP only lets a track script create physics if `surfaces.ini` has
+  `[_SCRIPTING_PHYSICS] ALLOW_TRACK_SCRIPTS=1` **and** is "extended" (`WAV_PITCH=extended-0` on the first
+  surface); the seed track already does both. Meshes copy their material from the library with
+  `assignMaterialFrom` (with `createMesh` and the material name they render black). The script reports its
+  state to the server, which prints it (`AC: pedazos …`). `python tools/instalar_vivo_lua.py` reinstalls the
+  script without rebuilding the seed (don't reload it while driving outside the baked area: reloading drops
+  the physics for a moment).
+- Pieces are kept in `salida/vivo/<center>/` (`.glb` for the viewer, `.olv` and `.jpg` for AC) and
+  reused when you come back. `--nuevo` deletes them; `--radio`, `--trabajadores` and `--puerto` tune
+  the service, and `openlaps` options (`--sin-catastro`, `--vegetacion`…) pass straight through.
+
 ## Desktop app (Windows)
 
 No command line needed: a map where you pick the area (or mark a stage or circuit), an instant
@@ -83,6 +133,20 @@ Corsa with one click. In English and Spanish.
   (`--navegador` opens it in the browser instead of its own window).
 - **Build the lightweight package**: `powershell -ExecutionPolicy Bypass -File packaging\compilar_ligero.ps1`
   (uses the `csc.exe` that ships with Windows; output goes to `dist\`).
+
+- **Your own area**: a rectangle with free width and height (drag its corner) up to 24 km². From 2 km² you
+  can turn on **live mode**: that whole area is prepared and the rest is built around the car as you drive,
+  with no limit; the app shows how much is ready and lets you drive in the window itself or open Assetto Corsa.
+  While it is being generated the area can't be changed (cancel first).
+- **Wizard**: once you pick the place it moves on to the track type (area, stage or circuit), and then to
+  adjusting it.
+- **Assetto Corsa in one click**: «Play in AC» installs the track and opens the game on it (with the car you
+  had selected; Steam must be running). «Open in Assetto Corsa when done» does it automatically. Live mode
+  inside AC needs Custom Shaders Patch (free, with Content Manager); normal tracks don't.
+- **Everything installs itself**: `OpenLaps.exe` downloads Python and the libraries the first time and, if
+  WebView2 is missing (Windows 10), offers to install it from Microsoft.
+- **Starts in a good place**: on a main, straight street near the centre with buildings around; never on a
+  bridge or in a tunnel.
 
 While you look at the map, the app is already downloading the area data (OpenStreetMap, Cadastre,
 Microsoft), which is the slow part the first time, so the draft comes out in about 25 s.

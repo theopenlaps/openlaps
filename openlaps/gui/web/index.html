@@ -55,8 +55,14 @@
   </div>
 
   <div class="campo" data-solo="libre">
-    <label class="etiqueta" for="tam-a"><span data-i18n="campo.tam"></span> <b data-mostrar="tam"></b></label>
-    <input type="range" id="tam-a" min="200" max="3000" step="50" data-campo="tam">
+    <div class="medidas">
+      <label class="etiqueta" for="ancho-a"><span data-i18n="campo.ancho"></span> <b data-mostrar="ancho"></b></label>
+      <input type="range" id="ancho-a" min="200" max="8000" step="50" data-campo="ancho">
+      <label class="etiqueta" for="alto-a"><span data-i18n="campo.alto"></span> <b data-mostrar="alto"></b></label>
+      <input type="range" id="alto-a" min="200" max="8000" step="50" data-campo="alto">
+    </div>
+    <p class="ayuda zona-area" data-mostrar="zona-area"></p>
+    <label class="casilla casilla-vivo"><input type="checkbox" data-campo="vivoModo"> <span data-i18n="campo.vivo"></span></label>
     <p class="ayuda" data-i18n="ayuda.zona"></p>
   </div>
 
@@ -85,6 +91,7 @@
   </div>
 
   <label class="casilla"><input type="checkbox" data-campo="ac"> <span data-i18n="campo.ac"></span></label>
+  <label class="casilla" data-mostrar-si="ac"><input type="checkbox" data-campo="jugar"> <span data-i18n="campo.jugar"></span></label>
 
   <dl class="resumen" data-resumen></dl>
 
@@ -172,8 +179,14 @@
     <div data-solo="libre">
       <h2 data-i18n="asis.t3z"></h2>
       <p class="ayuda" data-i18n="asis.d3z"></p>
-      <label class="etiqueta" for="tam-b"><span data-i18n="campo.tam"></span> <b data-mostrar="tam"></b></label>
-      <input type="range" id="tam-b" min="200" max="3000" step="50" data-campo="tam">
+      <div class="medidas">
+      <label class="etiqueta" for="ancho-b"><span data-i18n="campo.ancho"></span> <b data-mostrar="ancho"></b></label>
+      <input type="range" id="ancho-b" min="200" max="8000" step="50" data-campo="ancho">
+      <label class="etiqueta" for="alto-b"><span data-i18n="campo.alto"></span> <b data-mostrar="alto"></b></label>
+      <input type="range" id="alto-b" min="200" max="8000" step="50" data-campo="alto">
+    </div>
+    <p class="ayuda zona-area" data-mostrar="zona-area"></p>
+    <label class="casilla casilla-vivo"><input type="checkbox" data-campo="vivoModo"> <span data-i18n="campo.vivo"></span></label>
       <p class="ayuda" data-i18n="asis.d3z2"></p>
     </div>
     <div data-solo="ruta">
@@ -199,6 +212,7 @@
     <input type="text" id="nombre-b" data-campo="nombre" maxlength="40">
     <p class="ayuda" data-mostrar="nombre-aviso"></p>
     <label class="casilla"><input type="checkbox" data-campo="ac"> <span data-i18n="campo.ac"></span></label>
+    <label class="casilla" data-mostrar-si="ac"><input type="checkbox" data-campo="jugar"> <span data-i18n="campo.jugar"></span></label>
     <dl class="resumen" data-resumen></dl>
   </section>
 
@@ -237,7 +251,7 @@
 <!-- ============================================================ barra de acciones -->
 <footer class="acciones" id="acciones">
   <div class="acciones-listo" id="acc-listo">
-    <button class="boton primario grande" data-accion="generar" data-i18n="accion.generar"></button>
+    <button class="boton primario grande" data-accion="generar" id="b-generar"></button>
   </div>
   <div class="acciones-progreso" id="acc-progreso" hidden>
     <div class="prog-texto"><span id="prog-titulo"></span><span id="prog-tiempo"></span></div>
@@ -258,6 +272,7 @@
     <p class="ayuda" id="res-datos"></p>
     <div class="fila-botones">
       <button class="boton primario" data-accion="manejar-resultado" data-i18n="res.conducir"></button>
+      <button class="boton" data-accion="jugar-resultado" id="res-jugar" data-i18n="res.jugar"></button>
       <button class="boton" data-accion="instalar-resultado" id="res-ac"></button>
       <button class="boton" data-accion="carpeta-resultado" data-i18n="res.carpeta"></button>
     </div>
@@ -265,6 +280,25 @@
   </div>
 </section>
 
+<!-- ============================================================ modo en vivo -->
+<section class="resultado vivo-panel" id="vivo-panel" hidden aria-live="polite">
+  <div class="res-cuerpo">
+    <h2><span class="insignia-vivo" data-i18n="vivo.insignia"></span> <span id="vivo-titulo"></span></h2>
+    <p class="ayuda" id="vivo-texto"></p>
+    <div class="progreso"><div id="vivo-barra"></div></div>
+    <ul class="vivo-estado">
+      <li id="vivo-zona"></li>
+      <li id="vivo-ac"></li>
+    </ul>
+    <div class="fila-botones">
+      <button class="boton primario" data-accion="vivo-conducir" data-i18n="vivo.conducir"></button>
+      <button class="boton" data-accion="vivo-jugar" id="vivo-jugar" data-i18n="vivo.jugar"></button>
+      <button class="boton" data-accion="vivo-detener" data-i18n="vivo.detener"></button>
+      <button class="enlace" data-accion="vivo-registro" data-i18n="accion.ver_registro"></button>
+    </div>
+    <p class="ayuda" id="vivo-mensaje"></p>
+  </div>
+</section>
 <!-- ============================================================ cajones -->
 <aside class="cajon" id="cajon-pistas" hidden data-i18n-aria="top.pistas">
   <div class="cajon-cabeza"><h2 data-i18n="top.pistas"></h2><button class="cerrar" data-accion="cerrar-cajon" data-i18n-aria="res.cerrar">×</button></div>

@@ -12,7 +12,7 @@ import sys
 from .pipeline import run
 
 
-def main(argv=None):
+def parser():
     p = argparse.ArgumentParser(prog="openlaps", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--centro", help="lat,lon del centro del área")
@@ -43,6 +43,11 @@ def main(argv=None):
     p.add_argument("--nombre", default="pista", help="identificador (sin espacios)")
     p.add_argument("--titulo", help="nombre visible en el juego")
     p.add_argument("--salida", default="salida", help="carpeta de salida")
+    return p
+
+
+def main(argv=None):
+    p = parser()
     a = p.parse_args(argv)
     if a.modo != "libre" and not a.ruta:
         p.error("--modo tramo/circuito necesita --ruta")

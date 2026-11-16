@@ -18,10 +18,12 @@ def test_nombre_valido():
 
 
 def test_argumentos_zona_y_calidad():
-    a = G.argumentos({"modo": "libre", "centro": [40.14, -3.42], "tam": 800, "calidad": "rapida", "ac": True,
-                      "sin": ["cc0", "inventada"], "vegetacion": 0.3}, "salida", nombre="x")
-    assert a[a.index("--centro") + 1] == "40.140000,-3.420000"
-    assert a[a.index("--tam") + 1] == "800"
+    a = G.argumentos({"modo": "libre", "centro": [40.14, -3.42], "ancho": 1200, "alto": 600, "calidad": "rapida",
+                      "ac": True, "sin": ["cc0", "inventada"], "vegetacion": 0.3}, "salida", nombre="x")
+    # la zona es un rectángulo de ancho x alto: va como --bbox
+    assert BBox.parse(a[a.index("--bbox") + 1]) == BBox.around(40.14, -3.42, 1200, 600).__class__(
+        *[round(v, 6) for v in (lambda b: (b.south, b.west, b.north, b.east))(BBox.around(40.14, -3.42, 1200, 600))])
+    assert "--ruta" not in a and "--centro" not in a
     assert "--ac" in a and "--sin-cc0" in a and "--sin-inventada" not in a
     # la vegetación elegida va después de la de la calidad: en argparse gana la última
     assert a[len(a) - 1 - a[::-1].index("--vegetacion") + 1] == "0.30"
@@ -41,10 +43,22 @@ def test_ruta_necesita_puntos():
 
 def test_caja_de_precarga_coincide_con_el_generador():
     """La precarga solo sirve si su caja es idéntica a la que construye pipeline.run."""
-    op = {"modo": "libre", "centro": [40.4215, -3.714], "tam": 900}
+    op = {"modo": "libre", "centro": [40.4215, -3.714], "ancho": 900, "alto": 1500}
     a = G.argumentos(op, "s", nombre="x")
-    lat, lon = (float(v) for v in a[a.index("--centro") + 1].split(","))
-    assert _clave(caja_de(op)) == _clave(BBox.around(lat, lon, float(a[a.index("--tam") + 1])))
+    assert _clave(caja_de(op)) == _clave(BBox.parse(a[a.index("--bbox") + 1]))
+    # compatibilidad: una vista guardada con solo "tam" sigue siendo un cuadrado
+    assert G.medidas({"tam": 700}) == (700.0, 700.0)
+
+
+def test_limite_de_zona_y_modo_en_vivo():
+    assert G.MAX_KM2 == 24
+    G.argumentos({"modo": "libre", "centro": [40.4, -3.7], "ancho": 6000, "alto": 4000}, "s", nombre="x")   # 24 km²
+    with pytest.raises(ValueError):
+        G.argumentos({"modo": "libre", "centro": [40.4, -3.7], "ancho": 6000, "alto": 4100}, "s", nombre="x")
+    with pytest.raises(ValueError):     # con el modo en vivo activado no se genera una pista normal
+        G.argumentos({"modo": "libre", "centro": [40.4, -3.7], "ancho": 1000, "alto": 1000, "vivo": True}, "s")
+    from openlaps.gui.envivo import zona_recortada
+    assert zona_recortada({"ancho": 3000, "alto": 2000}) == (3000.0, 2000.0)
     op = {"modo": "tramo", "ruta": [[23.63, -105.84], [23.635, -105.83]]}
     a = G.argumentos(op, "s", nombre="x")
     assert _clave(caja_de(op)) == _clave(BBox.parse(a[a.index("--bbox") + 1]))

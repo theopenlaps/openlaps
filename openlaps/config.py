@@ -116,3 +116,14 @@ GROUND_COLORS = {
     WC_MANGROVE: ((50, 74, 44),   (44, 74, 40)),
     WC_MOSS:     ((120, 120, 90), (110, 120, 80)),
 }
+
+
+def cerrada_a_coches(tags):
+    """¿Prohibida a los coches? En OSM la etiqueta más concreta manda: access=no con motor_vehicle=yes (un tramo
+    de la Castellana en la plaza del Doctor Marañón) sí se circula; access=no con solo psv o bus, no. Antes
+    bastaba access=no para quitarla y quedaba un hueco en medio de la avenida."""
+    for k in ("motorcar", "motor_vehicle", "vehicle", "access"):
+        v = tags.get(k)
+        if v is not None:
+            return v in ("no", "private")
+    return False

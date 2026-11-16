@@ -329,7 +329,8 @@ class RoadNetwork:
                 return True
             return self.tuneles == "principales" and t.get("highway") not in C.TUNNEL_MAIN_CLASSES
         candidatas = [w for w in osm["ways"] if w["tags"].get("highway") in C.NETWORK
-                      and w["tags"].get("access") not in ("private", "no")
+                      and (not C.cerrada_a_coches(w["tags"]) if w["tags"].get("highway") not in C.PAVED_PATHS
+                           else w["tags"].get("access") not in ("private", "no"))
                       and w["tags"].get("area") != "yes" and len(w["nodes"]) == len(w["coords"])]
         omitidas = [w for w in candidatas if tunel_omitido(w["tags"])]
         ways = [w for w in candidatas if not tunel_omitido(w["tags"])]
@@ -1119,7 +1120,7 @@ def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, u
 
     # ---- defensas, fantasmas, puentes, túneles
     _roadside(net, scene, stats, osm_guardrails)
-    _structures(net, scene)
+    _structures(net, scene, [pg for pg, e in road_polys if not (e.tunnel or e.bridge)])
     tun = np.vstack(tunnel_pts) if tunnel_pts else np.zeros((0, 4))
     tunnel_poly, tunnel_bocas = _tunnels(scene, road_polys, tun, surf_all, net.huella_tunel)         if len(tun) else (None, [])
 
@@ -1796,8 +1797,13 @@ def _roadside(net, scene, stats, osm_guardrails=False):
                     scene.add("senales", "fantasma", p, uv, f)
 
 
-def _structures(net, scene):
-    """Puentes (barandilla, losa y pilas). Los túneles se hacen aparte con su huella conjunta."""
+def _structures(net, scene, suelo_calles=None):
+    """Puentes (barandilla, losa y pilas). Los túneles se hacen aparte con su huella conjunta.
+    `suelo_calles`: calzadas de superficie; no se pone ninguna pila encima (salían en medio de la calle que el
+    puente cruza, como en la Castellana, y el coche chocaba con ellas)."""
+    calles = unary_union(suelo_calles).buffer(1.0) if suelo_calles else None
+    if calles is not None:
+        shapely.prepare(calles)
     for e in net.edges:
         if not e.bridge:
             continue
@@ -1828,6 +1834,14 @@ def _structures(net, scene):
                     hgt = c[2] - 1.2 - gz
                     if hgt > 2.0:
                         yaw = math.atan2(*e.frame(sp)[::-1])
+                        if calles is not None:
+                            t = e.frame(sp)
+                            nn = (-t[1], t[0])
+                            huella = Polygon([(c[0] + t[0] * dx + nn[0] * dy, c[1] + t[1] * dx + nn[1] * dy)
+                                              for dx, dy in ((-0.7, -e.hw * 0.6), (0.7, -e.hw * 0.6),
+                                                             (0.7, e.hw * 0.6), (-0.7, e.hw * 0.6))])
+                            if calles.intersects(huella):
+                                continue
                         p, uv, f = box_mesh((c[0], c[1], gz - 1.0), (1.4, e.hw * 1.2, hgt + 1.0), yaw)
                         scene.add("puente", "puente", p, uv, f, phys="WALL")
 

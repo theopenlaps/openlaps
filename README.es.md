@@ -67,6 +67,56 @@ Opciones útiles: `--modo libre|tramo|circuito`, `--ruta "lat,lon;lat,lon"`, `--
 terreno), `--mpp` (resolución de la textura del suelo), `--sin-orto`, `--sin-satelite`,
 `--sin-dosel`, `--sin-horizonte`, `--sin-microsoft`, `--sin-catastro`, `--sin-cc0`.
 
+## Tramo en vivo (experimental)
+
+Una opción aparte (la generación normal no cambia): la pista se genera a pedazos de 256 m
+alrededor del coche mientras conduces, sin límite de área.
+
+```bash
+python -m openlaps.vivo --centro 40.41680,-3.70380
+```
+
+Abre `http://127.0.0.1:8790/?vivo=1` para conducir en el navegador; `&auto=3000` añade un piloto
+automático que sigue 3 km de calles (útil para probar sin manos) y `&vmax=100` su velocidad máxima en km/h
+(frena solo antes de cada curva). Con `--semilla-ac` genera e instala
+además la pista `openlaps_vivo` de Assetto Corsa: los pedazos de la salida horneados en el `.kn5`, una
+biblioteca con todos los materiales y el script `vivo.lua`, que va creando los demás pedazos en el juego
+(mallas con `createMesh` y física con `physics.addTrackSurface`). Si el coche llega a un pedazo que
+aún no está, el visor lo detiene y AC lo frena hasta que llega. Para probar en AC sin manos, `--piloto-ac 4000
+--piloto-kmh 100` (o `http://127.0.0.1:8790/vivo/piloto?metros=4000&kmh=100` con el juego abierto; `?apagar=1`
+lo quita): el propio script de pista conduce por esa ruta. No hace falta nada más que OpenLaps y Assetto Corsa
+con CSP; la consola del servidor muestra dónde va el coche de AC.
+
+- Todos los pedazos comparten el origen (el punto de partida): cada uno cae en su sitio. Se generan con
+  64 m de margen y se recortan a su centro; lo pequeño (árboles, postes, señales) va entero al pedazo
+  donde cae su centro, y el relieve se muestrea en una rejilla común, así los bordes casan.
+- OpenStreetMap se baja por teselas de 1 km y el Catastro por teselas de 512 m, por delante del coche
+  (según su posición y su velocidad). Overpass va primero (el espejo de mail.ru y el principal, con
+  espera corta); si no contesta, la API oficial de OSM como último recurso. Todo queda en caché.
+- Varios procesos generan a la vez, siempre el pedazo más urgente. El servidor prevé por dónde va el coche
+  siguiendo las calles de OSM (la continuación más recta, sin bajar de categoría) unos 30 s por delante, y
+  genera primero esos pedazos; los datos (OSM, Catastro y los rásteres: relieve, ortofoto, dosel…) los pide
+  aún más lejos, en procesos aparte, para que el pedazo los encuentre en caché. Un pedazo tarda unos 8-10 s
+  (4 procesos en un equipo de 12 hilos): por la Castellana se va a ~100 km/h casi sin esperar. La primera
+  vez en una zona manda la descarga de OSM.
+- Precalentado: con los procesos libres (siempre queda uno para lo urgente) se generan anillos alrededor de
+  cada coche hasta `--radio-fondo` (1200 m por defecto). AC muestra "preparando la zona: N %" mientras estás
+  parado y el visor "zona lista N %": la primera vez en un sitio conviene esperar a que llegue cerca del 100 %
+  para ir a 100 km/h en cualquier dirección (luego queda en caché). Si llegas a un pedazo que aún no está, AC
+  frena con fuerza suficiente para parar antes (aunque no sueltes el acelerador) y, si aun así entras, te
+  devuelve parado al último sitio con suelo en vez de dejarte caer. El servidor atiende a varios coches a la
+  vez (el visor y AC, por ejemplo), cada uno con su camino previsto.
+- En AC, CSP solo deja a un script de pista crear física si `surfaces.ini` trae
+  `[_SCRIPTING_PHYSICS] ALLOW_TRACK_SCRIPTS=1` **y** es "extendido" (`WAV_PITCH=extended-0` en la primera
+  superficie); la semilla ya lo trae. Las mallas copian el material de la biblioteca con
+  `assignMaterialFrom` (con `createMesh` y el nombre del material salen negras). El script manda su estado
+  al servidor, que lo muestra en consola (`AC: pedazos …`). `python tools/instalar_vivo_lua.py` reinstala el
+  script sin regenerar la semilla (no lo recargues mientras conduces fuera de lo horneado: al recargarse
+  suelta la física un instante).
+- Los pedazos se guardan en `salida/vivo/<centro>/` (`.glb` para el visor, `.olv` y `.jpg` para AC) y
+  se reutilizan al volver. `--nuevo` los borra; `--radio`, `--trabajadores` y `--puerto` ajustan el
+  servicio, y las opciones de `openlaps` (`--sin-catastro`, `--vegetacion`…) pasan tal cual.
+
 ## App de escritorio (Windows)
 
 Para no tener que usar la línea de comandos: un mapa donde eliges la zona (o marcas un tramo o
@@ -81,6 +131,19 @@ pista completa, que se instala en Assetto Corsa con un clic. En español e ingl�
   (`--navegador` la abre en el navegador en vez de en su propia ventana).
 - **Compilar la versión ligera**: `powershell -ExecutionPolicy Bypass -File packaging\compilar_ligero.ps1`
   (usa el `csc.exe` que trae Windows; sale en `dist\`).
+
+- **Zona a tu medida**: un rectángulo de ancho y alto libres (arrastra su esquina) de hasta 24 km². Desde
+  2 km² se puede activar el **modo en vivo**: se prepara esa zona entera y lo demás se genera alrededor del
+  coche mientras conduces, sin límite; la app enseña cuánto lleva preparado y deja conducir en la propia
+  ventana o abrir Assetto Corsa. Mientras se genera, la zona no se puede cambiar (hay que cancelar antes).
+- **Asistente**: al elegir el sitio pasa solo a elegir el tipo (zona, tramo o circuito), y de ahí a ajustarlo.
+- **Assetto Corsa en un clic**: «Jugar en AC» instala la pista y abre el juego en ella (con el coche que ya
+  tenías elegido; Steam tiene que estar abierto). Con «Abrir en Assetto Corsa al terminar» lo hace solo. El modo
+  en vivo dentro de AC necesita Custom Shaders Patch (gratis, con Content Manager); las pistas normales no.
+- **Todo se instala solo**: `OpenLaps.exe` baja Python y las librerías la primera vez y, si falta WebView2
+  (Windows 10), ofrece instalarlo desde Microsoft.
+- **Salidas en un buen sitio**: en una calle importante y recta cerca del centro, con edificios alrededor; nunca
+  en un puente ni en un túnel.
 
 Mientras miras el mapa, la app ya va descargando los datos de la zona (OpenStreetMap, Catastro,
 Microsoft), que es lo que más tarda la primera vez; así el borrador sale en unos 25 s.

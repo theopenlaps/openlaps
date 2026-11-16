@@ -58,14 +58,14 @@ def parse(path, inv):
     return out
 
 
-def download(bbox, log=print):
+def download(bbox, log=print, tile=TILE):
     """Partes de edificio del Catastro dentro de la caja (lat/lon). Lista vacía si no hay servicio."""
     epsg = _epsg((bbox.west + bbox.east) / 2)
     fwd = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
     inv = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
     xs, ys = fwd.transform([bbox.west, bbox.east, bbox.west, bbox.east], [bbox.south, bbox.south, bbox.north, bbox.north])
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-    nx, ny = max(1, math.ceil((x1 - x0) / TILE)), max(1, math.ceil((y1 - y0) / TILE))
+    nx, ny = max(1, math.ceil((x1 - x0) / tile)), max(1, math.ceil((y1 - y0) / tile))
     urls = []
     for i in range(nx):
         for j in range(ny):

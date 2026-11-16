@@ -39,6 +39,7 @@ DEFECTO = {
     "ac": None,           # carpeta de assettocorsa elegida a mano (si no, se detecta)
     "calidad": "normal",
     "exportar_ac": True,
+    "jugar_al_terminar": False,  # abrir Assetto Corsa en la pista al terminar de generarla
     "capa": "mapa",
     "vista": None,        # mapa y zona de la última sesión
     "idioma": None,       # "es" | "en"; None = el de Windows
