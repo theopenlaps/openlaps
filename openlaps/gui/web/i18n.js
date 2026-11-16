@@ -4,10 +4,8 @@
 
 const TEXTOS = {
   es: {
-    "top.buscar": "Busca un lugar o pega coordenadas: Chinchón, San Francisco, 43.93,7.17",
+    "top.buscar": "Busca una ciudad, un lugar o pega coordenadas: Madrid, Ciudad de México, Tokio, 40.41,-3.70",
     "top.buscar_aria": "Buscar lugar",
-    "top.guiado": "Guiado",
-    "top.guiado_title": "Abrir el asistente paso a paso",
     "top.pistas": "Mis pistas",
     "top.ajustes": "Ajustes",
     "ventana.minimizar": "Minimizar", "ventana.maximizar": "Maximizar", "ventana.restaurar": "Restaurar", "ventana.cerrar": "Cerrar",
@@ -23,6 +21,8 @@ const TEXTOS = {
     "zona.area": "{km} km²", "zona.area_vivo": "{km} km² · en vivo: esta zona se prepara entera y lo demás se genera mientras conduces",
     "zona.area_max": "{km} km² · es el máximo ({max} km²). ¿Quieres más? Activa el modo en vivo.",
     "campo.vivo": "Modo en vivo (desde 2 km², sin límite): se prepara esta zona y lo demás se genera mientras conduces",
+    "campo.vivo_t": "Modo en vivo",
+    "campo.vivo_d": "Desde 2 km² · se genera mientras conduces",
     "campo.vivo_min": "Agranda la zona a {min} km² o más para activar el modo en vivo",
     "bloq.zona": "Ya se está generando tu zona. Si quieres otra, cancela antes la generación.",
     "bloq.vivo": "El modo en vivo está en marcha con esta zona. Si quieres otra, detenlo antes.",
@@ -71,7 +71,7 @@ const TEXTOS = {
     "asis.saltar": "Saltar",
     "asis.t1": "¿Dónde quieres conducir?",
     "asis.d1": "Busca un pueblo, una ciudad o una carretera. También puedes mover el mapa y hacer clic en el sitio.",
-    "asis.buscar_ph": "Chinchón, España",
+    "asis.buscar_ph": "Madrid, España",
     "asis.ideas": "Ideas para empezar",
     "asis.t2": "¿Qué tipo de pista?",
     "tipo.libre": "Zona libre", "tipo.libre_d": "Un rectángulo del pueblo o la ciudad (hasta 24 km², o sin límite en modo en vivo).",
@@ -108,7 +108,8 @@ const TEXTOS = {
 
     "aj.salida": "Carpeta de las pistas", "aj.cambiar": "Cambiar…", "aj.abrir": "Abrir",
     "aj.ac": "Assetto Corsa", "aj.elegir_carpeta": "Elegir carpeta…",
-    "aj.asistente": "Asistente", "aj.abrir_asistente": "Abrir el asistente",
+    "aj.ac_ok": "Detectado", "aj.ac_falta": "No encontrado",
+    "aj.asistente": "Asistente", "aj.asistente_d": "Guía paso a paso desde cero.", "aj.abrir_asistente": "Abrir el asistente",
     "aj.idioma": "Idioma",
     "aj.acerca": "Acerca de",
     "aj.acerca_t": "Código abierto (MIT). Datos de OpenStreetMap, Copernicus, ESA, IGN, USGS y otros; cada pista lleva su ATRIBUCIONES.txt.",
@@ -163,10 +164,8 @@ const TEXTOS = {
     "dato.km2": "{v} km²", "dato.km_calles": "{v} km de calles", "dato.mb": "{v} MB", "dato.s": "{v} s",
   },
   en: {
-    "top.buscar": "Search for a place or paste coordinates: Chinchón, San Francisco, 43.93,7.17",
+    "top.buscar": "Search for a city, place or paste coordinates: Madrid, Mexico City, Tokyo, 40.41,-3.70",
     "top.buscar_aria": "Search for a place",
-    "top.guiado": "Guided",
-    "top.guiado_title": "Open the step-by-step assistant",
     "top.pistas": "My tracks",
     "top.ajustes": "Settings",
     "ventana.minimizar": "Minimize", "ventana.maximizar": "Maximize", "ventana.restaurar": "Restore down", "ventana.cerrar": "Close",
@@ -182,6 +181,8 @@ const TEXTOS = {
     "zona.area": "{km} km²", "zona.area_vivo": "{km} km² · live: this area is prepared in full and the rest is built as you drive",
     "zona.area_max": "{km} km² · that's the maximum ({max} km²). Want more? Turn on live mode.",
     "campo.vivo": "Live mode (from 2 km², no limit): this area is prepared and the rest is built as you drive",
+    "campo.vivo_t": "Live mode",
+    "campo.vivo_d": "From 2 km² · streams as you drive",
     "campo.vivo_min": "Make the area {min} km² or more to turn on live mode",
     "bloq.zona": "Your area is already being generated. To pick another one, cancel the generation first.",
     "bloq.vivo": "Live mode is running with this area. To pick another one, stop it first.",
@@ -230,7 +231,7 @@ const TEXTOS = {
     "asis.saltar": "Skip",
     "asis.t1": "Where do you want to drive?",
     "asis.d1": "Search for a town, a city or a road. You can also move the map and click the spot.",
-    "asis.buscar_ph": "Chinchón, Spain",
+    "asis.buscar_ph": "Madrid, Spain",
     "asis.ideas": "Ideas to start with",
     "asis.t2": "What kind of track?",
     "tipo.libre": "Free area", "tipo.libre_d": "A rectangle of town or city (up to 24 km², or no limit in live mode).",
@@ -267,7 +268,8 @@ const TEXTOS = {
 
     "aj.salida": "Tracks folder", "aj.cambiar": "Change…", "aj.abrir": "Open",
     "aj.ac": "Assetto Corsa", "aj.elegir_carpeta": "Choose folder…",
-    "aj.asistente": "Assistant", "aj.abrir_asistente": "Open the assistant",
+    "aj.ac_ok": "Detected", "aj.ac_falta": "Not found",
+    "aj.asistente": "Assistant", "aj.asistente_d": "Step-by-step guided setup.", "aj.abrir_asistente": "Open the assistant",
     "aj.idioma": "Language",
     "aj.acerca": "About",
     "aj.acerca_t": "Open source (MIT). Data from OpenStreetMap, Copernicus, ESA, IGN, USGS and others; every track includes its ATRIBUCIONES.txt.",
@@ -342,7 +344,11 @@ function aplicarIdioma(idioma) {
   document.documentElement.lang = IDIOMA;
   for (const el of document.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
   for (const el of document.querySelectorAll("[data-i18n-ph]")) el.placeholder = t(el.dataset.i18nPh);
-  for (const el of document.querySelectorAll("[data-i18n-title]")) el.title = t(el.dataset.i18nTitle);
+  for (const el of document.querySelectorAll("[data-i18n-title]")) {
+    const val = t(el.dataset.i18nTitle);
+    if (el.tagName === "IFRAME") el.title = val;
+    else { el.dataset.tip = val; el.removeAttribute("title"); }
+  }
   for (const el of document.querySelectorAll("[data-i18n-aria]")) el.setAttribute("aria-label", t(el.dataset.i18nAria));
   for (const el of document.querySelectorAll("[data-i18n-alt]")) el.alt = t(el.dataset.i18nAlt);
 }

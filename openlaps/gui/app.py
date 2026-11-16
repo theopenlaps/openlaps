@@ -69,8 +69,8 @@ class Api:
             req = urllib.request.Request(f"https://nominatim.openstreetmap.org/reverse?{q}", headers={"User-Agent": _UA})
             with urllib.request.urlopen(req, timeout=3.5) as r:
                 addr = json.load(r).get("address") or {}
-            zona = (addr.get("city") or addr.get("town") or addr.get("village") or addr.get("municipality")
-                    or addr.get("county") or addr.get("state") or "")
+            zona = (addr.get("city") or addr.get("town") or addr.get("state") or addr.get("county")
+                    or addr.get("village") or addr.get("municipality") or "")
             res = (addr.get("country") or "", zona)
         except Exception:  # noqa: BLE001
             pass
@@ -135,8 +135,8 @@ class Api:
         for d in datos:
             partes = d.get("display_name", "").split(", ")
             addr = d.get("address") or {}
-            zona = (addr.get("city") or addr.get("town") or addr.get("village") or addr.get("municipality")
-                    or partes[0])
+            zona = (addr.get("city") or addr.get("town") or addr.get("state") or addr.get("county")
+                    or addr.get("village") or addr.get("municipality") or partes[0])
             res.append({"nombre": partes[0], "detalle": ", ".join(partes[1:4]),
                         "pais": addr.get("country") or "", "zona": zona,
                         "lat": float(d["lat"]), "lon": float(d["lon"]),

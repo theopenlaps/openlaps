@@ -109,7 +109,21 @@ button[aria-pressed="true"] { background: var(--amarillo); color: var(--asfalto)
   .tecla.freno { width: 66px; height: 66px; }
 }
 @media (hover: hover) and (pointer: fine) { .mandos { display: none; } }
-@media (prefers-reduced-motion: reduce) { .progreso div { transition: none; } }
+.tip {
+  position: fixed; z-index: 30; pointer-events: none; max-width: 260px; padding: 6px 10px; border-radius: 8px;
+  background: rgba(18, 20, 24, 0.94); backdrop-filter: blur(12px); border: 1px solid #4b525b;
+  color: var(--texto); font: 400 12px/1.35 var(--f-texto);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 255, 255, .07);
+  display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  opacity: 0; transform: translateY(3px) scale(.97); transition: opacity .14s ease, transform .2s ease-out;
+}
+.tip.arriba { transform: translateY(-3px) scale(.97); }
+.tip.visible { opacity: 1; transform: translateY(0) scale(1); }
+.tip kbd {
+  font: 600 11px/1 var(--f-display); letter-spacing: .04em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px; background: #292d32; border: 1px solid #4b525b; color: var(--amarillo);
+}
+@media (prefers-reduced-motion: reduce) { .progreso div, .tip { transition: none; } }
 /* ?incrustado=1: dentro de la vista previa de la app de escritorio, sin lo que no cabe */
 .incrustado .barra, .incrustado .info, .incrustado .hud, .incrustado .mandos { display: none !important; }
 .incrustado .barra { padding: 6px; gap: 6px; }
@@ -120,8 +134,8 @@ button[aria-pressed="true"] { background: var(--amarillo); color: var(--asfalto)
 
 <header class="barra">
   <div class="marca"><i aria-hidden="true"></i><span id="nombre">openlaps</span></div>
-  <button id="b-modo" aria-pressed="true" title="Cambiar entre conducir y vista libre (tecla V)" data-tx="conducir" data-tx-t="modo_t">Conducir</button>
-  <button id="b-cam" title="Cámara de persecución o de cabina (tecla C)" data-tx="camara" data-tx-t="camara_t">Cámara</button>
+  <button id="b-modo" aria-pressed="true" title="Cambiar entre cámara por calle y vista libre (tecla V)" data-tx="conducir" data-tx-t="modo_t">Recorrer</button>
+  <button id="b-cam" title="Cambiar altura de cámara (tecla C)" data-tx="camara" data-tx-t="camara_t">Altura</button>
   <button id="b-reinicio" title="Volver a la salida (tecla R)" data-tx="salida" data-tx-t="salida_t">Salida</button>
   <button id="b-calidad" aria-pressed="false" title="Sombras y más resolución (gasta más batería)" data-tx="alta" data-tx-t="alta_t">Alta</button>
   <label class="boton" title="Abrir un archivo .glb generado con OpenLaps" data-tx="abrir" data-tx-t="abrir_t">Abrir .glb<input id="archivo" type="file" accept=".glb,model/gltf-binary"></label>
@@ -167,8 +181,8 @@ if (new URLSearchParams(location.search).has("incrustado")) document.documentEle
 const LANG = (new URLSearchParams(location.search).get("lang") || navigator.language || "es").toLowerCase().startsWith("es") ? "es" : "en";
 const TX = {
   es: {
-    escena: "Escena 3D de la pista", conducir: "Conducir", libre: "Vista libre", modo_t: "Cambiar entre conducir y vista libre (tecla V)",
-    camara: "Cámara", camara_t: "Cámara de persecución o de cabina (tecla C)", salida: "Salida", salida_t: "Volver a la salida (tecla R)",
+    escena: "Escena 3D de la pista", conducir: "Recorrer", libre: "Vista libre", modo_t: "Cambiar entre cámara por calle y vista libre (tecla V)",
+    camara: "Altura", camara_t: "Cambiar altura de cámara (tecla C)", salida: "Salida", salida_t: "Volver a la salida (tecla R)",
     alta: "Alta", alta_t: "Sombras y más resolución (gasta más batería)", abrir: "Abrir .glb", abrir_t: "Abrir un archivo .glb generado con OpenLaps",
     dist: "Dist.", superficie: "Superficie", izq: "Izquierda", der: "Derecha", freno: "FRENO", acel: "ACEL",
     cargando: "Cargando la pista…", archivo: "Archivo: ",
@@ -181,8 +195,8 @@ const TX = {
     sup: { ROAD: "Asfalto", MXCOBBLE: "Empedrado", LOOSE: "Tierra", MXDIRT: "Tierra", PAVEMENT: "Acera", GRASS: "Hierba / tierra" },
   },
   en: {
-    escena: "3D track scene", conducir: "Drive", libre: "Free view", modo_t: "Switch between driving and free view (V key)",
-    camara: "Camera", camara_t: "Chase or cockpit camera (C key)", salida: "Start", salida_t: "Back to the start (R key)",
+    escena: "3D track scene", conducir: "Explore", libre: "Free view", modo_t: "Switch between road camera and free view (V key)",
+    camara: "Height", camara_t: "Switch camera height (C key)", salida: "Start", salida_t: "Back to the start (R key)",
     alta: "High", alta_t: "Shadows and higher resolution (uses more battery)", abrir: "Open .glb", abrir_t: "Open a .glb file generated with OpenLaps",
     dist: "Dist.", superficie: "Surface", izq: "Left", der: "Right", freno: "BRAKE", acel: "GAS",
     cargando: "Loading the track…", archivo: "File: ",
@@ -197,8 +211,56 @@ const TX = {
 }[LANG];
 document.documentElement.lang = LANG;
 for (const el of document.querySelectorAll("[data-tx]")) el.firstChild.nodeValue = TX[el.dataset.tx];
-for (const el of document.querySelectorAll("[data-tx-t]")) el.title = TX[el.dataset.txT];
+for (const el of document.querySelectorAll("[data-tx-t]")) { el.dataset.tip = TX[el.dataset.txT]; el.removeAttribute("title"); }
 for (const el of document.querySelectorAll("[data-tx-a]")) el.setAttribute("aria-label", TX[el.dataset.txA]);
+(() => {
+  const tip = document.createElement("div");
+  tip.className = "tip";
+  tip.setAttribute("role", "tooltip");
+  tip.hidden = true;
+  document.body.append(tip);
+  let actual = null, timer = null, ultimoOculto = 0;
+  const buscar = (n) => n?.closest?.("[data-tip],[title]") || null;
+  const pintar = (el) => {
+    if (el.hasAttribute("title")) { el.dataset.tip = el.getAttribute("title") || ""; el.removeAttribute("title"); }
+    const raw = el.dataset.tip;
+    if (!raw) return ocultar();
+    const m = raw.match(/^(.*?)\s*\(((?:tecla\s+)?[A-Za-z0-9+]+(?:\s+key)?)\)\s*$/i);
+    tip.textContent = "";
+    if (m && m[1]) {
+      tip.append(document.createTextNode(m[1]));
+      const k = document.createElement("kbd");
+      k.textContent = m[2].replace(/^tecla\s+/i, "").replace(/\s+key$/i, "").toUpperCase();
+      tip.append(k);
+    } else tip.textContent = raw;
+    tip.hidden = false;
+    tip.classList.remove("visible", "arriba");
+    const r = el.getBoundingClientRect(), tw = tip.offsetWidth, th = tip.offsetHeight;
+    const abajo = r.bottom + 8 + th <= innerHeight - 8 || r.top - 8 - th < 8;
+    tip.classList.toggle("arriba", !abajo);
+    tip.style.left = `${Math.round(Math.max(8, Math.min(r.left + r.width / 2 - tw / 2, innerWidth - tw - 8)))}px`;
+    tip.style.top = `${Math.round(abajo ? r.bottom + 8 : Math.max(8, r.top - th - 8))}px`;
+    requestAnimationFrame(() => tip.classList.add("visible"));
+  };
+  const ocultar = () => {
+    clearTimeout(timer);
+    if (actual) ultimoOculto = Date.now();
+    actual = null;
+    tip.classList.remove("visible");
+    tip.hidden = true;
+  };
+  document.addEventListener("pointerover", (e) => {
+    const el = buscar(e.target);
+    if (!el || el === actual) { if (!el) ocultar(); return; }
+    clearTimeout(timer);
+    actual = el;
+    timer = setTimeout(() => { if (actual === el) pintar(el); }, Date.now() - ultimoOculto < 420 ? 80 : 320);
+  });
+  document.addEventListener("pointerout", (e) => { if (actual && !actual.contains(e.relatedTarget)) ocultar(); });
+  document.addEventListener("focusin", (e) => { const el = buscar(e.target); if (el && el.matches(":focus-visible")) { actual = el; clearTimeout(timer); pintar(el); } });
+  document.addEventListener("focusout", ocultar);
+  document.addEventListener("pointerdown", ocultar);
+})();
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -252,35 +314,10 @@ function redimensionar() {
 }
 window.addEventListener("resize", redimensionar);
 
-// ---------------------------------------------------------------- coche
-function hacerCoche() {
-  const g = new THREE.Group();
-  const pintura = new THREE.MeshStandardMaterial({ color: 0xc8352b, roughness: 0.45, metalness: 0.3 });
-  const vidrio = new THREE.MeshStandardMaterial({ color: 0x1c2630, roughness: 0.15, metalness: 0.6 });
-  const llanta = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
-  const cuerpo = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.55, 4.1), pintura);
-  cuerpo.position.y = 0.55;
-  const cabina = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.5, 2.0), vidrio);
-  cabina.position.set(0, 1.05, -0.2);
-  g.add(cuerpo, cabina);
-  const rg = new THREE.CylinderGeometry(0.33, 0.33, 0.25, 16);
-  rg.rotateZ(Math.PI / 2);
-  for (const [x, z] of [[-0.82, 1.3], [0.82, 1.3], [-0.82, -1.3], [0.82, -1.3]]) {
-    const r = new THREE.Mesh(rg, llanta);
-    r.position.set(x, 0.33, z);
-    g.add(r);
-  }
-  g.traverse((o) => { if (o.isMesh) { o.castShadow = true; } });
-  return g;
-}
-const coche = hacerCoche();
-coche.visible = false;
-scene.add(coche);
-
 // ---------------------------------------------------------------- estado
 const st = {
   pos: new THREE.Vector3(), yaw: 0, v: 0, up: new THREE.Vector3(0, 1, 0),
-  superficie: "ROAD", camara: "persecucion", manejar: true,
+  superficie: "ROAD", camara: "baja", manejar: true,
   spawn: null, ruta: null, rutaS: null, iRuta: 0, iIni: 0, iFin: 0,
   crono: { estado: "listo", t0: 0, t: 0 },
 };
@@ -434,14 +471,14 @@ function modo(manejar) {
   st.manejar = manejar;
   $("b-modo").setAttribute("aria-pressed", String(manejar));
   $("b-modo").textContent = manejar ? TX.conducir : TX.libre;
+  $("b-cam").hidden = !manejar;
   orbit.enabled = !manejar;
-  coche.visible = manejar || st.v !== 0;
   $("hud").hidden = !manejar;
   $("mandos").hidden = !manejar;
   if (!manejar) { orbit.target.copy(st.pos); }
 }
 $("b-modo").onclick = () => modo(!st.manejar);
-$("b-cam").onclick = () => { st.camara = st.camara === "persecucion" ? "cabina" : "persecucion"; };
+$("b-cam").onclick = () => { st.camara = st.camara === "baja" ? "alta" : "baja"; };
 $("b-reinicio").onclick = () => colocarEnSalida();
 $("b-calidad").onclick = () => { alta = !alta; $("b-calidad").setAttribute("aria-pressed", String(alta)); ajustarCalidad(); };
 const MAPA = { ArrowUp: "acel", KeyW: "acel", ArrowDown: "freno", KeyS: "freno", ArrowLeft: "izq", KeyA: "izq", ArrowRight: "der", KeyD: "der", Space: "freno" };
@@ -462,8 +499,8 @@ for (const el of document.querySelectorAll(".tecla")) {
   el.addEventListener("lostpointercapture", off);
 }
 
-// ---------------------------------------------------------------- física arcade
-const tmpF = new THREE.Vector3(), tmpR = new THREE.Vector3(), q = new THREE.Quaternion(), m4 = new THREE.Matrix4();
+// ---------------------------------------------------------------- cámara por calle
+const tmpF = new THREE.Vector3(), tmpR = new THREE.Vector3();
 let dirGiro = 0;
 function fisica(dt) {
   if (piloto.ruta) pilotoAutomatico();
@@ -518,13 +555,6 @@ function fisica(dt) {
       st.up.lerp(up, Math.min(1, dt * 10)).normalize();
     }
   }
-  // orientación del coche
-  const fwd = tmpF.clone().projectOnPlane(st.up).normalize();
-  const right = new THREE.Vector3().crossVectors(st.up, fwd).normalize();
-  m4.makeBasis(right.negate(), st.up, fwd);
-  q.setFromRotationMatrix(m4);
-  coche.position.copy(st.pos);
-  coche.quaternion.slerp(q, Math.min(1, dt * 14));
   // ruta y cronómetro
   if (st.ruta) {
     st.iRuta = indiceCercano(st.pos, st.iRuta - 40, st.iRuta + 40);
@@ -543,20 +573,18 @@ function fisica(dt) {
 }
 
 function camaraManejo(dt) {
-  const fwd = new THREE.Vector3(Math.sin(st.yaw), 0, Math.cos(st.yaw));
-  if (st.camara === "cabina") {
-    const p = st.pos.clone().addScaledVector(fwd, 0.3).add(new THREE.Vector3(0, 1.2, 0));
-    camera.position.copy(p);
-    camera.lookAt(p.clone().addScaledVector(fwd, 20).add(new THREE.Vector3(0, -0.6, 0)));
-    coche.visible = false;
-  } else {
-    coche.visible = true;
-    const deseo = st.pos.clone().addScaledVector(fwd, -7.5).add(new THREE.Vector3(0, 2.9, 0));
-    const suelo2 = alturaEn(deseo.x, deseo.z, deseo.y);
-    if (suelo2 && deseo.y < suelo2.point.y + 1.2) deseo.y = suelo2.point.y + 1.2;
-    camera.position.lerp(deseo, Math.min(1, dt * 5));
-    camera.lookAt(st.pos.clone().add(new THREE.Vector3(0, 1.2, 0)).addScaledVector(fwd, 4));
-  }
+  const fwd = new THREE.Vector3(Math.sin(st.yaw), 0, Math.cos(st.yaw))
+    .projectOnPlane(st.up)
+    .normalize();
+  const altura = st.camara === "alta" ? 3.5 : 1.55;
+  const deseo = st.pos.clone().add(new THREE.Vector3(0, altura, 0));
+  const suelo2 = alturaEn(deseo.x, deseo.z, deseo.y);
+  if (suelo2 && deseo.y < suelo2.point.y + 1.0) deseo.y = suelo2.point.y + 1.0;
+  camera.position.lerp(deseo, Math.min(1, dt * 12));
+  const mira = st.pos.clone()
+    .add(new THREE.Vector3(0, altura * 0.9, 0))
+    .addScaledVector(fwd, 22);
+  camera.lookAt(mira);
   sol.position.copy(st.pos).add(new THREE.Vector3(120, 220, 80));
   sol.target.position.copy(st.pos);
 }

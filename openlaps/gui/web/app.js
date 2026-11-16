@@ -92,9 +92,10 @@ function ponerCapa(nombre) {
 const svg = L.svg({ padding: 0.5 });
 map.createPane("osm").style.zIndex = 390;   // entre el mapa y la zona; se atenúa mientras carga otra
 const capaOSM = L.layerGroup().addTo(map);
-const Z = { rect: null, centro: null, esquina: null, etiqueta: null };
+const Z = { rect: null, marco: null, centro: null, esquinas: [], etiqueta: null, etiquetaEl: null };
 const R = { marcas: [], linea: null };
 let arrastre = null;
+let arrastreIgnorarClic = false;
 
 // la zona es un rectángulo de ancho × alto (m) centrado en S.centro
 function caja(centro = S.centro, ancho = S.ancho, alto = S.alto) {
@@ -124,17 +125,23 @@ function avisarBloqueo() {
 function aplicarBloqueo() {
   const b = !!bloqueo();
   document.body.classList.toggle("zona-bloqueada", b);
-  for (const m of [Z.centro, Z.esquina, ...R.marcas]) if (m && m.dragging) (b ? m.dragging.disable() : m.dragging.enable());
+  for (const m of [Z.centro, ...Z.esquinas, ...R.marcas]) if (m && m.dragging) (b ? m.dragging.disable() : m.dragging.enable());
   for (const el of $$('[data-campo="ancho"], [data-campo="alto"], [data-campo="vivoModo"], [data-grupo="modo"] button, [data-accion="deshacer-punto"], [data-accion="borrar-ruta"]')) el.disabled = b;
   // por debajo de 2 km² no hay modo en vivo (y si se achica la zona, se desmarca)
   const pocaZona = kmZona() < MIN_VIVO_KM2 - 1e-9;
   if (pocaZona && S.vivoModo && !b) S.vivoModo = false;
   for (const el of $$('[data-campo="vivoModo"]')) {
     el.disabled = b || pocaZona;
-    el.checked = !!S.vivoModo && !pocaZona;
-    el.closest("label").title = pocaZona ? t("campo.vivo_min", { min: MIN_VIVO_KM2 }) : "";
-    el.closest("label").classList.toggle("apagada", pocaZona);
+    const on = !!S.vivoModo && !pocaZona;
+    el.checked = on;
+    const lbl = el.closest("label");
+    lbl.classList.toggle("apagada", pocaZona);
+    lbl.classList.toggle("activa", on);
+    lbl.removeAttribute("title");
+    if (pocaZona) lbl.dataset.tip = t("campo.vivo_min", { min: MIN_VIVO_KM2 });
+    else delete lbl.dataset.tip;
   }
+  sincronizarInterruptores(true);
 }
 // que el rectángulo no pase del máximo: si se agranda un lado, se recorta el otro (o los dos, a escala)
 function limitarZona(cambio) {
@@ -153,59 +160,131 @@ function icono(clase, html = "", tam = 18) {
   return L.divIcon({ className: "", html: `<div class="${clase}">${html}</div>`, iconSize: [tam, tam], iconAnchor: [tam / 2, tam / 2] });
 }
 
+function syncMedidas() {
+  for (const el of $$('[data-campo="ancho"]')) el.value = S.ancho;
+  for (const el of $$('[data-campo="alto"]')) el.value = S.alto;
+  for (const el of $$('[data-mostrar="ancho"]')) el.textContent = `${fmt(S.ancho)} m`;
+  for (const el of $$('[data-mostrar="alto"]')) el.textContent = `${fmt(S.alto)} m`;
+  for (const el of $$('[data-mostrar="zona-area"]')) el.textContent = S.centro ? textoZona() : "";
+}
+
+function syncInterior() {
+  if (!Z.rect || !Z.rect._path || !S.centro) return;
+  const b = caja();
+  const p0 = map.latLngToContainerPoint(b[0]), p1 = map.latLngToContainerPoint(b[1]);
+  const sz = map.getSize();
+  // con mucho zoom la caja llena la pantalla: soltar el interior para poder mover el mapa libremente
+  const grande = Math.abs(p1.x - p0.x) > sz.x * 0.55 || Math.abs(p0.y - p1.y) > sz.y * 0.55;
+  Z.rect._path.style.pointerEvents = grande ? "none" : "auto";
+  Z.rect._path.style.cursor = grande ? "" : "grab";
+}
+
+function iniciarArrastreZona(e) {
+  if (e.originalEvent.button !== 0) return;
+  if (avisarBloqueo()) { L.DomEvent.stop(e); return; }
+  arrastre = { ini: e.latlng, px: e.containerPoint, centro: [...S.centro], movido: false };
+  map.dragging.disable();
+  L.DomEvent.stop(e);
+}
+
 function dibujarZona(moviendo = null) {
   const visible = S.modo === "libre" && S.centro;
   if (!visible) {
-    for (const k of Object.keys(Z)) if (Z[k]) { map.removeLayer(Z[k]); Z[k] = null; }
+    for (const k of ["rect", "marco", "centro", "etiqueta"]) if (Z[k]) { map.removeLayer(Z[k]); Z[k] = null; }
+    for (const m of Z.esquinas) map.removeLayer(m);
+    Z.esquinas = [];
+    Z.etiquetaEl = null;
     return;
   }
   const b = caja();
+  const pts = [[b[1][0], b[0][1]], [b[1][0], b[1][1]], [b[0][0], b[1][1]], [b[0][0], b[0][1]]];
   const sur = [b[0][0], S.centro[1]];
   if (!Z.rect) {
     Z.rect = L.rectangle(b, { renderer: svg, color: AMARILLO, weight: 2, dashArray: "7 5", fillColor: AMARILLO, fillOpacity: 0.07, bubblingMouseEvents: false })
       .addTo(map);
-    Z.rect.on("mousedown", (e) => {
-      if (e.originalEvent.button !== 0) return;
-      if (avisarBloqueo()) { L.DomEvent.stop(e); return; }
-      arrastre = { ini: e.latlng, centro: [...S.centro] };
-      map.dragging.disable();
-      L.DomEvent.stop(e);
-    });
-    Z.centro = L.marker(S.centro, { draggable: true, icon: icono("asa centro", "", 26), title: t("zona.mover"), zIndexOffset: 500 }).addTo(map);
+    Z.rect.on("mousedown", iniciarArrastreZona);
+    Z.marco = L.polyline([...pts, pts[0]], { renderer: svg, color: AMARILLO, weight: 14, opacity: 0, className: "zona-mover", bubblingMouseEvents: false }).addTo(map);
+    Z.marco.on("mousedown", iniciarArrastreZona);
+    Z.centro = L.marker(S.centro, { draggable: true, icon: icono("asa centro", "", 30), title: t("zona.mover"), zIndexOffset: 500 }).addTo(map);
+    Z.centro.on("dragstart", () => document.body.classList.add("zona-arrastrando"));
     Z.centro.on("drag", (e) => { S.centro = [e.latlng.lat, e.latlng.lng]; dibujarZona("centro"); });
-    Z.centro.on("dragend", cambioZona);
-    Z.esquina = L.marker(b[1], { draggable: true, icon: icono("asa"), title: t("zona.tamano"), zIndexOffset: 600 }).addTo(map);
-    Z.esquina.on("drag", (e) => {
-      // ancho y alto por separado: un rectángulo como lo quiera el usuario
-      const dy = Math.abs(e.latlng.lat - S.centro[0]) * M_POR_GRADO;
-      const dx = Math.abs(e.latlng.lng - S.centro[1]) * M_POR_GRADO * Math.cos((S.centro[0] * Math.PI) / 180);
-      S.ancho = Math.min(8000, Math.max(200, Math.round((2 * dx) / 50) * 50));
-      S.alto = Math.min(8000, Math.max(200, Math.round((2 * dy) / 50) * 50));
-      limitarZona();
-      dibujarZona("esquina");
-      sync();
+    Z.centro.on("dragend", () => { document.body.classList.remove("zona-arrastrando"); cambioZona(); });
+    const defs = [[-1, 1, "nw"], [1, 1, "ne"], [1, -1, "se"], [-1, -1, "sw"]];
+    Z.esquinas = defs.map(([sx, sy, cls], idx) => {
+      const m = L.marker(pts[idx], { draggable: true, icon: icono(`asa ${cls}`, "", 16), title: t("zona.tamano"), zIndexOffset: 600 }).addTo(map);
+      let opuesto = null;
+      m.on("dragstart", () => {
+        const bb = caja();
+        opuesto = [bb[sy > 0 ? 0 : 1][0], bb[sx > 0 ? 0 : 1][1]];
+        document.body.classList.add("zona-arrastrando");
+      });
+      m.on("drag", (e) => {
+        const p = e.latlng;
+        if (e.originalEvent?.shiftKey || !opuesto) {
+          const dy = Math.abs(p.lat - S.centro[0]) * M_POR_GRADO;
+          const dx = Math.abs(p.lng - S.centro[1]) * M_POR_GRADO * Math.cos((S.centro[0] * Math.PI) / 180);
+          S.ancho = Math.min(8000, Math.max(200, Math.round((2 * dx) / 50) * 50));
+          S.alto = Math.min(8000, Math.max(200, Math.round((2 * dy) / 50) * 50));
+          limitarZona();
+        } else {
+          const cos = Math.cos((((p.lat + opuesto[0]) / 2) * Math.PI) / 180);
+          const dy = (p.lat - opuesto[0]) * sy * M_POR_GRADO;
+          const dx = (p.lng - opuesto[1]) * sx * M_POR_GRADO * cos;
+          S.ancho = Math.min(8000, Math.max(200, Math.round(dx / 50) * 50));
+          S.alto = Math.min(8000, Math.max(200, Math.round(dy / 50) * 50));
+          limitarZona();
+          const latC = opuesto[0] + (sy * S.alto) / 2 / M_POR_GRADO;
+          const lonC = opuesto[1] + (sx * S.ancho) / 2 / (M_POR_GRADO * Math.cos((latC * Math.PI) / 180));
+          S.centro = [latC, lonC];
+        }
+        dibujarZona(idx);
+        syncMedidas();
+      });
+      m.on("dragend", () => {
+        opuesto = null;
+        document.body.classList.remove("zona-arrastrando");
+        dibujarZona();
+        cambioZona();
+      });
+      return m;
     });
-    Z.esquina.on("dragend", () => { Z.esquina.setLatLng(caja()[1]); cambioZona(); });
-    Z.etiqueta = L.marker(sur, { interactive: false, icon: L.divIcon({ className: "", html: "", iconSize: [0, 0] }) }).addTo(map);
+    const span = document.createElement("span");
+    span.className = "etiqueta-tam";
+    Z.etiquetaEl = span;
+    Z.etiqueta = L.marker(sur, { interactive: false, icon: L.divIcon({ className: "", html: span, iconSize: [0, 0] }) }).addTo(map);
   }
   Z.rect.setBounds(b);
+  Z.marco.setLatLngs([...pts, pts[0]]);
   if (moviendo !== "centro") Z.centro.setLatLng(S.centro);
-  if (moviendo !== "esquina") Z.esquina.setLatLng(b[1]);
+  Z.esquinas.forEach((m, idx) => { if (moviendo !== idx) m.setLatLng(pts[idx]); });
   Z.etiqueta.setLatLng(sur);
-  Z.etiqueta.setIcon(L.divIcon({ className: "", html: `<span class="etiqueta-tam${esVivo() ? " vivo" : ""}">${fmt(S.ancho)} × ${fmt(S.alto)} m · ${fmt(kmZona(), 2)} km²${esVivo() ? ` · ${t("vivo.insignia")}` : ""}</span>`, iconSize: [0, 0] }));
+  Z.etiquetaEl.className = `etiqueta-tam${esVivo() ? " vivo" : ""}`;
+  Z.etiquetaEl.textContent = `${fmt(S.ancho)} × ${fmt(S.alto)} m · ${fmt(kmZona(), 2)} km²${esVivo() ? ` · ${t("vivo.insignia")}` : ""}`;
   Z.rect.setStyle({ dashArray: esVivo() ? "2 6" : "7 5" });
+  syncInterior();
 }
 
+map.on("zoomend", syncInterior);
 map.on("mousemove", (e) => {
   if (!arrastre) return;
+  if (!arrastre.movido && arrastre.px.distanceTo(e.containerPoint) > 3) {
+    arrastre.movido = true;
+    document.body.classList.add("zona-arrastrando");
+  }
   S.centro = [arrastre.centro[0] + e.latlng.lat - arrastre.ini.lat, arrastre.centro[1] + e.latlng.lng - arrastre.ini.lng];
   dibujarZona();
 });
 function finArrastre() {
   if (!arrastre) return;
+  const mov = arrastre.movido;
   arrastre = null;
+  document.body.classList.remove("zona-arrastrando");
   map.dragging.enable();
-  cambioZona();
+  if (mov) {
+    arrastreIgnorarClic = true;
+    setTimeout(() => { arrastreIgnorarClic = false; }, 0);
+    cambioZona();
+  }
 }
 map.on("mouseup", finArrastre);
 document.addEventListener("mouseup", finArrastre);
@@ -241,6 +320,7 @@ function modoClic() {
   return S.modo === "libre" ? "zona" : "ruta";
 }
 map.on("click", (e) => {
+  if (arrastreIgnorarClic) return;
   const p = [e.latlng.lat, e.latlng.lng];
   const m = modoClic();
   if (m && avisarBloqueo()) return;
@@ -460,13 +540,21 @@ function resumenHTML() {
 }
 
 // ------------------------------------------------------------------ sincronizar interfaz
+function syncRange(el) {
+  const min = Number(el.min) || 0, max = Number(el.max) || 100, val = Number(el.value) || 0;
+  const p = max > min ? Math.max(0, Math.min(1, (val - min) / (max - min))) : 0;
+  el.style.setProperty("--p", String(p));
+}
+
 function sync() {
   for (const el of $$("[data-campo]")) {
     const k = el.dataset.campo;
     if (el.type === "checkbox") el.checked = !!S[k];
     else if (document.activeElement !== el) el.value = S[k] ?? "";
+    if (el.type === "range") syncRange(el);
     if (k === "nombre") el.placeholder = S.nombreAuto || "mi_pista";
   }
+  refrescarDesplegables();
   for (const el of $$("[data-usar]")) el.checked = !!S.usar[el.dataset.usar];
   for (const g of $$("[data-grupo]")) {
     for (const b of $$("button[data-valor]", g)) b.setAttribute("aria-pressed", String(S[g.dataset.grupo] === b.dataset.valor));
@@ -490,8 +578,11 @@ function sync() {
     if (el.dataset.mostrar === "nombre-aviso") el.classList.toggle("aviso-texto", existe);
   }
   for (const el of $$("[data-mostrar-si]")) el.hidden = !S[el.dataset.mostrarSi];
-  for (const el of $$(".zona-area")) el.classList.toggle("vivo", esVivo());
-  $("#b-generar").textContent = t(esVivo() ? "accion.vivo" : "accion.generar");
+  const vivoOn = esVivo();
+  for (const el of $$(".zona-area")) el.classList.toggle("vivo", vivoOn);
+  const bg = $("#b-generar");
+  bg.textContent = t(vivoOn ? "accion.vivo" : "accion.generar");
+  bg.classList.toggle("modo-vivo", vivoOn);
   aplicarBloqueo();
   const html = resumenHTML();
   $$("[data-resumen]").forEach((el) => { el.innerHTML = html; });
@@ -629,6 +720,7 @@ function prepararBuscador(raiz) {
       e.preventDefault();
       sel = (sel + (e.key === "ArrowDown" ? 1 : -1) + res.length) % res.length;
       pintar();
+      lista.children[sel]?.scrollIntoView({ block: "nearest" });
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (res.length && sel >= 0) elegir(sel);
@@ -683,7 +775,7 @@ function mostrarProgreso(titulo, pct) {
   $("#acc-listo").hidden = true;
   $("#acc-progreso").hidden = false;
   $("#prog-titulo").textContent = titulo;
-  $("#prog-barra").style.width = `${pct}%`;
+  $("#prog-barra").style.setProperty("--p", String(Math.max(0, Math.min(1, pct / 100))));
 }
 function ocultarProgreso() {
   $("#acc-listo").hidden = false;
@@ -714,7 +806,7 @@ function manejarEvento(ev) {
     const pct = p ? ((p - 0.5) / ev.pasos) * 100 : 3;
     mostrarProgreso(p ? `${pre}: ${p}/${ev.pasos} ${t(`paso.${p}`)}` : `${pre}: ${t(ev.precarga ? "prog.precarga" : "prog.preparando")}`, pct);
   } else if (ev.estado === "listo") {
-    $("#prog-barra").style.width = "100%";
+    $("#prog-barra").style.setProperty("--p", "1");
     ocultarProgreso();
     mostrarResultado(ev.pista);
     refrescarPistas();
@@ -806,19 +898,21 @@ function syncVista3D() {
     texto = S.borError;
     mal = true;
     boton = true;
-  } else if (hay && !alDia) {
+  } else if (hay && !alDia && S.autoBorrador) {
     texto = t("vista.desfasada");
-    boton = !S.autoBorrador || !borradorPosible() || !!S.trabajo;
+    boton = !borradorPosible() || !!S.trabajo;
   }
   const est = $("#vista-estado");
   est.hidden = !texto || (!hay && !S.bor && !mal);
   est.classList.toggle("mal", mal);
   $("#ve-texto").textContent = texto;
   $("#ve-prog").hidden = pct === null;
-  $("#ve-barra").style.width = `${pct || 0}%`;
+  $("#ve-barra").style.setProperty("--p", String(Math.max(0, Math.min(1, (pct || 0) / 100))));
   $("#ve-boton").hidden = !boton || !!S.trabajo || !!validarZona();
   $("#ve-registro").hidden = !mal;
-  $("#vista-iframe").classList.toggle("desfasada", hay && (!alDia || !!S.bor));
+  $("#b-actualizar-3d").hidden = !(hay && !alDia && !S.autoBorrador && !S.bor && !S.borError && !S.trabajo && !validarZona());
+  $("#b-ampliar").hidden = !hay;
+  $("#vista-iframe").classList.toggle("desfasada", hay && (!!S.bor || (S.autoBorrador && !alDia)));
   // sin ningún borrador todavía: explicación y, si hace falta, el botón manual
   const vacia = $("#vista-vacia");
   vacia.hidden = hay || !!S.bor || mal;
@@ -973,7 +1067,7 @@ function pintarVivo() {
   $("#vivo-texto").textContent = v.activo ? t("vivo.texto", { zona: `${fmt(v.zona[0])} × ${fmt(v.zona[1])} m` }) : t("vivo.detenido");
   const e = v.estado;
   const pct = e ? Math.round(e.zona_lista * 100) : 0;
-  $("#vivo-barra").style.width = `${v.activo ? Math.max(2, pct) : 0}%`;
+  $("#vivo-barra").style.setProperty("--p", String(v.activo ? Math.max(0.02, Math.min(1, pct / 100)) : 0));
   $("#vivo-zona").textContent = !v.activo ? "" : !e ? t("vivo.arrancando")
     : e.t_medio ? t("vivo.zona", { pct, n: e.listos.length, s: fmt(e.t_medio, 0) }) : t("vivo.zona_espera");
   const p = v.pistaAc;
@@ -1006,9 +1100,47 @@ async function refrescarPistas() {
   pintarPistas();
   sync();
 }
+const TIRA_NUM = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9";
+function ponerContador(el, valor) {
+  const num = Math.max(0, Number(valor) || 0);
+  const txt = new Intl.NumberFormat(LOCALE[IDIOMA] || undefined).format(num);
+  const molde = txt.replace(/\d/g, "0");
+  let sr = $(".cnt-sr", el), cifras = $(".cnt-cifras", el);
+  if (!sr || !cifras) {
+    el.textContent = "";
+    sr = document.createElement("span");
+    sr.className = "cnt-sr";
+    cifras = document.createElement("span");
+    cifras.className = "cnt-cifras";
+    cifras.setAttribute("aria-hidden", "true");
+    el.append(sr, cifras);
+  }
+  sr.textContent = txt;
+  if (el.dataset.molde !== molde) {
+    el.dataset.molde = molde;
+    cifras.textContent = "";
+    const chars = [...txt];
+    chars.forEach((ch, idx) => {
+      if (!/\d/.test(ch)) { cifras.append(ch); return; }
+      const col = document.createElement("span");
+      col.className = "cnt-col";
+      const tira = document.createElement("span");
+      tira.className = "cnt-tira";
+      tira.textContent = TIRA_NUM;
+      tira.style.setProperty("--i", String(chars.length - 1 - idx));
+      col.append(tira);
+      cifras.append(col);
+    });
+    void el.offsetWidth;
+  }
+  const tiras = $$(".cnt-tira", cifras);
+  let i = 0;
+  for (const ch of txt) if (/\d/.test(ch)) tiras[i++]?.style.setProperty("--d", ch);
+}
+
 function pintarPistas() {
   const n = $("#n-pistas");
-  n.textContent = S.pistas.length;
+  ponerContador(n, S.pistas.length);
   n.hidden = !S.pistas.length;
   const ul = $("#lista-pistas");
   ul.innerHTML = "";
@@ -1020,7 +1152,7 @@ function pintarPistas() {
     const li = document.createElement("li");
     const meta = [p.fecha, t("dato.mb", { v: fmt(p.mb, 1) }), t(`modo_nombre.${p.modo}`)].join(" · ");
     li.innerHTML = `${p.cenital ? `<img src="${p.cenital}" alt="" loading="lazy">` : `<div class="sin-img"></div>`}
-      <div><b title="${escapar(p.nombre)}">${escapar(p.nombre)}</b><small>${escapar(meta)}</small>
+      <div><b data-tip="${escapar(p.nombre)}" data-tip-truncado>${escapar(p.nombre)}</b><small>${escapar(meta)}</small>
       <div class="fila-botones">
         <button class="boton chico" data-p="manejar">${t("pistas.conducir")}</button>
         ${p.centro ? `<button class="boton chico" data-p="mapa">${t("pistas.mapa")}</button>` : ""}
@@ -1044,19 +1176,45 @@ function abrirCajon(id) {
   const abrir = c.hidden;
   cerrarCajones();
   c.hidden = !abrir;
+  $("#b-pistas").setAttribute("aria-expanded", String(abrir && id === "#cajon-pistas"));
+  $("#b-ajustes").setAttribute("aria-expanded", String(abrir && id === "#cajon-ajustes"));
 }
-function cerrarCajones() { $$(".cajon").forEach((c) => { c.hidden = true; }); }
+function cerrarCajones() {
+  cerrarDesplegable();
+  $$(".cajon").forEach((c) => { c.hidden = true; });
+  $("#b-pistas").setAttribute("aria-expanded", "false");
+  $("#b-ajustes").setAttribute("aria-expanded", "false");
+}
+function ponerRuta(el, ruta) {
+  el.textContent = "";
+  const partes = String(ruta || "").split(/([\\/])/);
+  partes.forEach((p) => {
+    if (!p) return;
+    el.append(document.createTextNode(p));
+    if (p === "\\" || p === "/") el.append(document.createElement("wbr"));
+  });
+}
 function pintarAjustes() {
-  $("#aj-salida").textContent = S.salida;
-  $("#aj-ac").textContent = S.acRuta || t("aj.ac_no");
+  ponerRuta($("#aj-salida"), S.salida);
+  const acEl = $("#aj-ac");
+  acEl.classList.toggle("vacia", !S.acRuta);
+  if (S.acRuta) ponerRuta(acEl, S.acRuta);
+  else acEl.textContent = t("aj.ac_no");
+  const est = $("#aj-ac-estado");
+  if (est) {
+    est.className = `aj-estado ${S.acRuta ? "ok" : "falta"}`;
+    est.textContent = t(S.acRuta ? "aj.ac_ok" : "aj.ac_falta");
+  }
   $("#aj-idioma").value = IDIOMA;
-  $("#aj-version").textContent = S.version;
+  $("#aj-version").textContent = S.version ? `v${S.version}` : "";
+  refrescarDesplegables();
 }
 async function recargarEstado() {
   const r = await api("iniciar");
   if (!r || r.error) return null;
   S.ajustes = r.ajustes;
   S.acRuta = r.ac;
+  S.csp = !!r.csp;
   S.salida = r.salida;
   S.version = r.version;
   S.pistas = r.pistas || [];
@@ -1165,6 +1323,7 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("input", (e) => {
   const el = e.target;
+  if (el.type === "range") syncRange(el);
   if (el.dataset.campo) {
     const k = el.dataset.campo;
     S[k] = el.type === "checkbox" ? el.checked : el.type === "range" ? Number(el.value) : el.value;
@@ -1198,13 +1357,14 @@ $("#auto-3d").addEventListener("change", (e) => {
   api("guardar_ajustes", { borrador_auto: S.autoBorrador });
   if (!S.autoBorrador) { clearTimeout(tBorrador); if (S.bor) { S.bor = null; api("cancelar", "borrador"); } }
   programarBorrador();
+  sincronizarInterruptores(true);
 });
 $("#aj-idioma").addEventListener("change", (e) => cambiarIdioma(e.target.value, true));
 
 function cambiarIdioma(idioma, guardar) {
   aplicarIdioma(idioma);
   if (guardar) api("guardar_ajustes", { idioma: IDIOMA });
-  if (Z.centro) { Z.centro.options.title = t("zona.mover"); Z.esquina.options.title = t("zona.tamano"); }
+  if (Z.centro) { Z.centro.options.title = t("zona.mover"); Z.esquinas.forEach((m) => { m.options.title = t("zona.tamano"); }); }
   pintarAjustes();
   pintarPistas();
   pintarMarco();
@@ -1212,15 +1372,24 @@ function cambiarIdioma(idioma, guardar) {
   sync();
 }
 
-$("#b-guiado").addEventListener("click", () => (S.asistente ? cerrarAsistente() : abrirAsistente()));
 $("#b-pistas").addEventListener("click", () => { abrirCajon("#cajon-pistas"); refrescarPistas(); });
 $("#b-ajustes").addEventListener("click", () => abrirCajon("#cajon-ajustes"));
 
+document.addEventListener("contextmenu", (e) => {
+  if (!e.target.closest("input, textarea, pre, .ruta-archivo, #mapa")) e.preventDefault();
+});
+
 document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+  const k = e.key.toLowerCase();
+  if (((e.ctrlKey || e.metaKey) && ["p", "s", "u", "g"].includes(k)) || e.key === "F3") {
+    e.preventDefault();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && k === "f") {
     e.preventDefault();
     (S.asistente && S.paso === 1 ? $("#panel-asistente [data-buscador] input") : $(".top [data-buscador] input")).focus();
   } else if (e.key === "Escape") {
+    if (cerrarDesplegable()) return;
     if (!$("#visor-completo").hidden) ACCIONES["cerrar-visor"]();
     else if (!$("#modal-renombrar").hidden) ACCIONES["cerrar-renombrar"]();
     else if (!$("#modal-registro").hidden) ACCIONES["cerrar-registro"]();
@@ -1251,7 +1420,7 @@ function pintarMarco() {
   document.body.classList.toggle("maximizada", !!marco.maximizada);
   const b = $('[data-ventana="maximizar"]');
   const k = marco.maximizada ? "ventana.restaurar" : "ventana.maximizar";
-  b.title = t(k);
+  b.dataset.tip = t(k);
   b.setAttribute("aria-label", t(k));
 }
 async function accionVentana(que) {
@@ -1277,9 +1446,520 @@ $(".bordes").addEventListener("mousedown", (e) => {
   if (b && e.button === 0) { e.preventDefault(); accionVentana(b.dataset.borde); }
 });
 
+// ------------------------------------------------------------------ tooltips y desplegables propios
+const DESPLEGABLES = [];
+let menuActivo = null;
+
+function cerrarDesplegable(devolverFoco = false) {
+  if (!menuActivo) return false;
+  const { caja, btn, ul, onScroll, onResize } = menuActivo;
+  menuActivo = null;
+  caja.classList.remove("abierto");
+  btn.setAttribute("aria-expanded", "false");
+  ul.remove();
+  window.removeEventListener("resize", onResize);
+  document.removeEventListener("scroll", onScroll, true);
+  if (devolverFoco) btn.focus();
+  return true;
+}
+
+function refrescarDesplegables() {
+  for (const d of DESPLEGABLES) {
+    const op = d.sel.selectedOptions[0] || d.sel.options[0];
+    d.txt.textContent = op ? op.textContent : "";
+    d.btn.disabled = d.sel.disabled;
+  }
+}
+
+function abrirDesplegable(d) {
+  if (d.sel.disabled) return;
+  const ya = menuActivo && menuActivo.sel === d.sel;
+  cerrarDesplegable();
+  if (ya) return;
+  const ul = document.createElement("ul");
+  ul.className = "menu-desplegable";
+  ul.setAttribute("role", "listbox");
+  const ops = [...d.sel.options].map((o) => {
+    const li = document.createElement("li");
+    li.setAttribute("role", "none");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "menu-op";
+    b.setAttribute("role", "option");
+    b.dataset.val = o.value;
+    b.setAttribute("aria-selected", String(o.value === d.sel.value));
+    const sp = document.createElement("span");
+    sp.textContent = o.textContent;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M3.5 8.5l3 3 6-6.5");
+    svg.append(path);
+    b.append(sp, svg);
+    b.addEventListener("click", () => {
+      if (d.sel.value !== o.value) {
+        d.sel.value = o.value;
+        d.sel.dispatchEvent(new Event("input", { bubbles: true }));
+        d.sel.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      refrescarDesplegables();
+      cerrarDesplegable(true);
+    });
+    li.append(b);
+    ul.append(li);
+    return b;
+  });
+  document.body.append(ul);
+  const r = d.btn.getBoundingClientRect();
+  ul.style.minWidth = `${Math.round(r.width)}px`;
+  ul.style.maxWidth = `${Math.min(360, window.innerWidth - 16)}px`;
+  const mh = Math.min(260, ul.scrollHeight);
+  const abajo = r.bottom + 5 + mh <= window.innerHeight - 8 || r.top - 5 - mh < 8;
+  ul.classList.toggle("arriba", !abajo);
+  ul.style.top = `${Math.round(abajo ? r.bottom + 5 : Math.max(8, r.top - mh - 5))}px`;
+  ul.style.left = `${Math.round(Math.max(8, Math.min(r.left, window.innerWidth - ul.offsetWidth - 8)))}px`;
+  d.caja.classList.add("abierto");
+  d.btn.setAttribute("aria-expanded", "true");
+
+  const onResize = () => cerrarDesplegable();
+  const onScroll = (e) => { if (!ul.contains(e.target)) cerrarDesplegable(); };
+  window.addEventListener("resize", onResize);
+  document.addEventListener("scroll", onScroll, true);
+  menuActivo = { sel: d.sel, caja: d.caja, btn: d.btn, ul, onScroll, onResize };
+
+  let idx = Math.max(0, ops.findIndex((b) => b.dataset.val === d.sel.value));
+  const enfocar = (i) => {
+    idx = (i + ops.length) % ops.length;
+    ops.forEach((b, j) => b.classList.toggle("foco", j === idx));
+    ops[idx]?.focus();
+    ops[idx]?.scrollIntoView({ block: "nearest" });
+  };
+  ul.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); enfocar(idx + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); enfocar(idx - 1); }
+    else if (e.key === "Home") { e.preventDefault(); enfocar(0); }
+    else if (e.key === "End") { e.preventDefault(); enfocar(ops.length - 1); }
+    else if (e.key === "Tab") { cerrarDesplegable(); }
+  });
+  enfocar(idx);
+}
+
+function iniciarDesplegables() {
+  for (const sel of $$("select")) {
+    if (sel.closest(".desplegable")) continue;
+    const caja = document.createElement("div");
+    caja.className = "desplegable";
+    sel.parentNode.insertBefore(caja, sel);
+    sel.hidden = true;
+    sel.setAttribute("aria-hidden", "true");
+    sel.tabIndex = -1;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "desplegable-btn";
+    btn.setAttribute("aria-haspopup", "listbox");
+    btn.setAttribute("aria-expanded", "false");
+    const txt = document.createElement("span");
+    txt.className = "desplegable-txt";
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 12 12");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M3 4.5l3 3 3-3");
+    svg.append(path);
+    btn.append(txt, svg);
+    caja.append(sel, btn);
+    const d = { sel, caja, btn, txt };
+    DESPLEGABLES.push(d);
+    btn.addEventListener("click", () => abrirDesplegable(d));
+    btn.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); abrirDesplegable(d); }
+    });
+    if (sel.id) {
+      const lbl = $(`label[for="${sel.id}"]`);
+      if (lbl) lbl.addEventListener("click", (e) => { e.preventDefault(); btn.focus(); abrirDesplegable(d); });
+    }
+  }
+  document.addEventListener("pointerdown", (e) => {
+    if (menuActivo && !menuActivo.ul.contains(e.target) && !menuActivo.caja.contains(e.target)) cerrarDesplegable();
+  });
+  refrescarDesplegables();
+}
+
+function iniciarTooltips() {
+  const tip = document.createElement("div");
+  tip.className = "tip";
+  tip.setAttribute("role", "tooltip");
+  tip.hidden = true;
+  document.body.append(tip);
+  let actual = null, timer = null, ultimoOculto = 0;
+
+  const capturar = (el) => {
+    if (!el || el.tagName === "IFRAME") return null;
+    if (el.hasAttribute("title")) {
+      const v = el.getAttribute("title");
+      if (v) el.dataset.tip = v;
+      el.removeAttribute("title");
+    }
+    if (!el.dataset.tip) return null;
+    if (el.hasAttribute("data-tip-truncado") && el.scrollWidth <= el.clientWidth) return null;
+    return el.dataset.tip;
+  };
+
+  const buscar = (n) => {
+    let cur = n && n.nodeType === 1 ? n : n?.parentElement;
+    while (cur && cur !== document.body) {
+      if (cur.tagName !== "IFRAME" && (cur.hasAttribute("title") || cur.dataset?.tip)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  };
+
+  const pintar = (el) => {
+    const raw = capturar(el);
+    if (!raw) return ocultar();
+    const m = raw.match(/^(.*?)\s*\(((?:tecla\s+)?[A-Za-z0-9+]+(?:\s+key)?)\)\s*$/i);
+    tip.textContent = "";
+    if (m && m[1]) {
+      tip.append(document.createTextNode(m[1]));
+      const k = document.createElement("kbd");
+      k.textContent = m[2].replace(/^tecla\s+/i, "").replace(/\s+key$/i, "").toUpperCase();
+      tip.append(k);
+    } else {
+      tip.textContent = raw;
+    }
+    tip.hidden = false;
+    tip.classList.remove("visible", "arriba");
+    const r = el.getBoundingClientRect(), tw = tip.offsetWidth, th = tip.offsetHeight;
+    const abajo = r.bottom + 8 + th <= window.innerHeight - 8 || r.top - 8 - th < 8;
+    tip.classList.toggle("arriba", !abajo);
+    const left = Math.max(8, Math.min(r.left + r.width / 2 - tw / 2, window.innerWidth - tw - 8));
+    const top = abajo ? r.bottom + 8 : Math.max(8, r.top - th - 8);
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+    requestAnimationFrame(() => tip.classList.add("visible"));
+  };
+
+  const ocultar = () => {
+    clearTimeout(timer);
+    if (actual) ultimoOculto = Date.now();
+    actual = null;
+    tip.classList.remove("visible");
+    tip.hidden = true;
+  };
+
+  document.addEventListener("pointerover", (e) => {
+    const el = buscar(e.target);
+    if (!el || el === actual) { if (!el) ocultar(); return; }
+    clearTimeout(timer);
+    actual = el;
+    const ms = Date.now() - ultimoOculto < 420 ? 80 : 340;
+    timer = setTimeout(() => { if (actual === el && el.isConnected) pintar(el); }, ms);
+  });
+  document.addEventListener("pointerout", (e) => {
+    if (actual && !actual.contains(e.relatedTarget)) ocultar();
+  });
+  document.addEventListener("focusin", (e) => {
+    const el = buscar(e.target);
+    if (el && el.matches(":focus-visible")) { actual = el; clearTimeout(timer); pintar(el); }
+  });
+  document.addEventListener("focusout", ocultar);
+  document.addEventListener("pointerdown", ocultar);
+  document.addEventListener("scroll", ocultar, true);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") ocultar(); });
+}
+
+// ------------------------------------------------------------------ interruptores físicos de dos estados
+const INTERRUPTORES = [];
+
+function pasoMuelle(duracion, rebote, destino, x, v, dt) {
+  const w = (2 * Math.PI) / duracion;
+  const z = Math.min(1, Math.max(0.05, 1 - rebote));
+  const x0 = x - destino;
+  if (z < 1) {
+    const a = z * w, wd = w * Math.sqrt(1 - z * z);
+    const b = (v + a * x0) / wd, e = Math.exp(-a * dt);
+    const cos = Math.cos(wd * dt), sin = Math.sin(wd * dt);
+    return [destino + e * (x0 * cos + b * sin), e * ((b * wd - a * x0) * cos - (x0 * wd + a * b) * sin)];
+  }
+  const k = v + w * x0, e = Math.exp(-w * dt);
+  return [destino + e * (x0 + k * dt), e * (k - w * (x0 + k * dt))];
+}
+
+function sincronizarInterruptores(animar = true) {
+  const reducir = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  for (const sw of INTERRUPTORES) sw.sincronizar(animar && !reducir);
+}
+
+function crearDomSwitch(chica) {
+  const caja = document.createElement("div");
+  caja.className = `sw-interruptor${chica ? " sw-chico" : ""}`;
+  caja.setAttribute("aria-hidden", "true");
+  caja.innerHTML = '<div class="sw-carril"></div><div class="sw-pulgar"><div class="sw-ficha"></div></div>';
+  return caja;
+}
+
+function iniciarInterruptores() {
+  let rafId = 0, ultimoT = 0;
+
+  const pintarUno = (sw) => {
+    const estirar = Math.min(Math.abs(sw.vx) / 680, 1) * 0.16;
+    const escX = (1 + estirar) * sw.esc;
+    const escY = (1 - estirar * 0.3) * sw.esc;
+    sw.pulgar.style.transform = `translate3d(${sw.x.toFixed(2)}px,0,0) scale(${escX.toFixed(4)},${escY.toFixed(4)})`;
+    sw.caja.classList.toggle("encendido", sw.arrastrando ? sw.x > sw.recorrido / 2 : sw.input.checked);
+  };
+
+  const cuadro = (ahora) => {
+    rafId = 0;
+    const dt = ultimoT ? Math.min(0.05, (ahora - ultimoT) / 1000) : 1 / 60;
+    ultimoT = ahora;
+    let activos = false;
+    for (const sw of INTERRUPTORES) {
+      if (Math.abs(sw.metaX - sw.x) > 0.04 || Math.abs(sw.vx) > 0.4) {
+        const cfg = sw.arrastrando ? [0.14, 0] : [0.5, 0.28];
+        [sw.x, sw.vx] = pasoMuelle(cfg[0], cfg[1], sw.metaX, sw.x, sw.vx, dt);
+        activos = true;
+      } else {
+        sw.x = sw.metaX;
+        sw.vx = 0;
+      }
+      if (Math.abs(sw.metaEsc - sw.esc) > 0.002 || Math.abs(sw.ve) > 0.02) {
+        [sw.esc, sw.ve] = pasoMuelle(0.28, 0.18, sw.metaEsc, sw.esc, sw.ve, dt);
+        activos = true;
+      } else {
+        sw.esc = sw.metaEsc;
+        sw.ve = 0;
+      }
+      pintarUno(sw);
+    }
+    if (activos) rafId = requestAnimationFrame(cuadro);
+    else ultimoT = 0;
+  };
+
+  const despertar = () => { if (!rafId) { ultimoT = 0; rafId = requestAnimationFrame(cuadro); } };
+
+  for (const lbl of $$("label.casilla")) {
+    const input = $('input[type="checkbox"]', lbl);
+    if (!input || input.hasAttribute("data-usar")) continue;
+
+    lbl.classList.add("casilla-sw");
+    let caja = $(".sw-interruptor", lbl);
+    if (!caja) {
+      caja = crearDomSwitch(lbl.classList.contains("chica"));
+      lbl.append(caja);
+    }
+    const pulgar = $(".sw-pulgar", caja);
+    if (!pulgar) continue;
+    const recorrido = caja.classList.contains("sw-grande") ? 18 : caja.classList.contains("sw-chico") ? 12 : 14;
+
+    const sw = {
+      input, caja, pulgar, recorrido,
+      x: input.checked ? recorrido : 0, metaX: input.checked ? recorrido : 0, vx: 0,
+      esc: 1, metaEsc: 1, ve: 0, arrastrando: false, movido: false, ignorarClic: false, iniX: 0, baseX: 0,
+      sincronizar(animar) {
+        const dest = input.checked ? this.recorrido : 0;
+        this.metaX = dest;
+        if (!animar) { this.x = dest; this.vx = 0; }
+        pintarUno(this);
+        if (animar) despertar();
+      },
+    };
+    INTERRUPTORES.push(sw);
+
+    const presionar = (on) => {
+      caja.classList.toggle("pulsado", on);
+      sw.metaEsc = on ? 1.18 : 1;
+      if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) { sw.esc = sw.metaEsc; sw.ve = 0; }
+      else despertar();
+      pintarUno(sw);
+    };
+
+    input.addEventListener("change", () => sw.sincronizar(!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches));
+
+    lbl.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || input.disabled) return;
+      sw.arrastrando = true;
+      sw.movido = false;
+      sw.iniX = e.clientX;
+      sw.baseX = sw.x;
+      presionar(true);
+      lbl.setPointerCapture?.(e.pointerId);
+    });
+    lbl.addEventListener("pointermove", (e) => {
+      if (!sw.arrastrando) return;
+      const dx = e.clientX - sw.iniX;
+      if (Math.abs(dx) > 4) sw.movido = true;
+      if (!sw.movido) return;
+      sw.metaX = Math.max(0, Math.min(sw.recorrido, sw.baseX + dx));
+      despertar();
+    });
+    const soltar = (e, cancelar) => {
+      if (!sw.arrastrando) return;
+      sw.arrastrando = false;
+      presionar(false);
+      if (lbl.hasPointerCapture?.(e.pointerId)) lbl.releasePointerCapture(e.pointerId);
+      if (!sw.movido || cancelar) {
+        sw.metaX = input.checked ? sw.recorrido : 0;
+        despertar();
+        return;
+      }
+      sw.ignorarClic = true;
+      setTimeout(() => { sw.ignorarClic = false; }, 90);
+      const nuevo = sw.metaX >= sw.recorrido / 2;
+      if (nuevo !== input.checked) {
+        input.checked = nuevo;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        sw.sincronizar(true);
+      }
+    };
+    lbl.addEventListener("pointerup", (e) => soltar(e, false));
+    lbl.addEventListener("pointercancel", (e) => soltar(e, true));
+    lbl.addEventListener("lostpointercapture", (e) => soltar(e, true));
+    lbl.addEventListener("click", (e) => {
+      if (sw.ignorarClic) { e.preventDefault(); sw.ignorarClic = false; }
+    });
+  }
+  sincronizarInterruptores(false);
+}
+
+function seguirLuz(el) {
+  if (!el) return;
+  let caja = null, px = 0, py = 0, raf = 0, ultimo = Number.NaN;
+  const pintar = () => {
+    raf = 0;
+    if (!caja) return;
+    const ang = (Math.atan2(caja.left + caja.width / 2 - px, py - (caja.top + caja.height / 2)) * 180) / Math.PI;
+    if (Math.abs(ang - ultimo) < 1) return;
+    ultimo = ang;
+    el.style.setProperty("--luz", `${ang.toFixed(1)}deg`);
+  };
+  el.addEventListener("pointerenter", () => { caja = el.getBoundingClientRect(); }, { passive: true });
+  el.addEventListener("pointermove", (e) => {
+    caja ??= el.getBoundingClientRect();
+    px = e.clientX;
+    py = e.clientY;
+    raf ||= requestAnimationFrame(pintar);
+  }, { passive: true });
+  el.addEventListener("pointerleave", () => {
+    cancelAnimationFrame(raf);
+    raf = 0;
+    caja = null;
+    ultimo = Number.NaN;
+    el.style.removeProperty("--luz");
+  }, { passive: true });
+}
+
+// ------------------------------------------------------------------ vidrio líquido refractante (controles sobre el mapa)
+const MAPAS_VIDRIO = new Map();
+let vidriosSeq = 0;
+
+function perfilBisel(ior = 1.5) {
+  const N = 256;
+  const lut = new Float32Array(N);
+  const borde = Math.tan(Math.PI / 2 - Math.asin(1 / ior));
+  lut[0] = 1;
+  for (let i = 1; i < N; i++) {
+    const u = 1 - i / (N - 1);
+    const pend = (u * u * u) / Math.pow(1 - u * u * u * u, 0.75);
+    const inc = Math.atan(pend);
+    lut[i] = Math.tan(inc - Math.asin(Math.sin(inc) / ior)) / borde;
+  }
+  return lut;
+}
+
+function mapaDesplazamiento(w, h, radio, bisel, prof, lupa) {
+  const k = `${w}x${h}_${radio}_${bisel}_${prof}_${lupa}`;
+  if (MAPAS_VIDRIO.has(k)) return MAPAS_VIDRIO.get(k);
+  const mw = Math.max(1, Math.round(w)), mh = Math.max(1, Math.round(h));
+  const hw = mw / 2, hh = mh / 2, r = Math.min(radio, hw, hh);
+  const bev = Math.max(0.001, Math.min(bisel, hw, hh));
+  const zoom = 1 - 1 / Math.max(1, lupa);
+  const max = Math.max(1, prof + Math.max(hw, hh) * zoom);
+  const lut = perfilBisel();
+  const c = document.createElement("canvas");
+  c.width = mw;
+  c.height = mh;
+  const ctx = c.getContext("2d");
+  const img = ctx.createImageData(mw, mh);
+  const d = img.data;
+
+  for (let y = 0; y < mh; y++) {
+    const py = y + 0.5 - hh, ay = Math.abs(py) - (hh - r), sy = py < 0 ? -1 : 1;
+    for (let x = 0; x < mw; x++) {
+      const px = x + 0.5 - hw, ax = Math.abs(px) - (hw - r), sx = px < 0 ? -1 : 1;
+      let dentro, nx = 0, ny = 0;
+      if (ax > 0 && ay > 0) {
+        const esq = Math.hypot(ax, ay);
+        dentro = r - esq;
+        nx = (ax / esq) * sx;
+        ny = (ay / esq) * sy;
+      } else if (ax > ay) { dentro = r - ax; nx = sx; }
+      else { dentro = r - ay; ny = sy; }
+
+      let dx = -px * zoom, dy = -py * zoom;
+      if (dentro < -2) dx = dy = 0;
+      else if (dentro < bev) {
+        const curva = prof * lut[((Math.max(0, dentro) / bev) * 255) | 0];
+        dx -= nx * curva;
+        dy -= ny * curva;
+      }
+      const idx = (y * mw + x) * 4;
+      d[idx] = 128 + (127 * dx) / max;
+      d[idx + 1] = 128 + (127 * dy) / max;
+      d[idx + 2] = 128;
+      d[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const res = { url: c.toDataURL("image/png"), scale: (max * 255) / 127, w: mw, h: mh };
+  MAPAS_VIDRIO.set(k, res);
+  return res;
+}
+
+function montarVidrioLiquido(host, { pildora = false, bisel = 10, prof = 12, lupa = 1.06, desenfoque = 3, saturar = 1.45 } = {}) {
+  if (!host || host.querySelector(":scope > .vl-capa")) return;
+  const capa = document.createElement("div");
+  capa.className = "vl-capa";
+  capa.setAttribute("aria-hidden", "true");
+  host.prepend(capa);
+  const id = `vl-${++vidriosSeq}`;
+  const soportaSvg = /\bChrome\/\d+/.test(navigator.userAgent);
+  const actualizar = () => {
+    const r = host.getBoundingClientRect();
+    const w = Math.round(r.width), h = Math.round(r.height);
+    if (!w || !h) return;
+    if (!soportaSvg) {
+      capa.style.backdropFilter = `blur(${Math.max(desenfoque, 10)}px) saturate(${saturar})`;
+      return;
+    }
+    const radio = pildora ? Math.min(w, h) / 2 : 8;
+    const m = mapaDesplazamiento(w, h, radio, bisel, prof, lupa);
+    let svg = capa.querySelector("svg");
+    if (!svg) {
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("aria-hidden", "true");
+      capa.append(svg);
+    }
+    svg.innerHTML = `<filter id="${id}" x="0" y="0" width="${m.w}" height="${m.h}" filterUnits="userSpaceOnUse" primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feImage href="${m.url}" x="0" y="0" width="${m.w}" height="${m.h}" preserveAspectRatio="none" result="m"/><feDisplacementMap in="SourceGraphic" in2="m" scale="${m.scale.toFixed(2)}" xChannelSelector="R" yChannelSelector="G"/></filter>`;
+    capa.style.backdropFilter = `url(#${id}) blur(${desenfoque}px) saturate(${saturar})`;
+  };
+  new ResizeObserver(actualizar).observe(host);
+  requestAnimationFrame(actualizar);
+  seguirLuz(host);
+}
+
 // ------------------------------------------------------------------ arranque
 (async function arrancar() {
   aplicarIdioma(idiomaInicial(null));
+  iniciarDesplegables();
+  iniciarTooltips();
+  iniciarInterruptores();
+  $$("#b-generar, .segmentos button, .capas button").forEach(seguirLuz);
+  montarVidrioLiquido($(".capas"), { pildora: true, bisel: 10, prof: 11, lupa: 1.04, desenfoque: 2.5, saturar: 1.45 });
+  montarVidrioLiquido($(".leaflet-bar"), { pildora: false, bisel: 8, prof: 9, lupa: 1.04, desenfoque: 2.5, saturar: 1.45 });
   $$("[data-buscador]").forEach(prepararBuscador);
   iniciarMarco();
   conectarEventos();

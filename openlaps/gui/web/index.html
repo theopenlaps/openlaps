@@ -20,9 +20,12 @@
     <ul class="resultados" role="listbox" hidden></ul>
   </div>
   <div class="top-acciones">
-    <button class="boton fantasma" id="b-guiado" data-i18n="top.guiado" data-i18n-title="top.guiado_title"></button>
-    <button class="boton fantasma" id="b-pistas"><span data-i18n="top.pistas"></span> <span class="contador" id="n-pistas" hidden></span></button>
-    <button class="boton fantasma icono" id="b-ajustes" data-i18n-aria="top.ajustes" data-i18n-title="top.ajustes">
+    <button class="boton pista-btn" id="b-pistas" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 7.5 12 12l9-4.5L12 3Z"/><path d="M3 12.5 12 17l9-4.5"/><path d="M3 17.5 12 22l9-4.5"/></svg>
+      <span data-i18n="top.pistas"></span>
+      <span class="contador" id="n-pistas" hidden></span>
+    </button>
+    <button class="boton fantasma icono" id="b-ajustes" aria-expanded="false" data-i18n-aria="top.ajustes" data-i18n-title="top.ajustes">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
   </div>
@@ -62,7 +65,11 @@
       <input type="range" id="alto-a" min="200" max="8000" step="50" data-campo="alto">
     </div>
     <p class="ayuda zona-area" data-mostrar="zona-area"></p>
-    <label class="casilla casilla-vivo"><input type="checkbox" data-campo="vivoModo"> <span data-i18n="campo.vivo"></span></label>
+    <label class="casilla casilla-vivo">
+      <input type="checkbox" data-campo="vivoModo">
+      <span class="vivo-txt"><b data-i18n="campo.vivo_t"></b><small data-i18n="campo.vivo_d"></small></span>
+      <div class="sw-interruptor sw-grande" aria-hidden="true"><div class="sw-carril"></div><div class="sw-pulgar"><div class="sw-ficha"></div></div></div>
+    </label>
     <p class="ayuda" data-i18n="ayuda.zona"></p>
   </div>
 
@@ -167,12 +174,12 @@
     <p class="elegido" data-mostrar="lugar"></p>
     <div class="ideas">
       <span class="etiqueta" data-i18n="asis.ideas"></span>
-      <button class="chip" data-ir="37.8008,-122.4095,San Francisco">San Francisco</button>
-      <button class="chip" data-ir="43.9330,7.1700,Col de Turini">Col de Turini</button>
-      <button class="chip" data-ir="40.1405,-3.4226,Chinchón">Chinchón</button>
-      <button class="chip" data-ir="43.7384,7.4246,Monaco">Monaco</button>
-      <button class="chip" data-ir="45.9850,9.2600,Bellagio">Bellagio</button>
-      <button class="chip" data-ir="18.9853,-99.0995,Tepoztlán">Tepoztlán</button>
+      <button class="chip" data-ir="19.4326,-99.1332,Ciudad de México">Ciudad de México</button>
+      <button class="chip" data-ir="40.4168,-3.7038,Madrid">Madrid</button>
+      <button class="chip" data-ir="48.8566,2.3522,París">París</button>
+      <button class="chip" data-ir="51.5074,-0.1278,Londres">Londres</button>
+      <button class="chip" data-ir="41.9028,12.4964,Roma">Roma</button>
+      <button class="chip" data-ir="35.6762,139.6503,Tokio">Tokio</button>
     </div>
   </section>
 
@@ -196,7 +203,11 @@
       <input type="range" id="alto-b" min="200" max="8000" step="50" data-campo="alto">
     </div>
     <p class="ayuda zona-area" data-mostrar="zona-area"></p>
-    <label class="casilla casilla-vivo"><input type="checkbox" data-campo="vivoModo"> <span data-i18n="campo.vivo"></span></label>
+    <label class="casilla casilla-vivo">
+      <input type="checkbox" data-campo="vivoModo">
+      <span class="vivo-txt"><b data-i18n="campo.vivo_t"></b><small data-i18n="campo.vivo_d"></small></span>
+      <div class="sw-interruptor sw-grande" aria-hidden="true"><div class="sw-carril"></div><div class="sw-pulgar"><div class="sw-ficha"></div></div></div>
+    </label>
       <p class="ayuda" data-i18n="asis.d3z2"></p>
     </div>
     <div data-solo="ruta">
@@ -254,7 +265,10 @@
         <button class="enlace" data-accion="registro-borrador" id="ve-registro" data-i18n="accion.ver_registro"></button>
       </div>
     </div>
-    <button class="boton chico flotante" id="b-ampliar" data-accion="ampliar-borrador" data-i18n="vista.ampliar" hidden></button>
+    <div class="vista-flotantes">
+      <button class="boton chico" id="b-actualizar-3d" data-accion="borrador" data-i18n="vista.actualizar" data-i18n-title="vista.desfasada" hidden></button>
+      <button class="boton chico" id="b-ampliar" data-accion="ampliar-borrador" data-i18n="vista.ampliar" hidden></button>
+    </div>
   </div>
 </section>
 
@@ -318,28 +332,49 @@
 
 <aside class="cajon" id="cajon-ajustes" hidden data-i18n-aria="top.ajustes">
   <div class="cajon-cabeza"><h2 data-i18n="top.ajustes"></h2><button class="cerrar" data-accion="cerrar-cajon" data-i18n-aria="res.cerrar">×</button></div>
-  <div class="campo">
-    <label class="etiqueta" for="aj-idioma" data-i18n="aj.idioma"></label>
-    <select id="aj-idioma"><option value="es">Español</option><option value="en">English</option></select>
+
+  <div class="aj-grupo">
+    <div class="campo">
+      <label class="etiqueta" for="aj-idioma" data-i18n="aj.idioma"></label>
+      <select id="aj-idioma"><option value="es">Español</option><option value="en">English</option></select>
+    </div>
+    <hr class="aj-sep">
+    <div class="aj-fila">
+      <div class="aj-fila-txt">
+        <span class="etiqueta" data-i18n="aj.asistente"></span>
+        <p class="ayuda" data-i18n="aj.asistente_d"></p>
+      </div>
+      <button class="boton chico" data-accion="abrir-asistente" data-i18n="aj.abrir_asistente"></button>
+    </div>
   </div>
-  <div class="campo">
-    <span class="etiqueta" data-i18n="aj.salida"></span>
-    <p class="ruta-archivo" id="aj-salida"></p>
-    <div class="fila-botones"><button class="boton chico" data-accion="cambiar-salida" data-i18n="aj.cambiar"></button><button class="boton chico" data-accion="abrir-salida" data-i18n="aj.abrir"></button></div>
+
+  <div class="aj-grupo">
+    <div class="campo">
+      <span class="etiqueta" data-i18n="aj.salida"></span>
+      <p class="ruta-archivo" id="aj-salida"></p>
+      <div class="fila-botones">
+        <button class="boton chico" data-accion="cambiar-salida" data-i18n="aj.cambiar"></button>
+        <button class="boton chico" data-accion="abrir-salida" data-i18n="aj.abrir"></button>
+      </div>
+    </div>
+    <hr class="aj-sep">
+    <div class="campo">
+      <div class="etiqueta"><span data-i18n="aj.ac"></span><span class="aj-estado" id="aj-ac-estado"></span></div>
+      <p class="ruta-archivo" id="aj-ac"></p>
+      <div class="fila-botones"><button class="boton chico" data-accion="cambiar-ac" data-i18n="aj.elegir_carpeta"></button></div>
+    </div>
   </div>
-  <div class="campo">
-    <span class="etiqueta" data-i18n="aj.ac"></span>
-    <p class="ruta-archivo" id="aj-ac"></p>
-    <div class="fila-botones"><button class="boton chico" data-accion="cambiar-ac" data-i18n="aj.elegir_carpeta"></button></div>
-  </div>
-  <div class="campo">
-    <span class="etiqueta" data-i18n="aj.asistente"></span>
-    <div class="fila-botones"><button class="boton chico" data-accion="abrir-asistente" data-i18n="aj.abrir_asistente"></button></div>
-  </div>
-  <div class="campo acerca">
-    <span class="etiqueta" data-i18n="aj.acerca"></span>
-    <p>OpenLaps <span id="aj-version"></span> · <span data-i18n="aj.acerca_t"></span></p>
-    <button class="enlace" data-enlace="https://github.com/theopenlaps/openlaps">github.com/theopenlaps/openlaps</button>
+
+  <div class="aj-grupo acerca">
+    <div class="acerca-cabeza">
+      <strong>OpenLaps</strong>
+      <span class="aj-ver" id="aj-version"></span>
+    </div>
+    <p data-i18n="aj.acerca_t"></p>
+    <button class="aj-repo" data-enlace="https://github.com/theopenlaps/openlaps">
+      <span>github.com/theopenlaps/openlaps</span>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4h6v6M12 4L4.5 11.5"/></svg>
+    </button>
   </div>
 </aside>
 
