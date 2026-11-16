@@ -866,7 +866,7 @@ function mostrarResultado(p) {
 
 async function jugarAC(nombre, salidaMsg) {
   const r = await api("jugar_ac", nombre);
-  const txt = r?.error || r?.mensaje || "";
+  const txt = [r?.error || r?.mensaje || "", r?.aviso || ""].filter(Boolean).join(" ");
   if (salidaMsg) { salidaMsg.textContent = txt; salidaMsg.className = `ayuda ${r?.error ? "res-mal" : "res-ok"}`; }
   else aviso(txt, { mal: !!r?.error, ms: 8000 });
   refrescarPistas();
@@ -1030,6 +1030,7 @@ const ACCIONES = {
   "manejar-resultado": () => S.ultimaPista && abrirVisor(S.ultimaPista.glb),
   "instalar-resultado": () => S.ultimaPista && instalarAC(S.ultimaPista.nombre, $("#res-mensaje")),
   "jugar-resultado": () => S.ultimaPista && jugarAC(S.ultimaPista.nombre, $("#res-mensaje")),
+  "abrir-cesium": () => api("abrir_enlace", "https://ion.cesium.com/signup"),
   "vivo-conducir": () => {
     if (!S.vivo) return;
     const f = $("#visor-iframe");
@@ -1118,6 +1119,8 @@ document.addEventListener("input", (e) => {
     }
     if (k === "ac") api("guardar_ajustes", { exportar_ac: S.ac });
     if (k === "jugar") api("guardar_ajustes", { jugar_al_terminar: S.jugar });
+    if (k === "google3d") api("guardar_ajustes", { google3d: S.google3d });
+    if (k === "tokenCesium") api("guardar_ajustes", { token_cesium: S.tokenCesium.trim() });
     if (k === "vivoModo") dibujarZona();
     if (k === "region") pedirRegion();
     sync();
@@ -1228,6 +1231,8 @@ $(".bordes").addEventListener("mousedown", (e) => {
   S.calidad = a.calidad || "normal";
   S.ac = a.exportar_ac !== false;
   S.jugar = !!a.jugar_al_terminar;
+  S.google3d = !!a.google3d;
+  S.tokenCesium = a.token_cesium || "";
   S.maxKm2 = r?.max_km2 || 24;
   S.csp = !!r?.csp;
   S.autoBorrador = a.borrador_auto !== false;

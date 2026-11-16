@@ -17,6 +17,7 @@ from .. import __version__, URL
 from .. import regions
 from . import ajustes, assetto, servidor
 from .envivo import EnVivo
+from .google3d import Google3D
 from .generador import MAX_KM2, Trabajo, argumentos, nombre_valido
 from .precarga import Precarga, _clave, caja_de
 from .textos import idioma, t
@@ -36,6 +37,7 @@ class Api:
         self._precarga = Precarga()
         self._n = 0             # id de trabajo: la interfaz descarta los eventos de uno ya sustituido
         self._vivo = EnVivo(self._emitir)
+        self._g3d = Google3D()
 
     # ------------------------------------------------------------------ estado
     def iniciar(self):
@@ -234,7 +236,13 @@ class Api:
             origen = ajustes.salida() / "assetto_corsa" / nombre
             if assetto.estado(ac, origen) != "enlazada":
                 assetto.instalar(ac, origen)
-            return {"ok": True, "mensaje": assetto.jugar(ac, nombre)}
+            # edificios de Google 3D (opcional): con la opción apagada se quita el script y la pista queda tal cual
+            aviso = self._g3d.preparar(origen, ajustes.salida() / f"{nombre}.glb", bool(a.get("google3d")),
+                                       str(a.get("token_cesium") or "").strip())
+            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre)}
+            if aviso:
+                r["aviso"] = t(aviso)
+            return r
         except RuntimeError as e:
             return {"error": str(e)}
 
@@ -266,6 +274,14 @@ class Api:
     def vivo_detener(self):
         return self._vivo.detener()
 
+    def google3d_estado(self):
+        return self._g3d.estado()
+
+    def detener_todo(self):
+        self.cancelar()
+        self._vivo.detener()
+        self._g3d.detener()
+
     def vivo_jugar(self):
         """Abre AC en la pista semilla del modo en vivo (ya instalada por el servicio)."""
         a = ajustes.cargar()
@@ -275,7 +291,15 @@ class Api:
         if not self._vivo.nombre:
             return {"error": t("faltan_datos")}
         try:
-            return {"ok": True, "mensaje": assetto.jugar(ac, f"{self._vivo.nombre}_vivo")}
+            nombre = f"{self._vivo.nombre}_vivo"
+            # edificios de Google 3D (opcional): sobre la semilla ya instalada en AC, con los pedazos como calzada
+            aviso = self._g3d.preparar(Path(ac) / "content" / "tracks" / nombre, None, bool(a.get("google3d")),
+                                       str(a.get("token_cesium") or "").strip(),
+                                       vivo=ajustes.salida() / "vivo" / self._vivo.nombre)
+            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre)}
+            if aviso:
+                r["aviso"] = t(aviso)
+            return r
         except RuntimeError as e:
             return {"error": str(e)}
 
@@ -335,8 +359,7 @@ def main(argv=None):
                 time.sleep(3600)
         except KeyboardInterrupt:
             pass
-        api.cancelar()
-        api.vivo_detener()
+        api.detener_todo()
         return 0
 
     try:
@@ -356,7 +379,7 @@ def main(argv=None):
         shadow=True, background_color="#15171a", text_select=False)
     api._ventana = ventana
     api._marco = Marco(ventana)
-    ventana.events.closing += lambda: (api.cancelar(), api.vivo_detener())
+    ventana.events.closing += lambda: api.detener_todo()
     ventana.events.shown += lambda: api._marco.preparar()
     webview.start(gui="edgechromium", debug=bool(os.environ.get("OPENLAPS_DEBUG")),
                   private_mode=False, storage_path=str(ajustes.DATOS / "webview"),

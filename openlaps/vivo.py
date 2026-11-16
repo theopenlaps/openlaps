@@ -787,8 +787,9 @@ class Vivo:
             self.en_curso[k] = self.pool.submit(_generar, k[0], k[1], els, self.carpeta, partes, ext)
 
     # ------------------------------------------------------------------ salida y ruta
-    def _vias(self, rect):
-        """Grafo de calles conducibles de OSM en `rect`: posiciones locales y vecinos."""
+    def _vias(self, rect, sin_tuneles=False):
+        """Grafo de calles conducibles de OSM en `rect`: posiciones locales y vecinos. `sin_tuneles`: para la ruta de
+        prueba del piloto automático (en un túnel no hay nada que ver ni que probar)."""
         from . import config as C
         xy, vec, clase = {}, {}, {}
         for el in self.osm.elementos(rect):
@@ -799,6 +800,8 @@ class Vivo:
                 continue
             # túneles: solo los que de verdad se construyen (misma regla que roads.RoadNetwork)
             if t.get("tunnel") not in (None, "no", "building_passage"):
+                if sin_tuneles:
+                    continue
                 modo = getattr(self.args, "tuneles", "principales")
                 omitido = (t.get("highway") in C.TUNNEL_SKIP_CLASSES or t.get("service") in C.TUNNEL_SKIP_SERVICE
                            or modo == "ninguno"
@@ -915,7 +918,7 @@ class Vivo:
             rect = (x - 560, y - 560, x + 560, y + 560)
             if not self.osm.asegurar(rect, espera=espera):
                 break               # sin datos todavía más allá: se devuelve lo que hay (se puede volver a pedir)
-            xy, vec, clase = self._vias(rect)
+            xy, vec, clase = self._vias(rect, sin_tuneles=True)
             if actual is None:
                 actual = min(xy, key=lambda n: math.hypot(xy[n][0] - x, xy[n][1] - y)
                              - 3.0 * (math.cos(math.atan2(xy[n][1] - y, xy[n][0] - x) - rumbo) > 0))

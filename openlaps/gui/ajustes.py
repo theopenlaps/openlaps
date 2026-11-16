@@ -46,6 +46,8 @@ DEFECTO = {
     "borrador_auto": True,  # rehacer el borrador 3D al dejar quieta la zona
     "ver_osm": True,      # resaltar en el mapa lo que se va a construir
     "borrador_zona": None,  # zona del último borrador 3D (para no rehacerlo al abrir)
+    "google3d": False,    # edificios de Google 3D en AC (vía Cesium ion); apagado: los de OpenLaps
+    "token_cesium": "",   # token de Cesium ion para lo anterior (cuenta gratis)
 }
 
 

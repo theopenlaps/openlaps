@@ -32,6 +32,8 @@ classifiers = [
 dev = ["pytest>=8", "ruff>=0.6"]
 # alturas de edificios de Overture Maps (EE. UU.); sin él la pista se genera sin esas alturas
 overture = ["pyarrow>=17"]
+# edificios de Google 3D en AC (opcional, vía Cesium ion): las teselas de Google vienen comprimidas con Draco
+google3d = ["DracoPy>=1.4"]
 # la app de escritorio para Windows (python -m openlaps.gui u openlaps-gui)
 gui = ["pywebview>=6.2"]
 
@@ -52,7 +54,7 @@ version = { attr = "openlaps.__version__" }
 include = ["openlaps*"]
 
 [tool.setuptools.package-data]
-"openlaps" = ["vivo_ac.lua"]
+"openlaps" = ["vivo_ac.lua", "google3d_ac.lua"]
 "openlaps.gui" = ["web/*", "openlaps.ico"]
 
 [tool.pytest.ini_options]

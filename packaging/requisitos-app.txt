@@ -10,6 +10,8 @@ scipy==1.18.1
 shapely==2.2.0
 # alturas de edificios de Overture Maps (EE. UU.)
 pyarrow==26.0.1
+# edificios de Google 3D en AC (opcional): descomprimir las teselas
+DracoPy==2.2.0
 # la ventana (WebView2 a través de pythonnet)
 pywebview==6.2.1
 pythonnet==3.2.1

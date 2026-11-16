@@ -20,6 +20,10 @@ TEXTOS = {
         "solo_ventana": "Los diálogos de archivos solo funcionan en la ventana de OpenLaps.",
         "no_acs": "En esa carpeta no está acs.exe. Elige la carpeta assettocorsa.",
         "ac_no": "No encontré Assetto Corsa. Indica su carpeta en Ajustes.",
+        "google3d_sin_token": "Los edificios de Google 3D necesitan un token de Cesium ion (Opciones avanzadas): "
+                              "esta vez se usan los de OpenLaps.",
+        "google3d_sin_datos": "Esta pista no tiene los datos para los edificios de Google 3D (vuelve a generarla): "
+                              "esta vez se usan los de OpenLaps.",
         "ac_sin_kn5": "Esta pista se generó sin la opción de Assetto Corsa. Vuelve a generarla con esa casilla marcada.",
         "ac_ya": "Ya estaba instalada; se actualiza sola cada vez que la vuelves a generar.",
         "ac_otra": "Ya hay otra pista llamada «{n}» en Assetto Corsa. Genera esta con otro nombre.",
@@ -50,6 +54,10 @@ TEXTOS = {
         "solo_ventana": "File dialogs only work in the OpenLaps window.",
         "no_acs": "acs.exe isn't in that folder. Choose the assettocorsa folder.",
         "ac_no": "Assetto Corsa wasn't found. Set its folder in Settings.",
+        "google3d_sin_token": "Google 3D buildings need a Cesium ion token (Advanced options): using OpenLaps "
+                              "buildings this time.",
+        "google3d_sin_datos": "This track lacks the data for Google 3D buildings (generate it again): using OpenLaps "
+                              "buildings this time.",
         "ac_sin_kn5": "This track was generated without the Assetto Corsa option. Generate it again with that box checked.",
         "ac_ya": "It was already installed; it updates by itself every time you generate it again.",
         "ac_otra": "There's already another track called “{n}” in Assetto Corsa. Generate this one with another name.",
