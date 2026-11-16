@@ -40,7 +40,7 @@ AREA_COLORS = {
 }
 
 
-def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_data=None):
+def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_data=None, extension=None):
     """Genera la escena y la exporta. Modo en vivo (`pedazo` = (xmin, ymin, xmax, ymax), el centro que se conserva):
     usa la proyección `proj` ya fijada (origen común a todos los pedazos), la escena con los materiales ya
     registrados y los datos de OSM ya descargados, no pone muros de límite, salidas ni horizonte y devuelve
@@ -77,7 +77,13 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
             log(f"  aviso: sin {nombre} ({e})")
             return None
 
-    big = bbox.padded(450)
+    # relieve alrededor del área: 300 m, o hasta donde llegue un túnel o un puente que la cruza (modo en vivo:
+    # todos los pedazos que lo tocan tienen que calcular el mismo perfil)
+    pad_relieve = 300.0
+    if extension is not None:
+        ex0, ey0, ex1, ey1 = extension
+        pad_relieve = min(1600.0, max(300.0, proj.xmin - ex0, proj.ymin - ey0, ex1 - proj.xmax, ey1 - proj.ymax) + 80)
+    big = bbox.padded(pad_relieve + 150)
 
     def relieve():
         if args.dem:
@@ -140,7 +146,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     cat = (f_cat.result() if f_cat else None) or []
     ov = (f_ov.result() if f_ov else None) or []
 
-    terr = T.Terrain(proj, dem, lc, dem_is_dtm, res, log=log)
+    terr = T.Terrain(proj, dem, lc, dem_is_dtm, res, pad=pad_relieve, log=log)
 
     # ------------------------------------------------------------ zona urbana
     log("3/7 Edificios y zonas urbanas…")
@@ -196,12 +202,26 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     for r in osm.get("rails", []):
         x, y = proj.to_local([c[0] for c in r["coords"]], [c[1] for c in r["coords"]])
         rails.append({"tags": r["tags"], "xy": np.column_stack([x, y])})
+    plazas = poligonos_plaza(osm, proj)
     rd = roads.build_roads(net, scene, blds_poly_pre, water_poly, urban_poly, log=log, osm_guardrails=has_gr,
-                           ortho=orto, proj=proj, rails=rails)
+                           ortho=orto, proj=proj, rails=rails,
+                           plazas=unary_union([p for p, _ in plazas]) if plazas else None)
+    roads.armonizar_calzadas(scene, log=log)
     keep_out = rd["ground_union"]          # sobre un túnel sí puede haber edificios
     if rd["sidewalks"] is not None and keep_out is not None:
         keep_out = unary_union([keep_out, rd["sidewalks"]])
     blds = B.drop_on_roads(blds, keep_out)
+    # un edificio encima de un puente (huella del Catastro u OSM que cae bajo el tablero) salía plantado en medio
+    # de la calzada del puente
+    puentes = [p for p, e in rd["road_polys"] if e.bridge]
+    if puentes:
+        pu = unary_union(puentes)
+        shapely.prepare(pu)
+        antes = len(blds)
+        blds = [b for b in blds if not shapely.intersects(pu, b["poly"])
+                or b["poly"].intersection(pu).area < 0.2 * b["poly"].area]
+        if len(blds) < antes:
+            log(f"  {antes - len(blds)} edificios encima de puentes quitados")
     blds_poly = unary_union([b["poly"] for b in blds]) if blds else None
 
     # ------------------------------------------------------------ modo de juego
@@ -226,7 +246,10 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     log("5/7 Terreno: tallado y textura…")
     terr.build_grid()
     terr.flatten_urban(rd["carve"], urban_fn)
+    terr.Z_pre = terr.Z.copy()          # relieve antes de tallar las calles (altura de las plazas)
     terr.carve(rd["carve"], rd["tunnel"])
+    terr.bajo_calles(rd["carve"], unary_union([p for p, e in rd["road_polys"] if not (e.bridge or e.tunnel)])
+                     if rd["road_polys"] else None)
     terr.cubrir_tuneles(rd.get("tunnel_poly"), rd.get("tunnel_bocas", []), rd["tunnel"], scene)
     sin_puente = [p for p, e in rd["road_polys"] if not e.bridge]
     agua = AG.Agua(cob, terr, unary_union(sin_puente) if sin_puente else None, log=log)
@@ -244,7 +267,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     if pedazo is not None:
         terr.solo = pedazo
     terr.build_mesh(scene, painter, tile_m=args.tesela, mpp=mpp)
-    plazas_peatonales(scene, osm, proj, terr, rd["road_polys"], blds_poly, log=log)
+    plazas_peatonales(scene, plazas, terr, rd["road_polys"], blds_poly, log=log)
     agua.construir(scene)
 
     m = BR.build(scene, osm.get("barriers", []), proj, terr, rect, rd["road_union"])
@@ -264,6 +287,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     nl = X.street_lamps(net, scene)
     sg = X.signs(net, scene)
     RS.place_signs(net, scene, osm, proj, log=log)
+    roads.seguir_realce(scene, log=log)
     log(f"  detalles: orillas en {ne} tramos, desgaste en {nw}, {nl} arbotantes, señales: "
         + ", ".join(f"{k} {v}" for k, v in sg.items()))
     excl = [rd["road_union"].buffer(2.0)] if rd["road_union"] is not None else []
@@ -317,7 +341,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     extras = {"nombre": name, "centro": [proj.lat0, proj.lon0], "modo": args.modo}
     if route is not None:
         extras["ruta"] = export_glb.to_yup(route).round(2).tolist()
-    jx = [(net.node_xy[n][0], net.node_xy[n][1], net.node_z[n], len(j["inc"])) for n, j in net.junctions.items() if net.node_inside(n)]
+    jx = [(net.node_xy[n][0], net.node_xy[n][1], net.node_z[n], len(j["inc"])) for n, j in net.junctions.items() if net.node_inside(n) and not j.get("codo")]
     extras["cruces"] = [[round(float(x), 2), round(float(z), 2), round(float(-y), 2), k] for x, y, z, k in jx]
     glb = os.path.join(args.salida, f"{name}.glb")
     size = export_glb.write(scene, glb, extras)
@@ -398,12 +422,8 @@ def preparar_escena(args, log=print):
 
 
 # --------------------------------------------------------------------------------------
-def plazas_peatonales(scene, osm, proj, terr, road_polys, blds_poly, log=print, paso=2.0):
-    """Plazas y áreas peatonales (highway=pedestrian + area=yes): una losa pavimentada que sigue el relieve.
-    Sin esto quedaban como terreno con la ortofoto, que de cerca parece un campo de tierra. Va 4 cm por encima
-    del terreno y sin colisión propia (se choca con el terreno, que ya está debajo)."""
-    from scipy.spatial import Delaunay
-
+def poligonos_plaza(osm, proj):
+    """Plazas y áreas peatonales (highway=pedestrian + area=yes) como (polígono, material)."""
     polis = []
     for a in osm["areas"]:
         t = a["tags"]
@@ -418,44 +438,129 @@ def plazas_peatonales(scene, osm, proj, terr, road_polys, blds_poly, log=print, 
             pg = Polygon(list(zip(x, y)), huecos).buffer(0)
         except Exception:  # noqa: BLE001
             continue
+        if pg.is_empty:
+            continue
         mat = C.SURFACE_MAP.get(t.get("surface"), "banqueta")
         if mat in ("asfalto", "terraceria"):
             mat = "banqueta"
         polis.append((pg, mat))
+    return polis
+
+
+def plazas_peatonales(scene, polis, terr, road_polys, blds_poly, log=print, paso=2.0):
+    """Plazas y áreas peatonales: una losa pavimentada que sigue el relieve. Sin esto quedaban como terreno con la
+    ortofoto, que de cerca parece un campo de tierra.
+
+    - Triangulada con el contorno exacto (earcut): con Delaunay y descarte por centroide el borde salía en dientes.
+    - Su altura es la del relieve antes de tallar las calles (`terr.Z_pre`): con la del terreno tallado se hundía
+      junto a cada calle y la banqueta de al lado dejaba ver un hueco con su bordillo estirado.
+    - Lleva un faldón de 0.6 m todo alrededor (tapa el hueco con el terreno o la calle de al lado) y su propia
+      física (va unos centímetros por encima del terreno)."""
+    from .roads import triangulate_polygon
     if not polis:
         return
-    quitar = unary_union([p for p, _ in road_polys] + ([blds_poly.buffer(0.2)] if blds_poly is not None else []))
+    quitar = unary_union([p for p, e in road_polys if not (e.bridge or e.tunnel)]
+                         + ([blds_poly.buffer(0.2)] if blds_poly is not None else []))
+    Zp = getattr(terr, "Z_pre", None)
+
+    def altura(x, y):
+        if Zp is None:
+            return terr.height(x, y)
+        from scipy.ndimage import map_coordinates
+        c = (np.asarray(x) - terr.gx[0]) / (terr.gx[1] - terr.gx[0])
+        r = (np.asarray(y) - terr.gy[0]) / (terr.gy[1] - terr.gy[0])
+        return np.maximum(map_coordinates(Zp, [r, c], order=1, mode="nearest"), terr.height(x, y))
+
+    # el relieve no casa con la calle o la banqueta que toca la plaza (su perfil va suavizado): quedaba un escalón
+    # de hasta 28 cm en el borde. Corrección = (altura de lo que toca - relieve) en el borde, que se desvanece hacia
+    # dentro (a ~15 m ya casi no cuenta)
+    # (el contorno de la losa de verdad: la plaza de OSM menos las calles, que es donde toca con ellas)
+    contorno = unary_union([pg.difference(quitar).boundary for pg, _ in polis]).buffer(1.0)
+    ref = [p.pos for k, ps in scene.pieces.items() if k[0] in ("calzada", "banqueta") and k[2] for p in ps]
+    corr = None
+    if ref:
+        ref = np.vstack(ref)
+        ref = ref[shapely.contains_xy(contorno, ref[:, 0], ref[:, 1])]
+        if len(ref):
+            from scipy.spatial import cKDTree
+            delta = ref[:, 2] - (altura(ref[:, 0], ref[:, 1]) + 0.04)
+            ok = np.abs(delta) < 1.5                      # un puente o un túnel cerca no cuenta
+            ref, delta = ref[ok], delta[ok]
+            if len(ref):
+                arbol = cKDTree(ref[:, :2])
+
+                def corr(x, y):
+                    d, ii = arbol.query(np.c_[x, y], k=min(8, len(ref)), distance_upper_bound=30.0)
+                    d, ii = np.atleast_2d(d), np.atleast_2d(ii)
+                    w = np.where(np.isfinite(d), 1.0 / (d ** 2 + 0.5), 0.0)
+                    dd = delta[np.minimum(ii, len(delta) - 1)]
+                    c = (w * dd).sum(1) / (w.sum(1) + 1.0 / 225.0)
+                    # pegada a una calle, nunca por debajo de ella (un borde que baja es un golpe al entrar)
+                    pegado = np.where(d < 1.5, dd, -np.inf).max(1)
+                    return np.maximum(c, pegado)
+
+    def altura_plaza(x, y):
+        z = altura(x, y) + 0.04
+        if corr is None:
+            return z
+        # bajar hacia una calle más baja, sí, pero nunca por debajo del terreno (asomaba entre los triángulos)
+        return np.maximum(z + corr(x, y), terr.height(x, y) + 0.04)
+
     n_tri, area = 0, 0.0
     for pg, mat in polis:
-        g = pg.difference(quitar)
+        g = pg.difference(quitar).buffer(-0.05).buffer(0.05)
         for p in getattr(g, "geoms", [g]):
             if p.geom_type != "Polygon" or p.area < 4.0:
                 continue
-            borde = []
-            for anillo in [p.exterior, *p.interiors]:
-                largo = anillo.length
-                borde += [anillo.interpolate(d).coords[0] for d in np.arange(0, largo, paso)]
+            try:
+                v, f = triangulate_polygon(p, paso)
+            except Exception:  # noqa: BLE001
+                continue
+            if not len(f):
+                continue
+            # puntos interiores para que la losa siga el relieve (earcut solo usa el contorno)
             x0, y0, x1, y1 = p.bounds
             gx, gy = np.meshgrid(np.arange(x0 + paso / 2, x1, paso), np.arange(y0 + paso / 2, y1, paso))
-            dentro = shapely.contains_xy(p.buffer(-paso * 0.3), gx.ravel(), gy.ravel())
-            pts = np.vstack([np.array(borde), np.c_[gx.ravel()[dentro], gy.ravel()[dentro]]])
-            if len(pts) < 3:
-                continue
-            tri = Delaunay(pts).simplices
-            cen = pts[tri].mean(axis=1)
-            tri = tri[shapely.contains_xy(p, cen[:, 0], cen[:, 1])]
-            if not len(tri):
-                continue
-            z = terr.height(pts[:, 0], pts[:, 1]) + 0.04
-            pos = np.c_[pts, z]
-            # caras hacia arriba (antihorario visto desde arriba)
-            v = np.cross(pos[tri[:, 1]] - pos[tri[:, 0]], pos[tri[:, 2]] - pos[tri[:, 0]])
-            tri[v[:, 2] < 0] = tri[v[:, 2] < 0][:, ::-1]
+            interior = shapely.contains_xy(p.buffer(-paso * 0.5), gx.ravel(), gy.ravel())
+            if interior.any():
+                from scipy.spatial import Delaunay
+                pts = np.vstack([v, np.c_[gx.ravel()[interior], gy.ravel()[interior]]])
+                tri = Delaunay(pts).simplices
+                cen = pts[tri].mean(axis=1)
+                tri = tri[shapely.contains_xy(p, cen[:, 0], cen[:, 1])]
+                # si Delaunay se come parte del contorno (polígonos muy cóncavos), earcut tal cual
+                if abs(_area_tris(pts, tri) - p.area) < 0.01 * p.area + 0.5:
+                    v, f = pts, tri
+            z = altura_plaza(v[:, 0], v[:, 1])
+            pos = np.c_[v, z]
+            cara = np.cross(pos[f[:, 1]] - pos[f[:, 0]], pos[f[:, 2]] - pos[f[:, 0]])
+            f = f.copy()
+            f[cara[:, 2] < 0] = f[cara[:, 2] < 0][:, ::-1]
             escala = 3.0 if mat == "banqueta" else 2.0
-            scene.add("banqueta", mat, pos, pts / escala, tri)
-            n_tri += len(tri)
+            scene.add("banqueta", mat, pos, v / escala, f, phys="PAVEMENT")
+            # faldón: del borde de la losa 0.6 m hacia abajo
+            for anillo in [p.exterior, *p.interiors]:
+                c = np.asarray(shapely.segmentize(anillo, paso).coords)[:, :2]
+                zc = altura_plaza(c[:, 0], c[:, 1])
+                n = len(c)
+                top = np.c_[c, zc]
+                bot = np.c_[c, zc - 0.6]
+                fp = np.vstack([top, bot])
+                i = np.arange(n - 1)
+                caras = np.concatenate([np.c_[i, i + n, i + 1], np.c_[i + 1, i + n, i + n + 1]])
+                caras2 = caras[:, ::-1]
+                d = np.r_[0, np.cumsum(np.linalg.norm(np.diff(c, axis=0), axis=1))]
+                uv = np.r_[np.c_[d / escala, np.zeros(n)], np.c_[d / escala, np.full(n, 0.6 / escala)]]
+                scene.add("banqueta", mat, fp, uv, np.vstack([caras, caras2]))
+            n_tri += len(f)
             area += p.area
     log(f"  plazas peatonales: {len(polis)} áreas, {area:,.0f} m² pavimentados ({n_tri:,} triángulos)")
+
+
+def _area_tris(pts, tri):
+    a, b, c = pts[tri[:, 0]], pts[tri[:, 1]], pts[tri[:, 2]]
+    u, w = b - a, c - a
+    return float(np.abs(u[:, 0] * w[:, 1] - u[:, 1] * w[:, 0]).sum() / 2)
 
 
 def _frame(poly, i):

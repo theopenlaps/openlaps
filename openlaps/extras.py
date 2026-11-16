@@ -186,7 +186,7 @@ def signs(net, scene):
     counts = {"alto": 0, "curva": 0, "velocidad": 0}
     # ALTO en las calles secundarias que llegan a una de mayor jerarquía
     for nid, j in net.junctions.items():
-        if not net.node_inside(nid):
+        if not net.node_inside(nid) or j.get("codo"):
             continue
         top = max(e.prio for e, _ in j["inc"])
         for e, end in j["inc"]:

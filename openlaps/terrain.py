@@ -142,6 +142,23 @@ class Terrain:
         z = np.where(affected, znew, z0)
         self.Z = z.reshape(self.Z.shape)
 
+    def bajo_calles(self, carve_pts, calles, margen=0.2):
+        """Dentro de las calzadas el terreno nunca queda por encima de la calle. El tallado toma la altura de la
+        franja más cercana y, donde se juntan dos (una calle peatonal pegada a la banqueta de otra, más alta),
+        el terreno asomaba por encima del adoquín: los rombos marrones a lo largo de las fachadas."""
+        if calles is None or calles.is_empty or len(carve_pts) == 0:
+            return
+        interior = carve_pts[carve_pts[:, 3] <= 0.8]          # puntos del interior de las calzadas
+        if not len(interior):
+            return
+        GX, GY = np.meshgrid(self.gx, self.gy)
+        dentro = shapely.contains_xy(calles, GX, GY)
+        if not dentro.any():
+            return
+        d, ii = cKDTree(interior[:, :2]).query(np.column_stack([GX[dentro], GY[dentro]]), k=3)
+        zr = interior[ii, 2].min(axis=1)
+        self.Z[dentro] = np.minimum(self.Z[dentro], zr - margen)
+
     def z_plano(self, Zg, x, y):
         """Altura exacta de la malla del terreno (los mismos triángulos que build_mesh) en (x, y)."""
         x, y = np.asarray(x, float), np.asarray(y, float)

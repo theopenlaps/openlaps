@@ -36,7 +36,9 @@ MARGEN = 64.0        # margen con que se genera (se recorta después)
 TESELA_OSM = 1024.0  # teselas de descarga de OSM (Overpass tarda casi lo mismo por 1 km² que por 0.25: menos peticiones)
 TESELA_CAT = 512.0   # teselas del Catastro (el servicio corta las respuestas grandes)
 PAD_OSM = 200.0      # OSM alrededor del pedazo (calles que entran, edificios del borde)
-VERSION = 3          # súbela si cambia el formato de los pedazos: los de caché se regeneran
+EXT_MAX = 1500.0     # hasta dónde se completa un túnel o un puente que sale del pedazo (m)
+_A_PIE = {"footway", "path", "steps", "cycleway", "pedestrian", "bridleway", "corridor", "elevator", "platform"}
+VERSION = 13          # súbela si cambia el formato de los pedazos: los de caché se regeneran
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 VISOR = os.path.join(os.path.dirname(AQUI), "viewer")
@@ -46,6 +48,19 @@ VISOR = os.path.join(os.path.dirname(AQUI), "viewer")
 RANGO = {"motorway": 0, "motorway_link": 1, "trunk": 1, "trunk_link": 2, "primary": 2, "primary_link": 3,
          "secondary": 3, "secondary_link": 4, "tertiary": 4, "tertiary_link": 5, "unclassified": 5,
          "residential": 5, "living_street": 6, "service": 7, "track": 8}
+
+
+def _estructura(el):
+    """Vía de coches en túnel o en puente."""
+    t = el.get("tags") or {}
+    if el.get("type") != "way" or "highway" not in t or t["highway"] in _A_PIE:
+        return False
+    return t.get("tunnel") not in (None, "no", "building_passage") or t.get("bridge") not in (None, "no")
+
+
+def rect_pedazo(i, j, pad=PAD_OSM):
+    x0, y0, x1, y1 = nucleo(i, j)
+    return (x0 - MARGEN - pad, y0 - MARGEN - pad, x1 + MARGEN + pad, y1 + MARGEN + pad)
 
 
 def nucleo(i, j):
@@ -68,7 +83,7 @@ def _iniciar(args_dict, lat0, lon0):
               plantilla=pipeline.preparar_escena(args, log=lambda *a: None))
 
 
-def _escena(i, j, elementos, partes_cat=None, log=None):
+def _escena(i, j, elementos, partes_cat=None, log=None, ext=None):
     """Escena del pedazo (i, j), ya recortada a su centro y con el suelo renombrado. Devuelve (escena, terreno)."""
     from . import pipeline
     from .geo import LocalProjection
@@ -81,7 +96,8 @@ def _escena(i, j, elementos, partes_cat=None, log=None):
     scene = Scene()
     scene.materials, scene.textures, scene.images = dict(pl.materials), dict(pl.textures), dict(pl.images)
     r = pipeline.run(args, log=log or (lambda m: None), proj=proj, scene=scene,
-                     osm_data=OSM.parse({"elements": elementos}), pedazo=(x0, y0, x1, y1), cat_data=partes_cat)
+                     osm_data=OSM.parse({"elements": elementos}), pedazo=(x0, y0, x1, y1), cat_data=partes_cat,
+                     extension=ext)
     recortar(scene, (x0, y0, x1, y1))
     renombrar_terreno(scene, i, j)
     return scene, r["terr"]
@@ -100,14 +116,15 @@ def _precargar(i, j):
     pipeline.precargar(_W["args"], proj)
 
 
-def _generar(i, j, elementos, carpeta, partes_cat=None):
+def _generar(i, j, elementos, carpeta, partes_cat=None, ext=None):
     """Genera el pedazo (i, j) y deja en `carpeta`: p_i_j.glb (visor), p_i_j.olv (Assetto Corsa) y las
     texturas del suelo en JPEG. Devuelve un resumen."""
     from . import export_glb
     t0 = time.time()
     log = []
     try:
-        scene, _ = _escena(i, j, elementos, partes_cat, log=lambda m: log.append(f"{time.time() - t0:5.1f} {m}"))
+        scene, _ = _escena(i, j, elementos, partes_cat, log=lambda m: log.append(f"{time.time() - t0:5.1f} {m}"),
+                           ext=ext)
     except Exception:  # noqa: BLE001
         return {"i": i, "j": j, "error": traceback.format_exc(limit=6), "log": log[-12:]}
     x0, y0, x1, y1 = nucleo(i, j)
@@ -370,6 +387,57 @@ class TeselasOSM(Teselas):
     @staticmethod
     def ident(el):
         return el["type"], el["id"]
+
+    def del_pedazo(self, i, j):
+        """Elementos del pedazo (i, j) más, completos, los túneles y puentes que lo cruzan y las calles de sus
+        bocas y estribos. Devuelve (elementos, extensión, teselas que faltan). Sin esto, cada pedazo veía solo el
+        trozo de túnel que le tocaba y calculaba su perfil por su cuenta: en la costura con el vecino la calzada
+        saltaba hasta 9 m (el coche caía al vacío). `extensión` es el rectángulo local que ocupa lo añadido (el
+        relieve tiene que llegar hasta ahí); las teselas que faltan hay que bajarlas antes de generarlo."""
+        rect = rect_pedazo(i, j)
+        els = self.elementos(rect)
+        semillas = [el for el in els if _estructura(el)]
+        if not semillas:
+            return els, None, []
+        cx0, cy0, cx1, cy1 = nucleo(i, j)
+        tope = (cx0 - EXT_MAX, cy0 - EXT_MAX, cx1 + EXT_MAX, cy1 + EXT_MAX)
+        with self.lock:
+            todas = [el for k in self.claves(tope) for el, _ in self.datos.get(k, [])]
+        por_nodo, por_id = {}, {}
+        for el in todas:
+            if el.get("type") == "way" and "highway" in (el.get("tags") or {}):
+                por_id[el["id"]] = el
+                for n in el.get("nodes", []):
+                    por_nodo.setdefault(n, []).append(el["id"])
+        vistos = {el["id"] for el in els if el.get("type") == "way"}
+        cola = [el["id"] for el in semillas]
+        hechas = set(cola)
+        extra = []
+        while cola:
+            w = por_id.get(cola.pop())
+            if w is None:
+                continue
+            for n in w.get("nodes", []):
+                for o in por_nodo.get(n, []):
+                    if o in vistos:
+                        if o not in hechas and _estructura(por_id[o]):
+                            hechas.add(o)
+                            cola.append(o)
+                        continue
+                    vistos.add(o)
+                    extra.append(por_id[o])
+                    if _estructura(por_id[o]):
+                        hechas.add(o)
+                        cola.append(o)
+        if not extra:
+            return els, None, []
+        lon = [g["lon"] for el in extra for g in el.get("geometry", []) if g]
+        lat = [g["lat"] for el in extra for g in el.get("geometry", []) if g]
+        xs, ys = self.proj.to_local(lon, lat)
+        ext = (max(float(xs.min()), tope[0]), max(float(ys.min()), tope[1]),
+               min(float(xs.max()), tope[2]), min(float(ys.max()), tope[3]))
+        faltan = [k for k in self.claves(ext) if k not in self.datos]
+        return els + extra, ext, faltan
 
 
 class TeselasCatastro(Teselas):
@@ -697,8 +765,13 @@ class Vivo:
             if k in self.precarga_vuelo:
                 continue            # que termine de bajar sus rásteres (dos procesos no deben bajar lo mismo)
             x0, y0, x1, y1 = nucleo(*k)
-            rect = (x0 - MARGEN - PAD_OSM, y0 - MARGEN - PAD_OSM, x1 + MARGEN + PAD_OSM, y1 + MARGEN + PAD_OSM)
+            rect = rect_pedazo(*k)
             if not self.osm.listas(rect):
+                continue
+            els, ext, faltan = self.osm.del_pedazo(*k)
+            if faltan:                  # un túnel o un puente sigue por teselas aún sin bajar
+                for t in faltan:
+                    self.osm.pedir(t, pr)
                 continue
             partes = None
             if self.cat is not None:
@@ -711,7 +784,7 @@ class Vivo:
                 if not self.cat.listas(rc):
                     self.log(f"pedazo {k}: sin esperar al Catastro (urgente)")
                 partes = self.cat.elementos(rc)
-            self.en_curso[k] = self.pool.submit(_generar, k[0], k[1], self.osm.elementos(rect), self.carpeta, partes)
+            self.en_curso[k] = self.pool.submit(_generar, k[0], k[1], els, self.carpeta, partes, ext)
 
     # ------------------------------------------------------------------ salida y ruta
     def _vias(self, rect):
@@ -938,14 +1011,19 @@ def semilla_ac(vivo, nombre, carpeta_ac, url, radio=1, log=print):
     for i in range(ci - radio, ci + radio + 1):
         for j in range(cj - radio, cj + radio + 1):
             x0, y0, x1, y1 = nucleo(i, j)
-            rect = (x0 - MARGEN - PAD_OSM, y0 - MARGEN - PAD_OSM, x1 + MARGEN + PAD_OSM, y1 + MARGEN + PAD_OSM)
+            rect = rect_pedazo(i, j)
             vivo.osm.asegurar(rect, espera=900)
+            for _ in range(4):
+                els, ext, faltan = vivo.osm.del_pedazo(i, j)
+                if not faltan:
+                    break
+                vivo.osm.asegurar(ext, espera=600)
             partes = None
             if vivo.cat is not None:
                 rc = (x0 - MARGEN, y0 - MARGEN, x1 + MARGEN, y1 + MARGEN)
                 vivo.cat.asegurar(rc, espera=300)
                 partes = vivo.cat.elementos(rc)
-            sc, terr = _escena(i, j, vivo.osm.elementos(rect), partes)
+            sc, terr = _escena(i, j, els, partes, ext=ext)
             for k, v in sc.materials.items():
                 scene.materials.setdefault(k, v)
             for k, v in sc.textures.items():

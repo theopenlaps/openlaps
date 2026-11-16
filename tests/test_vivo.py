@@ -84,3 +84,35 @@ def test_respaldo_de_material():
     assert V.respaldo("isleta_cb4b4a0", bib) == "isleta"
     assert V.respaldo("tv_1_2_003", bib) == "tv_1_2_003"
     assert V.respaldo("raro", bib) == "banqueta"
+
+
+def test_pedazo_recibe_el_tunel_entero():
+    """Un túnel que sale del pedazo llega completo (todos sus tramos y las calles de sus bocas) aunque esté lejos:
+    así los dos pedazos de la costura calculan el mismo perfil."""
+    lat0, lon0 = 40.4168, -3.7038
+    proj = LocalProjection.marco(lat0, lon0, (-1, -1, 1, 1))
+    t = V.TeselasOSM(proj, lambda m: None)
+
+    def via(i, nodos, xs, **tags):
+        lon, lat = proj.to_lonlat(np.array(xs, float), np.zeros(len(xs)))
+        geo = [{"lon": float(a), "lat": float(b)} for a, b in zip(lon, lat)]
+        el = {"type": "way", "id": i, "nodes": nodos, "geometry": geo, "tags": {"highway": "primary", **tags}}
+        return el, t.caja([(g["lon"], g["lat"]) for g in geo])
+
+    els = [via(1, [1, 2], [0, 300]),                                    # calle normal en el pedazo (0, 0)
+           via(2, [2, 3], [300, 900], tunnel="yes"),                    # túnel que empieza en el borde de su OSM
+           via(3, [3, 4], [900, 1400], tunnel="yes"),                   # sigue lejos, fuera de lo que toca
+           via(4, [4, 5], [1400, 1600]),                                # calle de la otra boca
+           via(5, [5, 6], [1600, 1900]),                                # más allá: no hace falta
+           via(6, [7, 8], [1500, 1700], highway="footway", tunnel="yes")]
+    for k in t.claves((-2000, -2000, 2000, 2000)):
+        t.datos[k] = []
+    t.datos[(0, 0)] = els[:2]
+    t.datos[(1, 0)] = els[2:]
+    out, ext, faltan = t.del_pedazo(0, 0)
+    ids = {el["id"] for el in out}
+    assert {1, 2, 3, 4} <= ids and 5 not in ids and 6 not in ids
+    assert ext[2] > 1550 and not faltan
+    # sin túneles no se añade nada
+    t.datos[(0, 0)], t.datos[(1, 0)] = [els[0]], []
+    assert t.del_pedazo(0, 0)[1] is None

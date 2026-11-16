@@ -430,9 +430,47 @@ def dem_3dep(bbox, mpp=1.0, log=print):
     return Raster(data, tr_ds, crs)
 
 
+def _mdt05_utm(bbox, log=print):
+    """MDT05 en su cuadrícula nativa (UTM 29/30/31 ETRS89, píxeles de 5 m con centro en múltiplos de 5), pidiendo
+    los bordes alineados a ella: el servicio devuelve los píxeles tal cual. En lat/lon remuestrea cada petición a su
+    propia rejilla, y dos pedazos vecinos del modo en vivo (que piden cajas distintas) veían alturas que diferían
+    hasta 30 cm: la calzada saltaba en la costura."""
+    from pyproj import Transformer
+
+    from .cache import fetch
+    lat0, lon0 = bbox.center
+    zona = int((lon0 + 180) // 6) + 1
+    if zona not in (29, 30, 31) or lat0 < 35.0:          # Canarias va en otra cuadrícula
+        raise RuntimeError("fuera de la península y Baleares")
+    epsg = 25800 + zona
+    tr = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+    xs, ys = tr.transform([bbox.west, bbox.east, bbox.west, bbox.east], [bbox.south, bbox.south, bbox.north, bbox.north])
+    e0 = math.floor((min(xs) + 2.5) / 5.0) * 5.0 - 2.5
+    e1 = math.ceil((max(xs) - 2.5) / 5.0) * 5.0 + 2.5
+    n0 = math.floor((min(ys) + 2.5) / 5.0) * 5.0 - 2.5
+    n1 = math.ceil((max(ys) - 2.5) / 5.0) * 5.0 + 2.5
+    q = ("https://servicios.idee.es/wcs-inspire/mdt?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage"
+         f"&CoverageId=Elevacion{epsg}_5&SUBSET=x({e0:.1f},{e1:.1f})&SUBSET=y({n0:.1f},{n1:.1f})&FORMAT=image/tiff")
+    path = fetch(q, ext=".tif", log=log)
+    with rasterio.open(path) as ds:
+        arr = ds.read(1, masked=True)
+        if arr.count() == 0 or abs(ds.transform.a - 5.0) > 1e-6:
+            raise RuntimeError("respuesta inesperada")
+        arr = np.ma.masked_less(arr, -1000)
+        fill = float(np.ma.median(arr))
+        data = arr.filled(fill).astype(np.float32)
+        r = Raster(data, ds.transform, ds.crs, nodata=ds.nodata)
+    log(f"  MDT05 (IGN, UTM {zona}): {data.shape[1]}x{data.shape[0]} px, {data.min():.0f}-{data.max():.0f} m")
+    return r
+
+
 def mdt05(bbox, log=print):
     """Relieve del TERRENO de España a 5 m (IGN MDT05, CC BY 4.0 scne.es), por WCS 2.0."""
     from .cache import fetch
+    try:
+        return _mdt05_utm(bbox, log=log)
+    except Exception as e:  # noqa: BLE001
+        log(f"  MDT05 en UTM: {e}; se pide en lat/lon")
     q = ("https://servicios.idee.es/wcs-inspire/mdt?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage"
          f"&CoverageId=Elevacion4258_5&SUBSET=Lat({bbox.south:.6f},{bbox.north:.6f})"
          f"&SUBSET=Long({bbox.west:.6f},{bbox.east:.6f})&FORMAT=image/tiff")
