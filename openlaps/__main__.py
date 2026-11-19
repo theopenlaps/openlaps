@@ -26,7 +26,10 @@ def parser():
     p.add_argument("--res", type=float, help="resolución de la malla de terreno en m (auto: 2-4)")
     p.add_argument("--tesela", type=float, default=128.0, help="tamaño de tesela de terreno (m)")
     p.add_argument("--mpp", type=float, help="metros por pixel de la textura del suelo (auto: 0.25 con ortofoto, 0.5 sin)")
-    p.add_argument("--region", default="auto", help="perfil regional: auto, mx, es, fr, eu, generic")
+    p.add_argument("--region", default="auto", help="perfil regional: auto, mx, es, fr, us, eu, generic")
+    p.add_argument("--subregion", default="auto",
+                   help="estilo dentro del país (colores de las casas, tejados, vegetación): auto (según el lugar), "
+                        "no (el genérico del país) o su código, p. ej. mx_ciudad, mx_colonial, mx_norte, es_sur")
     p.add_argument("--sin-orto", action="store_true", help="no usar la ortofoto nacional aunque exista")
     p.add_argument("--vegetacion", type=float, default=1.0, help="multiplicador de densidad de vegetación")
     p.add_argument("--sin-microsoft", action="store_true", help="no usar huellas de edificios de Microsoft")

@@ -25,6 +25,11 @@ def _arbol(scene, x, y):
     scene.add("vegetacion", "veg_pino_0", q, np.zeros((8, 2)), [(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7)])
 
 
+def _area(p):
+    t3 = p.pos[p.faces]
+    return float(np.abs(np.cross(t3[:, 1] - t3[:, 0], t3[:, 2] - t3[:, 0])[:, 2]).sum() / 2)
+
+
 def _caras(scene):
     return sum(len(p.faces) for ps in scene.pieces.values() for p in ps)
 
@@ -36,10 +41,17 @@ def test_recorte_sin_duplicados_ni_huecos():
         _malla_grande(s)
         _arbol(s, V.L / 2 - 1.0, 0.0)          # centro 1 m antes del borde entre los pedazos 0 y 1
         V.recortar(s, V.nucleo(i, 0))
-        total += sum(len(p.faces) for (g, _, _), ps in s.pieces.items() if g == "carretera" for p in ps)
-        arboles += sum(len(p.faces) for (g, _, _), ps in s.pieces.items() if g == "vegetacion" for p in ps)
-    # la franja va de -300 a 300 y los pedazos -1..1 cubren de -384 a 384: cada triángulo una sola vez
-    assert total == 2 * 60
+        x0, _, x1, _ = V.nucleo(i, 0)
+        for (g, _, _), ps in s.pieces.items():
+            for p in ps:
+                if g == "carretera":
+                    total += _area(p)
+                    # corte exacto: nada asoma del pedazo y el borde queda en la línea de corte
+                    assert p.pos[:, 0].min() >= x0 - 1e-9 and p.pos[:, 0].max() <= x1 + 1e-9
+                else:
+                    arboles += len(p.faces)
+    # la franja va de -300 a 300 (10 m de ancho) y los pedazos -1..1 cubren de -384 a 384: toda, una sola vez
+    assert abs(total - 600 * 10) < 1e-6
     assert arboles == 4                        # el árbol entero, y una sola vez
 
 
@@ -248,3 +260,57 @@ def test_osm_download_respaldo_api_y_precarga_cancelable(tmp_path, monkeypatch):
     pr._en_curso = None
     pr._hechas = {}
     assert pr.esperar("k1", timeout=5, cancelar=lambda: True) is None
+
+
+def test_partir_conserva_area_uv_y_sentido():
+    from openlaps.mesh import Piece
+    pos = np.array([[0, 0, 0], [10, 0, 1], [0, 10, 2.0]])
+    p = Piece(pos, pos[:, :2] / 10, np.array([[0, 1, 2]]), np.tile([0, 0, 1.0], (3, 1)))
+    q = V.partir(p, 0, 4.0)
+    assert len(q.faces) == 3 and abs(_area(q) - 50) < 1e-9
+    t3 = q.pos[q.faces]
+    assert (np.cross(t3[:, 1] - t3[:, 0], t3[:, 2] - t3[:, 0])[:, 2] > 0).all()      # mismo sentido de giro
+    lado = np.sign(np.round(t3[..., 0] - 4.0, 6))
+    assert ((lado.max(1) > 0) & (lado.min(1) < 0)).sum() == 0                           # nadie cruza ya la recta
+    nuevos = q.pos[3:]
+    assert np.allclose(nuevos[:, 0], 4.0) and np.allclose(q.uv[3:], nuevos[:, :2] / 10)
+    assert np.allclose(nuevos[:, 2], nuevos[:, 0] / 10 + nuevos[:, 1] / 5)              # la altura sigue en el plano
+    assert V.partir(p, 0, 50.0) is p
+
+
+def test_coser_iguala_el_borde_y_faldones(tmp_path):
+    """Un pedazo 5 cm más alto que su vecino ya generado: tras coser, el borde coincide y la corrección se
+    desvanece hacia dentro; lo que va encima de la calzada (una raya) se mueve con ella."""
+    def calle(dz):
+        s = Scene()
+        _malla_grande(s)
+        for p in s.pieces[("carretera", "asfalto", "ROAD")]:
+            p.pos[:, 2] += dz
+        return s
+    a = calle(0.0)
+    V.recortar(a, V.nucleo(0, 0))
+    s = Scene()
+    s.materials["asfalto"] = {"kind": "plain"}
+    s.pieces = a.pieces
+    V.escribir_olv(s, str(tmp_path / "p_0_0.olv"), str(tmp_path), {"asfalto"})
+    b = calle(0.05)
+    raya = np.array([[130.0, -0.1, 0.07], [134.0, -0.1, 0.07], [134.0, 0.1, 0.07], [130.0, 0.1, 0.07]])
+    b.add("rayas", "raya_blanca", raya, np.zeros((4, 2)), [(0, 1, 2), (0, 2, 3)])
+    caja = V.nucleo(1, 0)
+    V.recortar(b, caja)
+    mayor = V.coser(b, caja, [(0, caja[0], V.leer_olv(str(tmp_path / "p_0_0.olv")))])
+    assert abs(mayor - 0.05) < 1e-4
+    p = b.pieces[("carretera", "asfalto", "ROAD")][0]
+    borde = np.abs(p.pos[:, 0] - caja[0]) < 1e-6
+    assert borde.any() and np.allclose(p.pos[borde, 2], 0.0, atol=1e-4)
+    lejos = p.pos[:, 0] > caja[0] + V.COSER_M + 1
+    assert np.allclose(p.pos[lejos, 2], 0.05)
+    r = b.pieces[("rayas", "raya_blanca", None)][0]
+    assert (r.pos[:, 2] < 0.07).all() and (r.pos[:, 2] > 0.02).all()
+    # faldón: solo en el suelo
+    t = Scene()
+    q = np.array([[caja[0], 0, 0], [caja[0] + 10, 0, 0], [caja[0], 10, 0.0]])
+    t.add("terreno", "terreno_000", q, q[:, :2], [(0, 1, 2)])
+    V.faldones(t, caja)
+    zs = np.concatenate([x.pos[:, 2] for x in t.pieces[("terreno", "terreno_000", None)]])
+    assert zs.min() == -V.FALDON

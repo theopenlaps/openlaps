@@ -109,6 +109,8 @@ def argumentos(op, salida, nombre=None):
         a += ["--temporada", op["temporada"]]
     if op.get("region") and op["region"] != "auto":
         a += ["--region", str(op["region"])]
+    if op.get("subregion") and op["subregion"] != "auto":
+        a += ["--subregion", str(op["subregion"])]
     if op.get("dem"):
         a += ["--dem", str(op["dem"])]
     return a

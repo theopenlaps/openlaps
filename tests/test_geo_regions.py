@@ -54,3 +54,42 @@ def test_ac_georef_matches_projection():
         g = georef({"lat": proj.lat0, "lon": proj.lon0})  # sin epsg: se deduce igual que LocalProjection
         assert g["epsg"] == proj.epsg
         assert (g["lat0"], g["lon0"]) == (proj.lat0, proj.lon0)
+
+
+@pytest.mark.parametrize("lat, lon, sub", [
+    (19.43, -99.13, "mx_ciudad"),      # Ciudad de México
+    (19.60, -99.05, "mx_ciudad"),      # Ecatepec (Valle de México)
+    (18.985, -99.10, "mx_colonial"),   # Tepoztlán
+    (21.02, -101.26, "mx_colonial"),   # Guanajuato
+    (28.63, -106.08, "mx_norte"),      # Chihuahua
+    (20.97, -89.62, "mx_sureste"),     # Mérida
+    (20.10, -103.90, "mx_pueblo"),     # un pueblo de Jalisco
+    (40.4168, -3.7038, ""),            # Madrid: el perfil de España
+    (37.39, -5.99, "es_sur"),          # Sevilla
+    (42.88, -8.54, "es_norte"),        # Santiago de Compostela
+    (41.39, 2.17, "es_mediterraneo"),  # Barcelona
+    (28.46, -16.25, "es_canarias"),
+    (43.30, 5.37, "fr_sur"),           # Marsella
+    (34.05, -118.25, "us_suroeste"),   # Los Ángeles
+    (37.79, -122.41, "us_pacifico"),   # San Francisco
+    (40.71, -74.00, ""),               # Nueva York
+])
+def test_subregion_por_lugar(lat, lon, sub):
+    assert regions.elegir("auto", "auto", lat, lon).sub == sub
+
+
+def test_subregion_elegida_y_coste():
+    """Elegida a mano manda; una de otro país o «no» dejan el perfil del país. Ninguna añade materiales: las
+    mismas 8 fachadas y las mismas normas de señalamiento que su país."""
+    assert regions.elegir("mx", "mx_colonial", 19.43, -99.13).sub == "mx_colonial"
+    assert regions.elegir("mx", "no", 19.43, -99.13) is regions.MX
+    assert regions.elegir("es", "mx_norte", 40.0, -3.0) is regions.ES
+    assert regions.elegir("auto", "es_sur", 19.43, -99.13) is regions.MX       # de otro país: no vale
+    assert regions.set_active("es_sur").code == "es"
+    regions.set_active("mx")
+    assert set(regions._CAJAS) == set(regions.SUBS)
+    for s in regions.SUBS.values():
+        base = regions.REGIONS[s.code]
+        assert len(s.facade_colors) == len(base.facade_colors) == 8 and s.sub_name and s.sub_name_en
+        assert (s.center_mat, s.stop_text, s.ortho, s.dem, s.country) == \
+            (base.center_mat, base.stop_text, base.ortho, base.dem, base.country)

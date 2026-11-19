@@ -90,6 +90,38 @@ Objetivo: pistas reconocibles y conducibles de cualquier lugar real, siendo un p
 - Comparación con 360°: orientación automática por la silueta (algunas cámaras guardan el rumbo
   girado 90°).
 
+- **Muchas menos llamadas de dibujo en Assetto Corsa** (Madrid, 4 km²: de 8 488 a 1 571 mallas; a la vista, de
+  1 700 a 476 de mediana y de 5 134 a 1 137 en el peor 5 %; en sombras, de 1 125 a 198): AC dibuja cada malla aparte y
+  sin oclusión, así que en una ciudad grande mandaba el número de mallas, no los triángulos. La celda de troceo ya no
+  es fija (`mesh.Scene.meshes`): se parte de celdas de 1,6 km y solo se subdividen, hasta 200 m, las que pasan de
+  6 000 triángulos; cada color de fachada, las señales o los árboles salen en pocas mallas grandes, con el `lodOut`
+  alargado en lo que crece la malla para que nada desaparezca antes. El suelo a ras (calzada, banquetas) ya no
+  proyecta sombra y el pretil va en la misma malla que el muro. Misma geometría y mismos materiales.
+  `tools/rendimiento_ac.py` lo mide sobre cualquier `.kn5`.
+- **Unión entre pedazos del modo en vivo**: el corte es exacto (`vivo.partir`: los triángulos que cruzan el borde se
+  parten por él; antes se repartían enteros por su centroide y el borde quedaba dentado y distinto en cada vecino),
+  cada pedazo nuevo se cose a los vecinos ya generados (`vivo.coser`: calzada con calzada, banqueta con banqueta y
+  suelo con suelo, repartiendo la diferencia en 10 m) y el suelo lleva un faldón en el borde. En el centro de Madrid:
+  escalón típico de la calzada de 6 a 0,8 cm, del suelo de 43 a 10 cm como mucho, sin solapes.
+  `tools/costuras.py` lo mide sobre una carpeta de pedazos. Dos vecinos no se generan a la vez (salvo urgencia).
+- **Modo en vivo en la app, a la par de una pista normal**: las zonas preparadas salen en «Mis pistas» y se reanudan
+  sin dibujarlas otra vez; al detener, el panel se queda con «Reanudar», carpeta y mapa; se ve la zona, la calidad y
+  el tiempo en marcha, y se dice lo que en vivo aún no hay (tráfico). «Conducir» pasa a llamarse «Vista previa 3D».
+
+- **Espacio en disco bajo control** (`gui/espacio.py`): Ajustes enseña cuánto ocupa todo lo de OpenLaps (pistas,
+  zonas en vivo y sus pistas de AC, caché de descargas, programa y datos de la ventana); «Mis pistas» dice cuánto
+  pesa cada una y deja borrarla con todo lo suyo (carpeta de AC y enlace en el juego incluidos), también las zonas en
+  vivo. Al abrirse, la app quita sola lo que ya no sirve (pedazos de una versión anterior, descargas a medias, índices
+  de un formato viejo, la caché del instalador) y aplica el tope de la caché de descargas (10 GB por defecto; se va
+  primero lo que lleva más tiempo sin usarse).
+
+- **Subregiones** (`regions.SUBREGIONES`): dentro de un país no se construye igual en todas partes. Cada subregión es
+  el perfil del país con unos pocos campos cambiados (colores de fachada y de tejado, forma del techo, plantas
+  típicas, especies): en México, gran ciudad de bloque y concreto, pueblo colonial de colores, pueblo corriente,
+  norte y sureste; en España, norte, sur, Mediterráneo y Canarias; sur de Francia; suroeste, Pacífico y sureste de
+  EE. UU. Se elige sola por coordenadas (cajas aproximadas) o a mano (`--subregion`, «Estilo de la zona» en la app,
+  con la muestra de colores). Siempre 8 fachadas: no añade materiales, texturas ni mallas a la pista.
+
 ## Pendiente
 
 | Tema | Qué falta |

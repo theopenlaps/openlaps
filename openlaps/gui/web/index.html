@@ -118,6 +118,11 @@
         <option value="generic" data-i18n="region.generic"></option>
       </select>
     </div>
+    <div class="campo" id="campo-subregion" hidden>
+      <label class="etiqueta" for="subregion" data-i18n="campo.subregion"></label>
+      <select id="subregion" data-campo="subregion"></select>
+      <div class="paleta" id="sub-paleta" data-i18n-title="campo.subregion_t"></div>
+    </div>
     <div class="campo">
       <label class="etiqueta" for="veg"><span data-i18n="campo.vegetacion"></span> <b data-mostrar="vegetacion"></b></label>
       <input type="range" id="veg" min="0" max="1.5" step="0.1" data-campo="vegetacion">
@@ -309,18 +314,24 @@
 
 <!-- ============================================================ modo en vivo -->
 <section class="resultado vivo-panel" id="vivo-panel" hidden aria-live="polite">
+  <button class="cerrar" data-accion="vivo-cerrar" id="vivo-cerrar" data-i18n-aria="res.cerrar" hidden>×</button>
   <div class="res-cuerpo">
     <h2><span class="insignia-vivo" data-i18n="vivo.insignia"></span> <span id="vivo-titulo"></span></h2>
+    <p class="ayuda" id="vivo-datos"></p>
     <p class="ayuda" id="vivo-texto"></p>
     <div class="progreso"><div id="vivo-barra"></div></div>
     <ul class="vivo-estado">
       <li id="vivo-zona"></li>
       <li id="vivo-ac"></li>
+      <li id="vivo-extra"></li>
     </ul>
     <div class="fila-botones">
-      <button class="boton primario" data-accion="vivo-conducir" data-i18n="vivo.conducir"></button>
-      <button class="boton" data-accion="vivo-jugar" id="vivo-jugar" data-i18n="vivo.jugar"></button>
-      <button class="boton" data-accion="vivo-detener" data-i18n="vivo.detener"></button>
+      <button class="boton primario" data-accion="vivo-jugar" id="vivo-jugar" data-i18n="vivo.jugar"></button>
+      <button class="boton" data-accion="vivo-conducir" id="vivo-ver" data-i18n="vivo.conducir" data-i18n-title="vivo.conducir_t"></button>
+      <button class="boton" data-accion="vivo-reanudar" id="vivo-reanudar" data-i18n="vivo.reanudar" hidden></button>
+      <button class="boton" data-accion="vivo-mapa" data-i18n="pistas.mapa"></button>
+      <button class="boton" data-accion="vivo-carpeta" data-i18n="res.carpeta"></button>
+      <button class="boton" data-accion="vivo-detener" id="vivo-detener" data-i18n="vivo.detener"></button>
       <button class="enlace" data-accion="vivo-registro" data-i18n="accion.ver_registro"></button>
     </div>
     <p class="ayuda" id="vivo-mensaje"></p>
@@ -329,6 +340,7 @@
 <!-- ============================================================ cajones -->
 <aside class="cajon" id="cajon-pistas" hidden data-i18n-aria="top.pistas">
   <div class="cajon-cabeza"><h2 data-i18n="top.pistas"></h2><button class="cerrar" data-accion="cerrar-cajon" data-i18n-aria="res.cerrar">×</button></div>
+  <p class="pistas-total" id="pistas-total"></p>
   <ul class="lista-pistas" id="lista-pistas"></ul>
 </aside>
 
@@ -429,6 +441,30 @@
       </div>
     </div>
   </details>
+
+  <div class="aj-grupo aj-espacio">
+    <div class="aj-fila">
+      <div class="aj-fila-txt">
+        <span class="etiqueta" data-i18n="esp.titulo"></span>
+        <p class="ayuda" data-i18n="esp.desc"></p>
+      </div>
+      <b class="esp-total" id="esp-total">…</b>
+    </div>
+    <ul class="esp-lista" id="esp-lista"></ul>
+    <div class="campo">
+      <label class="etiqueta" for="esp-tope" data-i18n="esp.tope"></label>
+      <select id="esp-tope">
+        <option value="5">5 GB</option><option value="10">10 GB</option><option value="20">20 GB</option>
+        <option value="40">40 GB</option><option value="0" data-i18n="esp.sin_tope"></option>
+      </select>
+      <p class="ayuda" data-i18n="esp.tope_d"></p>
+    </div>
+    <div class="fila-botones">
+      <button class="boton chico" data-accion="esp-limpiar" data-i18n="esp.limpiar" data-i18n-title="esp.limpiar_t"></button>
+      <button class="boton chico" data-accion="esp-vaciar" id="esp-vaciar" data-i18n="esp.vaciar" data-i18n-title="esp.vaciar_t"></button>
+    </div>
+    <p class="ayuda" id="esp-mensaje"></p>
+  </div>
 
   <div class="aj-grupo acerca">
     <div class="acerca-cabeza">

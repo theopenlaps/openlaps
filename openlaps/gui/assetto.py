@@ -14,7 +14,7 @@ def _steam():
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
             return Path(winreg.QueryValueEx(k, "SteamPath")[0])
-    except OSError:
+    except (ImportError, OSError):      # ImportError: fuera de Windows no hay registro (las pruebas en Linux)
         return None
 
 

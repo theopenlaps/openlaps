@@ -55,8 +55,8 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
         bbox = BBox.around(lat, lon, args.tam)
     if proj is None:
         proj = LocalProjection(bbox)
-    R = regions.set_active(regions.detect(proj.lat0, proj.lon0) if args.region == "auto" else args.region)
-    log(f"Región: {R.name} (rayas {R.center_mat.replace('raya_', '')}, techos {R.roof}"
+    R = regions.set_active(regions.elegir(args.region, getattr(args, "subregion", "auto"), proj.lat0, proj.lon0))
+    log(f"Región: {R.name}{' · ' + R.sub_name if R.sub else ''} (rayas {R.center_mat.replace('raya_', '')}, techos {R.roof}"
         f"{', ortofoto ' + R.ortho if R.ortho else ''}{', relieve ' + R.dem if R.dem else ''})")
     rect = (proj.xmin, proj.ymin, proj.xmax, proj.ymax)
     area_km2 = (proj.xmax - proj.xmin) * (proj.ymax - proj.ymin) / 1e6
@@ -369,13 +369,14 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
                 "attribution": ATTRIBUTION.format(
                     s2_years=f" ({', '.join(sorted(rasters.S2_YEARS))})" if rasters.S2_YEARS else "") + "".join("- " + a + chr(10) for a in R.attribution),
                 "description": f"Generada con openlaps a partir de datos abiertos. {area_km2:.2f} km².",
-                "tags": [t for t in (R.code, "openlaps", args.modo) if t], "length": length or rd["stats"]["km"] * 1000, "run": info_run,
+                "tags": [t for t in (R.code, R.sub, "openlaps", args.modo) if t], "length": length or rd["stats"]["km"] * 1000, "run": info_run,
                 "pitboxes": 8, "preview_png": bio.getvalue(),
                 "ai_hw": route_hw, "width": int(round(float(np.median(route_hw)) * 2)) if route_hw is not None else "",
                 "closed": args.modo == "circuito",
                 "rect": [float(proj.xmin), float(proj.ymin), float(proj.xmax), float(proj.ymax)],
                 "vivo_opc": {"res": getattr(args, "res", None), "mpp": getattr(args, "mpp", None),
-                             "region": args.region, "temporada": args.temporada,
+                             "region": args.region, "subregion": getattr(args, "subregion", "auto"),
+                             "temporada": args.temporada,
                              "vegetacion": float(args.vegetacion), "sin": sin,
                              "dem": getattr(args, "dem", None),
                              "tuneles": getattr(args, "tuneles", "principales")}}
@@ -394,7 +395,7 @@ def precargar(args, proj, log=print):
     """Modo en vivo: pide por adelantado los rásteres y huellas que `run` va a pedir para esta proyección, así el
     pedazo los encuentra en la caché de disco. Tiene que pedir exactamente lo mismo que el bloque de descargas
     de `run` (mismas cajas y argumentos): si cambia uno, cambia el otro. OSM y Catastro van aparte."""
-    R = regions.set_active(regions.detect(proj.lat0, proj.lon0) if args.region == "auto" else args.region)
+    R = regions.set_active(regions.elegir(args.region, getattr(args, "subregion", "auto"), proj.lat0, proj.lon0))
     bbox = proj.bbox()
     big = bbox.padded(450)
     tareas = []

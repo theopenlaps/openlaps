@@ -18,7 +18,7 @@ const S = {
   modo: "libre", centro: null, ancho: 800, alto: 800, ruta: [],
   calidad: "normal", nombre: "", nombreAuto: "", ac: true, jugar: false, trafico: true,
   maxKm2: 24, csp: false, vivo: null, vivoModo: false,
-  temporada: "seca", region: "auto", vegetacion: 1, usar: Object.fromEntries(FUENTES.map((k) => [k, true])), dem: null,
+  temporada: "seca", region: "auto", subregion: "auto", vegetacion: 1, usar: Object.fromEntries(FUENTES.map((k) => [k, true])), dem: null,
   lugar: "", lugarElegido: false, lugarEsPunto: false, regionInfo: null, osm: null,
   asistente: false, paso: 1,
   trabajo: null, trabajoId: null, t0: 0, registro: [], ultimaPista: null, borradorGlb: null,
@@ -415,12 +415,43 @@ function cambioZona() {
   sync();
 }
 
+// «Estilo de la zona»: las subregiones del país (colores de las casas, tejados…). En automático se usa la del
+// lugar; debajo se enseñan los colores de fachada con los que saldrán las casas
+function subActual() {
+  const r = S.regionInfo;
+  if (!r) return null;
+  const cod = S.subregion === "auto" ? r.sub : S.subregion;
+  return (r.subs || []).find((s) => s.codigo === cod) || null;
+}
+function pintarSubregiones() {
+  const r = S.regionInfo;
+  const subs = (r && r.subs) || [];
+  $("#campo-subregion").hidden = !subs.length;
+  if (!subs.length) { S.subregion = "auto"; return; }
+  if (S.subregion !== "auto" && S.subregion !== "no" && !subs.some((s) => s.codigo === S.subregion)) S.subregion = "auto";
+  const sel = $("#subregion");
+  const auto = subs.find((s) => s.codigo === r.sub);
+  sel.innerHTML = "";
+  const ops = [["auto", t("sub.auto", { n: auto ? auto.nombre : t("sub.pais") })], ...subs.map((s) => [s.codigo, s.nombre]), ["no", t("sub.pais")]];
+  for (const [v, txt] of ops) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = txt;
+    sel.append(o);
+  }
+  sel.value = S.subregion;
+  refrescarDesplegables();
+  const s = subActual();
+  $("#sub-paleta").innerHTML = ((s ? s.colores : r.colores) || []).map((c) => `<i style="background:${c}"></i>`).join("");
+}
+
 async function pedirRegion() {
   const p = S.modo === "libre" ? S.centro : S.ruta[0];
   if (!p) return;
-  const r = await api("region", p[0], p[1]);
+  const r = await api("region", p[0], p[1], S.region === "auto" ? null : S.region);
   if (r && !r.error) {
     S.regionInfo = r;
+    pintarSubregiones();
     const zona = S.lugarEsPunto ? (r.zona || "") : (S.lugar || r.zona || "");
     const auto = nombreRegionZona(r.pais, zona);
     if (auto) S.nombreAuto = auto;
@@ -528,6 +559,7 @@ function resumenHTML() {
   const e = estimacion();
   if (r) {
     filas.push([t("res.pais"), t(`region.${S.region === "auto" ? r.codigo : S.region}`)]);
+    if ((r.subs || []).length) filas.push([t("res.estilo"), subActual()?.nombre || t("sub.pais")]);
     filas.push([t("res.orto"), S.usar.orto ? ORTO[r.orto] || r.orto : ORTO[""]]);
     filas.push([t("res.relieve"), S.dem ? t("res.local") : RELIEVE[r.relieve] || r.relieve]);
   }
@@ -561,7 +593,7 @@ function sync() {
   }
   for (const el of $$("[data-solo]")) el.hidden = el.dataset.solo === "libre" ? S.modo !== "libre" : S.modo === "libre";
   const nombre = nombreFinal();
-  const existe = S.pistas.some((p) => p.nombre === nombre);
+  const existe = S.pistas.some((p) => !p.vivo && p.nombre === nombre);
   const textos = {
     ancho: `${fmt(S.ancho)} m`,
     alto: `${fmt(S.alto)} m`,
@@ -737,7 +769,7 @@ function opciones() {
     modo: S.modo, centro: S.centro, ancho: S.ancho, alto: S.alto, ruta: S.ruta, calidad: S.calidad, nombre: nombreFinal(),
     vivo: esVivo(),
     titulo: S.lugar && !S.lugarEsPunto ? S.lugar : "", ac: S.ac, trafico: S.trafico,
-    temporada: S.temporada, region: S.region, vegetacion: S.vegetacion,
+    temporada: S.temporada, region: S.region, subregion: S.subregion, vegetacion: S.vegetacion,
     sin: FUENTES.filter((k) => !S.usar[k]), dem: S.dem,
   };
 }
@@ -1026,15 +1058,50 @@ async function iniciarVivo() {
   S.bor = null;
   const r = await api("vivo_iniciar", opciones());
   if (!r || r.error) { aviso(r?.error || t("err.empezar"), { mal: true, ms: 8000 }); return false; }
+  entrarVivo(r);
+  return true;
+}
+function entrarVivo(r) {
   S.vivo = { activo: true, puerto: r.puerto, url: r.url, nombre: r.nombre, pistaAc: r.pista_ac, zona: r.zona,
-    ac: r.ac, csp: r.csp, semilla: r.pista_ac ? "haciendo" : null, estado: null, registro: [`> openlaps.vivo :${r.puerto}`] };
+    ac: r.ac, csp: r.csp, semilla: r.pista_ac ? "haciendo" : null, estado: null, t0: Date.now(),
+    centro: S.centro, registro: [`> openlaps.vivo :${r.puerto}`] };
   if (r.aviso) aviso(r.aviso, { ms: 10000 });
   $("#resultado").hidden = true;
   $("#vivo-panel").hidden = false;
+  $("#vivo-mensaje").textContent = "";
   pintarVivo();
   clearInterval(tVivo);
   tVivo = setInterval(sondearVivo, 2000);
-  return true;
+  refrescarPistas();
+}
+// vuelve a arrancar una zona en vivo ya preparada (desde «Mis pistas» o desde su panel, una vez detenida)
+async function reanudarVivo(nombre) {
+  if (S.trabajo) { aviso(t("err.ocupado")); return; }
+  if (S.vivo && S.vivo.activo) {
+    if (S.vivo.nombre === nombre) { cerrarCajones(); $("#vivo-panel").hidden = false; return; }
+    aviso(t("bloq.vivo"));
+    return;
+  }
+  clearTimeout(tBorrador);
+  S.bor = null;
+  const r = await api("vivo_reanudar", nombre);
+  if (!r || r.error) { aviso(r?.error || t("err.empezar"), { mal: true, ms: 8000 }); return; }
+  const op = r.op || {};
+  if (op.centro) {
+    S.modo = "libre"; S.centro = op.centro; S.vivoModo = true;
+    if (op.ancho) S.ancho = op.ancho;
+    if (op.alto) S.alto = op.alto;
+    if (op.calidad) S.calidad = op.calidad;
+    dibujarZona();
+    map.flyTo(op.centro, 14, { duration: 0.8 });
+  }
+  cerrarCajones();
+  entrarVivo(r);
+  sync();
+}
+function duracion(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
 }
 async function sondearVivo() {
   const v = S.vivo;
@@ -1064,6 +1131,10 @@ function pintarVivo() {
   aplicarBloqueo();
   if (!v) { $("#vivo-panel").hidden = true; return; }
   $("#vivo-titulo").textContent = v.nombre;
+  $("#vivo-panel").classList.toggle("detenido", !v.activo);
+  const km2 = v.zona ? (v.zona[0] * v.zona[1]) / 1e6 : 0;
+  $("#vivo-datos").textContent = [km2 ? `${fmt(v.zona[0])} × ${fmt(v.zona[1])} m · ${fmt(km2, 2)} km²` : "",
+    t(`calidad.${S.calidad}`), v.activo && v.t0 ? t("vivo.tiempo", { t: duracion(Date.now() - v.t0) }) : ""].filter(Boolean).join(" · ");
   $("#vivo-texto").textContent = v.activo ? t("vivo.texto", { zona: `${fmt(v.zona[0])} × ${fmt(v.zona[1])} m` }) : t("vivo.detenido");
   const e = v.estado;
   const pct = e ? Math.round(e.zona_lista * 100) : 0;
@@ -1073,8 +1144,16 @@ function pintarVivo() {
   const p = v.pistaAc;
   $("#vivo-ac").textContent = !v.ac ? t("vivo.ac_no") : !p ? "" : v.semilla === "lista" ? (v.csp ? t("vivo.ac_lista", { p }) : t("vivo.ac_csp"))
     : v.semilla === "error" ? t("vivo.ac_error") : t("vivo.ac_haciendo", { p });
-  $("#vivo-jugar").hidden = !(v.activo && v.semilla === "lista" && v.ac);
-  $('[data-accion="vivo-conducir"]').hidden = !v.activo || !e;
+  // lo que el modo en vivo aún no tiene y la pista normal sí: se dice, en vez de que falte sin más
+  $("#vivo-extra").textContent = v.activo ? t(S.google3d ? "vivo.extra_g3d" : "vivo.extra") : "";
+  const jugar = $("#vivo-jugar");
+  jugar.hidden = !(v.activo && v.ac);
+  jugar.disabled = v.semilla !== "lista";
+  jugar.textContent = t(v.semilla === "lista" ? "vivo.jugar" : "vivo.jugar_espera");
+  $("#vivo-ver").hidden = !v.activo || !e;
+  $("#vivo-detener").hidden = !v.activo;
+  $("#vivo-reanudar").hidden = v.activo;
+  $("#vivo-cerrar").hidden = v.activo;
 }
 
 async function instalarAC(nombre, salidaMsg) {
@@ -1094,6 +1173,59 @@ async function instalarAC(nombre, salidaMsg) {
 }
 
 // ------------------------------------------------------------------ mis pistas, ajustes
+// ------------------------------------------------------------------ espacio en disco
+const fmtTam = (b) => b >= 1e9 ? `${fmt(b / 1e9, b >= 1e10 ? 1 : 2)} GB` : `${fmt(Math.round(b / 1e6))} MB`;
+function pintarEspacio(e) {
+  if (!e) return;
+  S.espacio = e;
+  $("#esp-total").textContent = fmtTam(e.total);
+  const ul = $("#esp-lista");
+  ul.innerHTML = "";
+  for (const p of e.partes) {
+    const li = document.createElement("li");
+    const n = p.n != null ? ` (${p.n})` : "";
+    li.innerHTML = `<span class="esp-nombre" data-tip="${escapar(p.ruta)}">${escapar(t(`esp.${p.clave}`) + n)}</span>
+      <span class="esp-barra"><i style="width:${Math.max(1, Math.round(100 * p.bytes / Math.max(1, e.total)))}%"></i></span>
+      <b>${fmtTam(p.bytes)}</b><button class="enlace" data-esp="${p.clave}">${t("aj.abrir")}</button>`;
+    ul.append(li);
+  }
+  $("#esp-tope").value = String(e.tope_cache || 0);
+  refrescarDesplegables();
+}
+async function cargarEspacio() {
+  $("#esp-total").textContent = "…";
+  pintarEspacio(await api("espacio"));
+}
+async function accionEspacio(metodo, boton) {
+  const m = $("#esp-mensaje");
+  if (boton) boton.disabled = true;
+  m.textContent = t("esp.trabajando");
+  m.className = "ayuda";
+  const r = await api(metodo);
+  if (boton) boton.disabled = false;
+  m.textContent = r?.error || r?.mensaje || "";
+  m.className = `ayuda ${r?.error ? "res-mal" : "res-ok"}`;
+  if (r?.espacio) pintarEspacio(r.espacio);
+}
+// botones que borran: el primer clic pide confirmación en el propio botón (4 s) y el segundo borra
+function confirmarEnBoton(b, fn) {
+  if (b.dataset.seguro) { clearTimeout(Number(b.dataset.seguro)); delete b.dataset.seguro; b.classList.remove("peligro"); b.textContent = b.dataset.txt; return fn(); }
+  b.dataset.txt = b.textContent;
+  b.textContent = t("accion.seguro");
+  b.classList.add("peligro");
+  b.dataset.seguro = String(setTimeout(() => { delete b.dataset.seguro; b.classList.remove("peligro"); b.textContent = b.dataset.txt; }, 4000));
+}
+async function borrarDeLista(metodo, nombre) {
+  const r = await api(metodo, nombre);
+  if (!r || r.error) { aviso(r?.error || t("err.fallo"), { mal: true, ms: 8000 }); return; }
+  if (S.ultimaPista && S.ultimaPista.nombre === nombre) { S.ultimaPista = null; $("#resultado").hidden = true; }
+  if (S.vivo && !S.vivo.activo && S.vivo.nombre === nombre) { S.vivo = null; pintarVivo(); }
+  if (Array.isArray(r.pistas)) S.pistas = r.pistas;
+  pintarPistas();
+  sync();
+  aviso(r.mensaje);
+}
+
 async function refrescarPistas() {
   const r = await api("pistas");
   if (Array.isArray(r)) S.pistas = r;
@@ -1144,12 +1276,37 @@ function pintarPistas() {
   n.hidden = !S.pistas.length;
   const ul = $("#lista-pistas");
   ul.innerHTML = "";
+  const totalMb = S.pistas.reduce((s, p) => s + (p.mb || 0), 0);
+  $("#pistas-total").textContent = S.pistas.length ? t("pistas.total", { v: fmtTam(totalMb * 1e6) }) : "";
   if (!S.pistas.length) {
     ul.innerHTML = `<li class="vacia">${t("pistas.vacia")}</li>`;
     return;
   }
   for (const p of S.pistas) {
     const li = document.createElement("li");
+    if (p.vivo) {
+      // zona del modo en vivo: las mismas acciones que una pista, con «Reanudar» en vez de «Ver en 3D»
+      const km2 = p.zona ? (p.zona[0] * p.zona[1]) / 1e6 : 0;
+      const metaV = [p.fecha, km2 ? `${fmt(km2, 2)} km²` : "", t("pistas.pedazos", { n: p.pedazos }), fmtTam((p.mb || 0) * 1e6)].filter(Boolean).join(" · ");
+      li.innerHTML = `<div class="sin-img vivo"><span class="insignia-vivo">${t("vivo.insignia")}</span></div>
+        <div><b data-tip="${escapar(p.nombre)}" data-tip-truncado>${escapar(p.nombre)}</b><small>${escapar(metaV)}</small>
+        <div class="fila-botones">
+          ${p.reanudable ? `<button class="boton chico" data-p="reanudar">${t(p.activo ? "pistas.vivo_activo" : "vivo.reanudar")}</button>` : ""}
+          ${p.centro ? `<button class="boton chico" data-p="mapa">${t("pistas.mapa")}</button>` : ""}
+          <button class="boton chico" data-p="carpeta">${t("pistas.carpeta")}</button>
+          ${p.activo ? "" : `<button class="boton chico" data-p="borrar">${t("pistas.borrar")}</button>`}
+          ${p.ac ? `<span class="nota-chica">${t(p.ac_estado === "enlazada" ? "pistas.en_ac" : "pistas.ac_hecha")}</span>` : ""}
+        </div></div>`;
+      li.addEventListener("click", (e) => {
+        const a = e.target.closest("[data-p]")?.dataset.p;
+        if (a === "reanudar") reanudarVivo(p.nombre);
+        else if (a === "borrar") confirmarEnBoton(e.target.closest("[data-p]"), () => borrarDeLista("borrar_vivo", p.nombre));
+        else if (a === "carpeta") api("abrir_carpeta_vivo", p.nombre);
+        else if (a === "mapa") { cerrarCajones(); map.flyTo(p.centro, 14, { duration: 0.8 }); }
+      });
+      ul.append(li);
+      continue;
+    }
     const meta = [p.fecha, t("dato.mb", { v: fmt(p.mb, 1) }), t(`modo_nombre.${p.modo}`)].concat(p.trafico ? [t("pistas.con_trafico")] : []).join(" · ");
     li.innerHTML = `${p.cenital ? `<img src="${p.cenital}" alt="" loading="lazy">` : `<div class="sin-img"></div>`}
       <div><b data-tip="${escapar(p.nombre)}" data-tip-truncado>${escapar(p.nombre)}</b><small>${escapar(meta)}</small>
@@ -1159,10 +1316,12 @@ function pintarPistas() {
         <button class="boton chico" data-p="carpeta">${t("pistas.carpeta")}</button>
         <button class="boton chico" data-p="renombrar">${t("pistas.renombrar")}</button>
         ${p.ac ? `<button class="boton chico" data-p="ac">${t(p.ac_estado === "enlazada" ? "pistas.en_ac" : "pistas.instalar")}</button>` : ""}
+        <button class="boton chico" data-p="borrar">${t("pistas.borrar")}</button>
       </div></div>`;
     li.addEventListener("click", (e) => {
       const a = e.target.closest("[data-p]")?.dataset.p;
       if (a === "manejar") abrirVisor(p.glb);
+      else if (a === "borrar") confirmarEnBoton(e.target.closest("[data-p]"), () => borrarDeLista("borrar_pista", p.nombre));
       else if (a === "carpeta") api("abrir_carpeta", p.nombre);
       else if (a === "renombrar") abrirRenombrar(p.nombre);
       else if (a === "ac") instalarAC(p.nombre);
@@ -1304,17 +1463,25 @@ const ACCIONES = {
     m.textContent = r?.error || r?.mensaje || "";
     m.className = `ayuda ${r?.error ? "res-mal" : "res-ok"}`;
   },
+  // al detener, el panel se queda (con «Reanudar»): la zona sigue hecha y no hay que dibujarla otra vez
   "vivo-detener": async () => {
     if (S.vivo) S.vivo.detenido = true;
     await api("vivo_detener");
     clearInterval(tVivo);
-    S.vivo = null;
+    if (S.vivo) { S.vivo.activo = false; S.vivo.estado = null; }
     pintarVivo();
+    refrescarPistas();
     aviso(t("vivo.detenido"));
   },
+  "vivo-cerrar": () => { S.vivo = null; pintarVivo(); sync(); },
+  "vivo-reanudar": () => S.vivo && reanudarVivo(S.vivo.nombre),
+  "vivo-carpeta": () => S.vivo && api("abrir_carpeta_vivo", S.vivo.nombre),
+  "vivo-mapa": () => { const c = S.vivo?.centro || S.centro; if (c) map.flyTo(c, 14, { duration: 0.8 }); },
   "vivo-registro": () => S.vivo && verRegistro(S.vivo.registro),
   "carpeta-resultado": () => S.ultimaPista && api("abrir_carpeta", S.ultimaPista.nombre),
   "cerrar-cajon": cerrarCajones,
+  "esp-limpiar": (e) => accionEspacio("limpiar_espacio", e?.target?.closest("button")),
+  "esp-vaciar": (e) => { const b = e?.target?.closest("button") || $("#esp-vaciar"); confirmarEnBoton(b, () => accionEspacio("vaciar_cache", b)); },
   "abrir-salida": () => api("abrir_carpeta"),
   "cambiar-salida": async () => {
     const r = await api("elegir_carpeta", "salida");
@@ -1393,7 +1560,8 @@ document.addEventListener("input", (e) => {
     if (k === "google3d") api("guardar_ajustes", { google3d: S.google3d });
     if (k === "tokenCesium") api("guardar_ajustes", { token_cesium: S.tokenCesium.trim() });
     if (k === "vivoModo") dibujarZona();
-    if (k === "region") pedirRegion();
+    if (k === "region") { S.subregion = "auto"; pedirRegion(); }
+    if (k === "subregion") pintarSubregiones();
     sync();
   } else if (el.dataset.usar) {
     S.usar[el.dataset.usar] = el.checked;
@@ -1433,7 +1601,12 @@ function cambiarIdioma(idioma, guardar) {
 }
 
 $("#b-pistas").addEventListener("click", () => { abrirCajon("#cajon-pistas"); refrescarPistas(); });
-$("#b-ajustes").addEventListener("click", () => abrirCajon("#cajon-ajustes"));
+$("#b-ajustes").addEventListener("click", () => { abrirCajon("#cajon-ajustes"); if (!$("#cajon-ajustes").hidden) cargarEspacio(); });
+$("#esp-tope").addEventListener("change", async (e) => {
+  await api("guardar_ajustes", { cache_max_gb: Number(e.target.value) });
+  if (S.espacio) S.espacio.tope_cache = Number(e.target.value);
+});
+$("#esp-lista").addEventListener("click", (e) => { const k = e.target.closest("[data-esp]")?.dataset.esp; if (k) api("abrir_ruta_espacio", k); });
 
 document.addEventListener("contextmenu", (e) => {
   if (!e.target.closest("input, textarea, pre, .ruta-archivo, #mapa")) e.preventDefault();
@@ -2064,7 +2237,8 @@ function montarVidrioLiquido(host, { pildora = false, bisel = 10, prof = 12, lup
   const ev = await api("vivo_estado");
   if (ev && ev.activo) {
     S.vivo = { activo: true, puerto: ev.puerto, url: ev.url, nombre: ev.nombre, pistaAc: ev.pista_ac, zona: ev.zona || [0, 0],
-      ac: ev.ac, csp: ev.csp, semilla: ev.semilla, estado: null, registro: ev.registro || [] };
+      ac: ev.ac, csp: ev.csp, semilla: ev.semilla, estado: null, t0: Date.now(), centro: ev.centro,
+      registro: ev.registro || [] };
     if (ev.centro) { S.centro = ev.centro; S.ancho = ev.zona[0]; S.alto = ev.zona[1]; S.modo = "libre"; S.vivoModo = true; dibujarZona(); }
     $("#vivo-panel").hidden = false;
     pintarVivo();

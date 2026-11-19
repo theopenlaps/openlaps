@@ -18,6 +18,7 @@ from pathlib import Path
 from .. import __version__, URL
 from .. import regions, vivo
 from . import ajustes, assetto, servidor
+from . import espacio
 from .envivo import EnVivo, _puerto_libre, esperar_puerto
 from .google3d import Google3D
 from .generador import MAX_KM2, Trabajo, argumentos, nombre_valido
@@ -87,13 +88,22 @@ class Api:
         self._rev_cache[k] = res
         return res
 
-    def region(self, lat, lon):
+    def region(self, lat, lon, elegida=None):
+        """Perfil de ese punto. `elegida`: el país elegido a mano en la interfaz (sus subregiones son las que se
+        ofrecen; la automática se calcula dentro de él)."""
         la, lo = float(lat), float(lon)
         r = regions.detect(la, lo)
         pais_nom, zona = self._lugar_cerca(la, lo)
         pais = r.name if r.code not in ("eu", "generic") else (pais_nom or "")
+        base = regions.REGIONS.get(elegida) or r
+        en = idioma() == "en"
+        auto = regions.detect_sub(base, la, lo)
         return {"codigo": r.code, "nombre": r.name, "orto": r.ortho or "", "relieve": r.dem or "",
-                "pais": pais, "zona": zona}
+                "pais": pais, "zona": zona, "sub": auto.sub,
+                "subs": [{"codigo": s.sub, "nombre": s.sub_name_en if en else s.sub_name,
+                          "colores": ["#%02x%02x%02x" % tuple(c) for c in s.facade_colors]}
+                         for s in regions.subregiones(base.code)],
+                "colores": ["#%02x%02x%02x" % tuple(c) for c in base.facade_colors]}
 
     # ------------------------------------------------------------------ vista previa de OSM
     def vista_osm(self, op):
@@ -241,7 +251,123 @@ class Api:
         if not sal.is_dir():
             return []
         glbs = sorted(sal.glob("*.glb"), key=lambda p: p.stat().st_mtime, reverse=True)
-        return [p for p in (self._pista(g) for g in glbs) if p]
+        return self._zonas_vivo() + [p for p in (self._pista(g) for g in glbs) if p]
+
+    def _zonas_vivo(self):
+        """Zonas del modo en vivo preparadas desde la app (salida/vivo/<nombre>/openlaps_app.json): salen en «Mis
+        pistas» como las demás, para volver a abrirlas sin dibujar la zona otra vez."""
+        out = []
+        a = ajustes.cargar()
+        ac = assetto.detectar(a.get("ac"))
+        sal = ajustes.salida(a)
+        # también las de antes de que la app las apuntara y las pistas de AC que quedaron sin sus pedazos: no se
+        # pueden reanudar (no se sabe con qué opciones se hicieron), pero sí ver cuánto ocupan y borrarlas
+        nombres = {d.name for d in (sal / "vivo").iterdir() if d.is_dir()} if (sal / "vivo").is_dir() else set()
+        if (sal / "assetto_corsa").is_dir():
+            nombres |= {d.name[:-5] for d in (sal / "assetto_corsa").iterdir() if d.is_dir() and d.name.endswith("_vivo")}
+        for n in sorted(nombres):
+            carpeta = sal / "vivo" / n
+            f = carpeta / "openlaps_app.json"
+            d, centro = {}, None
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+                centro = [float(v) for v in d["op"]["centro"]]
+            except (OSError, ValueError, KeyError, TypeError):
+                d = {}
+                try:
+                    v = json.loads((carpeta / "vivo.json").read_text(encoding="utf-8"))
+                    centro = [float(v["lat0"]), float(v["lon0"])]
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            semilla = sal / "assetto_corsa" / f"{n}_vivo"
+            try:
+                st = (f if f.exists() else carpeta if carpeta.is_dir() else semilla).stat()
+            except OSError:
+                continue
+            out.append({
+                "nombre": n, "vivo": True, "glb": None, "cenital": None, "mb": None, "modo": "libre",
+                "reanudable": bool(d.get("op")),
+                "fecha": datetime.fromtimestamp(st.st_mtime).strftime("%d/%m/%Y %H:%M"), "_t": st.st_mtime,
+                "centro": centro, "zona": d.get("zona"),
+                "pedazos": sum(1 for _ in carpeta.glob("p_*.glb")) if carpeta.is_dir() else 0,
+                "activo": bool(self._vivo.activo and self._vivo.nombre == n),
+                "ac": (semilla / f"{n}_vivo.kn5").exists(),
+                "ac_estado": "enlazada" if ac and os.path.lexists(Path(ac) / "content" / "tracks" / f"{n}_vivo") else "no",
+                "trafico": False, "mb": round(espacio.tam_vivo(ajustes.salida(a), n, ac) / 1e6),
+            })
+        out.sort(key=lambda p: p.pop("_t"), reverse=True)
+        return out
+
+    # ------------------------------------------------------------------ espacio en disco
+    def espacio(self):
+        return espacio.medir()
+
+    def _ocupado(self):
+        return bool(self._trabajo and self._trabajo.activo and self._trabajo.tipo == "generar")
+
+    def borrar_pista(self, nombre):
+        """Borra una pista generada (también de Assetto Corsa)."""
+        nombre = nombre_valido(nombre)
+        if self._ocupado():
+            return {"error": t("borrar_ocupado")}
+        if assetto.jugando():
+            return {"error": t("borrar_en_uso", n=nombre)}
+        a = ajustes.cargar()
+        try:
+            libres = espacio.borrar_pista(assetto.detectar(a.get("ac")), ajustes.salida(a), nombre)
+        except RuntimeError as e:
+            return {"error": str(e)}
+        return {"ok": True, "mensaje": t("borrada", n=nombre, mb=round(libres / 1e6)), "pistas": self.pistas()}
+
+    def borrar_vivo(self, nombre):
+        """Borra una zona del modo en vivo (pedazos y pista de AC)."""
+        nombre = nombre_valido(nombre)
+        if (self._vivo.activo and self._vivo.nombre == nombre) or self._vivo_ac.activo:
+            return {"error": t("borrar_ocupado")}
+        if assetto.jugando():
+            return {"error": t("borrar_en_uso", n=nombre)}
+        a = ajustes.cargar()
+        try:
+            libres = espacio.borrar_vivo(assetto.detectar(a.get("ac")), ajustes.salida(a), nombre)
+        except RuntimeError as e:
+            return {"error": str(e)}
+        return {"ok": True, "mensaje": t("borrada", n=nombre, mb=round(libres / 1e6)), "pistas": self.pistas()}
+
+    def vaciar_cache(self):
+        if self._ocupado() or self._vivo.activo or self._vivo_ac.activo:
+            return {"error": t("borrar_ocupado")}
+        self.cancelar("borrador")
+        libres = espacio.vaciar_cache()
+        return {"ok": True, "mensaje": t("liberado", mb=round(libres / 1e6)), "espacio": espacio.medir()}
+
+    def limpiar_espacio(self):
+        """Lo mismo que la app hace sola al abrirse: quitar lo obsoleto y aplicar el tope de la caché."""
+        libres = espacio.mantenimiento()
+        return {"ok": True, "mensaje": t("liberado", mb=round(libres / 1e6)), "espacio": espacio.medir()}
+
+    def abrir_ruta_espacio(self, clave):
+        for p in espacio.medir()["partes"]:
+            if p["clave"] == clave and os.path.isdir(p["ruta"]):
+                os.startfile(p["ruta"])  # noqa: S606
+                return True
+        return False
+
+    def abrir_carpeta_vivo(self, nombre):
+        d = ajustes.salida() / "vivo" / nombre_valido(nombre)
+        os.startfile(d if d.is_dir() else ajustes.salida())  # noqa: S606
+        return True
+
+    def vivo_reanudar(self, nombre):
+        """Vuelve a arrancar el modo en vivo de una zona ya preparada (los pedazos hechos se aprovechan)."""
+        f = ajustes.salida() / "vivo" / nombre_valido(nombre) / "openlaps_app.json"
+        try:
+            op = json.loads(f.read_text(encoding="utf-8"))["op"]
+        except (OSError, ValueError, KeyError):
+            return {"error": t("vivo_sin_zona")}
+        r = self.vivo_iniciar(op)
+        if r.get("ok"):
+            r["op"] = op
+        return r
 
     def _pista(self, glb):
         glb = Path(glb)
@@ -260,7 +386,7 @@ class Api:
         return {
             "nombre": n, "glb": f"/salida/{urllib.parse.quote(glb.name)}?t={int(st.st_mtime)}",
             "cenital": f"/salida/{urllib.parse.quote(n)}_cenital.jpg?t={int(st.st_mtime)}" if (glb.parent / f"{n}_cenital.jpg").exists() else None,
-            "mb": round(st.st_size / 1e6, 1), "fecha": datetime.fromtimestamp(st.st_mtime).strftime("%d/%m/%Y %H:%M"),
+            "mb": round(espacio.tam_pista(glb.parent, n) / 1e6, 1), "fecha": datetime.fromtimestamp(st.st_mtime).strftime("%d/%m/%Y %H:%M"),
             "area_km2": info.get("area_km2"), "segundos": info.get("segundos"), "modo": info.get("modo", "libre"),
             "centro": info.get("centro"), "km": (info.get("carreteras") or {}).get("km"),
             "ac": ac, "ac_estado": assetto.estado(assetto.detectar(a.get("ac")), ac_dir) if ac else "no",
@@ -451,6 +577,13 @@ class Api:
         except OSError as e:
             return {"error": t("no_inicia", e=e)}
         r.update(ok=True, csp=assetto.csp(ac), ac=bool(ac))
+        try:        # para «Mis pistas»: con qué opciones se preparó esta zona
+            d = ajustes.salida() / "vivo" / r["nombre"]
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "openlaps_app.json").write_text(json.dumps({"op": op, "zona": r.get("zona")}, ensure_ascii=False),
+                                                 encoding="utf-8")
+        except (OSError, TypeError, ValueError):
+            pass
         if op.get("ac", True) and ac and not assetto.csp(ac):
             r["aviso"] = t("vivo_sin_csp")
         return r
@@ -595,6 +728,8 @@ def main(argv=None):
     }, api, eventos, token, a.puerto)
     url = f"http://127.0.0.1:{puerto}/app/index.html?token={token}"
     ajustes.DATOS.mkdir(parents=True, exist_ok=True)
+    # en segundo plano: quitar lo que ya no sirve (pedazos de otra versión, descargas a medias) y el tope de la caché
+    threading.Thread(target=lambda: espacio.mantenimiento(log=print), daemon=True).start()
 
     if a.navegador:
         print(f"OpenLaps en {url}  (Ctrl+C para salir)", flush=True)

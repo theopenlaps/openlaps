@@ -40,6 +40,7 @@ DEFECTO = {
     "calidad": "normal",
     "exportar_ac": True,
     "jugar_al_terminar": False,  # abrir Assetto Corsa en la pista al terminar de generarla
+    "cache_max_gb": 10,   # tope de la caché de descargas (GB); al pasarlo se borra lo menos usado. 0 = sin tope
     "trafico": True,      # AC: generar los carriles de tráfico y abrir la pista en el modo Traffic de CSP
     "capa": "mapa",
     "vista": None,        # mapa y zona de la última sesión

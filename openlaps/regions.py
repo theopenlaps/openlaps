@@ -14,7 +14,7 @@ Fuentes de alta resolución usadas:
 - Estados Unidos: ortofoto NAIP (USDA, 60 cm, dominio público), relieve 3DEP del USGS (1 m con
   LiDAR, dominio público) y alturas de edificios de Overture Maps (ODbL).
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass
@@ -64,6 +64,10 @@ class Region:
     flat_from_floors: int = 0       # desde cuántas plantas la azotea es plana (0 = según roof)
     tower_floors: int = 0           # desde cuántas plantas la fachada es de torre de oficinas (0 = nunca)
     attribution: list = field(default_factory=list)
+    # subregión (ver SUBREGIONES): "" en el perfil del país
+    sub: str = ""
+    sub_name: str = ""
+    sub_name_en: str = ""
 
 
 MX = Region(
@@ -127,6 +131,156 @@ GENERIC = Region(code="generic", name="Genérico", country="")
 
 REGIONS = {r.code: r for r in (MX, ES, FR, US, EU, GENERIC)}
 
+
+# =========================================================================== subregiones
+# Dentro de un país no se construye igual en todas partes: en México las casas de colores son cosa de los pueblos
+# del centro y del sur, no de las colonias de bloque gris de una gran ciudad ni del norte; en España el pueblo
+# blanco andaluz no se parece a la piedra y la pizarra del norte. Una subregión es el perfil del país con unos
+# pocos campos cambiados (colores de fachada y de tejado, forma del techo, plantas típicas, especies). Tiene
+# siempre las mismas 8 fachadas: no añade materiales ni texturas a la pista, solo cambia cuáles son.
+#
+# Las cajas son (lat sur, lat norte, lon oeste, lon este), aproximadas a propósito: el estilo cambia poco a poco
+# y en el borde se puede elegir a mano (--subregion, o «Estilo de la zona» en la app).
+def _sub(base, sub, nombre, nombre_en, **cambios):
+    return replace(base, sub=sub, sub_name=nombre, sub_name_en=nombre_en, **cambios)
+
+
+_MX_PUEBLO = _sub(
+    MX, "mx_pueblo", "Pueblo (mezcla de color, blanco y bloque)", "Town (mix of colour, white and bare block)",
+    # el pueblo corriente: la mitad pintado de color, lo demás blanco, beige o bloque sin pintar
+    facade_colors=[(236, 232, 222), (214, 196, 160), (158, 152, 144), (196, 110, 78), (226, 186, 96),
+                   (96, 132, 170), (222, 150, 140), (140, 170, 130)])
+_MX_COLONIAL = _sub(
+    MX, "mx_colonial", "Pueblo colonial de colores", "Colourful colonial town",
+    facade_colors=list(MX.facade_colors))
+_MX_CIUDAD = _sub(
+    MX, "mx_ciudad", "Gran ciudad (bloque y concreto)", "Big city (block and concrete)",
+    # colonias de autoconstrucción y edificios: gris de bloque, concreto, blancos y beiges; el color es la excepción
+    facade_colors=[(150, 146, 140), (172, 168, 160), (228, 224, 214), (206, 190, 160), (222, 206, 170),
+                   (160, 166, 170), (176, 112, 88), (224, 196, 120)],
+    levels_default=(1, 2, 2, 2, 3, 3, 4))
+_MX_NORTE = _sub(
+    MX, "mx_norte", "Norte (desierto, tonos arena)", "North (desert, sand tones)",
+    facade_colors=[(226, 212, 184), (236, 230, 216), (204, 184, 150), (214, 198, 170), (240, 236, 228),
+                   (190, 170, 140), (222, 190, 150), (200, 196, 186)],
+    levels_default=(1, 1, 1, 2, 2),
+    species=("encino", "pino", "arbusto", "palma", "organo", "maguey"))
+_MX_SURESTE = _sub(
+    MX, "mx_sureste", "Sureste (blanco y pastel, trópico)", "Southeast (white and pastel, tropics)",
+    facade_colors=[(242, 238, 228), (238, 214, 140), (232, 196, 170), (180, 210, 200), (240, 228, 200),
+                   (214, 150, 120), (226, 232, 236), (236, 170, 150)],
+    levels_default=(1, 1, 1, 2),
+    species=("encino", "arbusto", "tropical", "palma"))
+
+_ES_NORTE = _sub(
+    ES, "es_norte", "Norte (piedra, blanco y pizarra)", "North (stone, white and slate)",
+    facade_colors=[(232, 230, 224), (214, 212, 206), (190, 186, 178), (168, 162, 152), (238, 236, 230),
+                   (204, 196, 182), (150, 146, 140), (222, 214, 198)],
+    roof_colors=[(96, 98, 104), (150, 74, 52), (120, 112, 104), (168, 84, 58)],
+    species=("encino", "pino", "arbusto", "tropical"))
+_ES_SUR = _sub(
+    ES, "es_sur", "Sur (pueblo blanco)", "South (white village)",
+    facade_colors=[(246, 244, 238), (240, 238, 230), (236, 232, 222), (244, 240, 232), (228, 222, 206),
+                   (238, 226, 196), (232, 236, 236), (222, 210, 186)],
+    roof_colors=[(182, 102, 70), (196, 120, 84), (168, 84, 58), (176, 110, 80)])
+_ES_MEDITERRANEO = _sub(
+    ES, "es_mediterraneo", "Mediterráneo (ocres y salmón)", "Mediterranean (ochre and salmon)",
+    facade_colors=[(232, 214, 180), (226, 196, 150), (214, 170, 130), (240, 232, 214), (206, 150, 116),
+                   (236, 222, 160), (222, 206, 190), (196, 180, 150)])
+_ES_CANARIAS = _sub(
+    ES, "es_canarias", "Canarias (blanco, color y azotea)", "Canary Islands (white, colour and flat roofs)",
+    facade_colors=[(244, 242, 236), (238, 214, 120), (96, 150, 170), (214, 110, 80), (240, 236, 226),
+                   (130, 170, 120), (232, 180, 150), (226, 222, 210)],
+    roof="flat", species=("pino", "arbusto", "tropical", "palma"))
+
+_FR_SUR = _sub(
+    FR, "fr_sur", "Sur (ocres y teja)", "South (ochre and clay tiles)",
+    facade_colors=[(232, 208, 160), (226, 190, 140), (214, 170, 120), (240, 226, 196), (206, 160, 120),
+                   (236, 214, 180), (222, 196, 170), (198, 176, 140)],
+    roof_colors=[(182, 102, 70), (196, 120, 84), (168, 84, 58), (176, 110, 80)],
+    species=("encino", "pino", "arbusto", "tropical", "olivo", "palma"))
+
+_US_SUROESTE = _sub(
+    US, "us_suroeste", "Suroeste (estuco y teja)", "Southwest (stucco and clay tiles)",
+    facade_colors=[(226, 212, 188), (214, 196, 166), (236, 228, 212), (198, 178, 146), (222, 200, 170),
+                   (206, 186, 160), (240, 236, 228), (188, 160, 130)],
+    roof_kind="tiles", roof_colors=[(168, 84, 58), (150, 74, 52), (182, 102, 70), (120, 112, 104)])
+_US_PACIFICO = _sub(
+    US, "us_pacifico", "Costa del Pacífico (madera pintada en pastel)", "Pacific coast (pastel painted wood)",
+    facade_colors=[(232, 226, 210), (196, 206, 198), (214, 196, 170), (170, 186, 196), (226, 206, 186),
+                   (160, 168, 150), (206, 190, 200), (150, 156, 164)])
+_US_SURESTE = _sub(
+    US, "us_sureste", "Sureste y Golfo (estuco pastel)", "Southeast and Gulf (pastel stucco)",
+    facade_colors=[(240, 232, 214), (236, 214, 180), (226, 196, 176), (190, 214, 206), (240, 238, 232),
+                   (222, 206, 160), (206, 196, 214), (214, 222, 226)])
+
+# por país, en el orden en que se prueban sus cajas (la primera que contiene el punto gana)
+SUBREGIONES = {
+    "mx": [_MX_CIUDAD, _MX_COLONIAL, _MX_SURESTE, _MX_NORTE, _MX_PUEBLO],
+    "es": [_ES_CANARIAS, _ES_NORTE, _ES_SUR, _ES_MEDITERRANEO],
+    "fr": [_FR_SUR],
+    "us": [_US_SUROESTE, _US_SURESTE, _US_PACIFICO],
+}
+SUBS = {s.sub: s for lista in SUBREGIONES.values() for s in lista}
+
+_CAJAS = {
+    # zonas metropolitanas: Valle de México, Guadalajara, Monterrey, Puebla, Toluca, Tijuana, León, Querétaro,
+    # Ciudad Juárez, Mérida no (sureste)
+    "mx_ciudad": [(19.05, 19.75, -99.40, -98.85), (20.50, 20.80, -103.50, -103.20), (25.55, 25.85, -100.50, -100.10),
+                  (18.95, 19.15, -98.32, -98.10), (19.22, 19.36, -99.72, -99.52), (32.40, 32.56, -117.13, -116.80),
+                  (21.05, 21.20, -101.76, -101.58), (20.53, 20.68, -100.50, -100.34), (31.60, 31.78, -106.56, -106.30)],
+    # Guanajuato, San Miguel de Allende, Oaxaca, San Cristóbal, Campeche, Tlacotalpan, Tepoztlán, Taxco, Pátzcuaro,
+    # Zacatlán / Cuetzalan, Valle de Bravo, Izamal
+    "mx_colonial": [(20.98, 21.05, -101.30, -101.22), (20.88, 20.95, -100.78, -100.70), (17.03, 17.10, -96.76, -96.69),
+                    (16.70, 16.77, -92.67, -92.60), (19.82, 19.87, -90.56, -90.50), (18.60, 18.63, -95.67, -95.64),
+                    (18.95, 19.02, -99.13, -99.06), (18.53, 18.58, -99.63, -99.58), (19.49, 19.54, -101.63, -101.58),
+                    (19.90, 20.05, -97.99, -97.50), (19.17, 19.22, -100.15, -100.10), (20.92, 20.95, -89.04, -89.00)],
+    # península de Yucatán, Tabasco y la costa de Chiapas
+    "mx_sureste": [(17.8, 21.7, -92.5, -86.6), (17.2, 18.7, -94.2, -92.5)],
+    "mx_norte": [(24.0, 32.8, -118.5, -97.0)],
+    "mx_pueblo": [(14.4, 32.8, -118.5, -86.6)],
+    "es_canarias": [(27.5, 29.5, -18.3, -13.3)],
+    # Galicia, Asturias, Cantabria, País Vasco y el norte de Navarra, León y Burgos
+    "es_norte": [(42.3, 43.9, -9.6, -1.4), (41.8, 42.3, -9.0, -6.6)],
+    # Andalucía, Murcia y el sur de Extremadura
+    "es_sur": [(35.9, 38.6, -7.6, -0.6)],
+    # costa de Cataluña, Comunidad Valenciana y Baleares
+    "es_mediterraneo": [(38.6, 40.6, -0.9, 0.6), (40.6, 42.5, 0.3, 3.4), (38.6, 40.1, 1.1, 4.4)],
+    "fr_sur": [(41.3, 44.6, -1.9, 9.7)],
+    # sur de California, Arizona, Nuevo México, sur de Nevada y oeste de Texas
+    "us_suroeste": [(31.3, 37.0, -121.0, -100.0), (25.8, 31.3, -106.7, -100.0)],
+    # Florida y la costa del Golfo
+    "us_sureste": [(24.3, 31.0, -98.0, -79.8)],
+    "us_pacifico": [(37.0, 49.5, -125.0, -120.0)],
+}
+
+
+def subregiones(code):
+    """Subregiones de ese país (lista vacía si no tiene)."""
+    return list(SUBREGIONES.get(code, []))
+
+
+def detect_sub(region, lat, lon):
+    """Subregión de ese punto dentro del país `region`, o el propio perfil del país si no cae en ninguna."""
+    for s in SUBREGIONES.get(region.code, []):
+        for la0, la1, lo0, lo1 in _CAJAS.get(s.sub, ()):
+            if la0 <= lat <= la1 and lo0 <= lon <= lo1:
+                return s
+    return region
+
+
+def elegir(region, sub, lat, lon):
+    """Perfil para generar: `region` y `sub` como llegan de la línea de comandos ("auto" o un código; en `sub`
+    también "no" para quedarse con el perfil del país)."""
+    r = detect(lat, lon) if region in (None, "", "auto") else REGIONS[SUBS[region].code if region in SUBS else region]
+    if region in SUBS:
+        return SUBS[region]
+    if sub in (None, "", "auto"):
+        return detect_sub(r, lat, lon)
+    if sub in SUBS and SUBS[sub].code == r.code:
+        return SUBS[sub]
+    return r                     # "no", o una subregión de otro país: el perfil del país
+
 _active = MX
 
 
@@ -172,7 +326,7 @@ def _frontera_us_mx(lon):
 
 def set_active(region):
     global _active
-    _active = region if isinstance(region, Region) else REGIONS[region]
+    _active = region if isinstance(region, Region) else (REGIONS.get(region) or SUBS[region])
     return _active
 
 

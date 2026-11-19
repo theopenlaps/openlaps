@@ -7,6 +7,10 @@ Es una opción aparte: la generación normal (`python -m openlaps ...`) no cambi
 - Todo comparte un origen fijo (el punto de partida), así cada pedazo cae en su sitio sin moverlo.
 - Pedazos de 256 m: cada uno se genera con 64 m de margen (calles, cruces y relieve de alrededor) y se
   recorta a su centro; lo pequeño (árboles, postes, señales) va entero al pedazo donde cae su centro.
+- La unión entre pedazos: el corte es exacto (los triángulos que cruzan el borde se parten por él, así dos
+  vecinos acaban en la misma línea, sin dientes, huecos ni solapes) y cada pedazo nuevo se cose a los vecinos
+  que ya existen (sus alturas junto al borde se llevan a las del vecino, repartiendo la diferencia en unos
+  metros). El suelo lleva además un faldón hacia abajo en el borde, por si el vecino aún no está.
 - OSM se baja por teselas de 512 m, por delante del coche: espejos de Overpass con espera corta y, si no
   contestan, la API oficial de OpenStreetMap. Todo queda en caché.
 - Varios procesos generan a la vez, siempre el pedazo más urgente según dónde está el coche y hacia dónde va.
@@ -38,7 +42,7 @@ TESELA_CAT = 512.0   # teselas del Catastro (el servicio corta las respuestas gr
 PAD_OSM = 200.0      # OSM alrededor del pedazo (calles que entran, edificios del borde)
 EXT_MAX = 1500.0     # hasta dónde se completa un túnel o un puente que sale del pedazo (m)
 _A_PIE = {"footway", "path", "steps", "cycleway", "pedestrian", "bridleway", "corridor", "elevator", "platform"}
-VERSION = 13          # súbela si cambia el formato de los pedazos: los de caché se regeneran
+VERSION = 14          # súbela si cambia el formato de los pedazos: los de caché se regeneran
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 VISOR = os.path.join(os.path.dirname(AQUI), "viewer")
@@ -95,12 +99,12 @@ def _iniciar(args_dict, lat0, lon0, excluir=None, lado=None, margen=None, pad_os
     from . import pipeline, regions
     configurar(lado, margen, pad_osm, tesela_osm)
     args = argparse.Namespace(**args_dict)
-    regions.set_active(regions.detect(lat0, lon0) if args.region == "auto" else args.region)
+    regions.set_active(regions.elegir(args.region, getattr(args, "subregion", "auto"), lat0, lon0))
     _W.update(args=args, origen=(lat0, lon0), excluir=excluir, tex_cache={},
               plantilla=pipeline.preparar_escena(args, log=lambda *a: None))
 
 
-def _escena(i, j, elementos, partes_cat=None, log=None, ext=None, excluir=None):
+def _escena(i, j, elementos, partes_cat=None, log=None, ext=None, excluir=None, carpeta=None):
     """Escena del pedazo (i, j), ya recortada a su centro y con el suelo renombrado. Devuelve (escena, terreno)."""
     from . import pipeline
     from .geo import LocalProjection
@@ -116,6 +120,20 @@ def _escena(i, j, elementos, partes_cat=None, log=None, ext=None, excluir=None):
                      osm_data=OSM.parse({"elements": elementos}), pedazo=(x0, y0, x1, y1), cat_data=partes_cat,
                      extension=ext)
     recortar(scene, (x0, y0, x1, y1), excluir=excluir if excluir is not None else _W.get("excluir"))
+    if carpeta:
+        vecinos = []
+        for di, dj, eje, valor in ((-1, 0, 0, x0), (1, 0, 0, x1), (0, -1, 1, y0), (0, 1, 1, y1)):
+            fv = os.path.join(carpeta, f"p_{i + di}_{j + dj}.olv")
+            if os.path.exists(fv):
+                try:
+                    vecinos.append((eje, valor, leer_olv(fv)))
+                except (OSError, ValueError, struct.error):
+                    pass
+        if vecinos:
+            mayor = coser(scene, (x0, y0, x1, y1), vecinos)
+            if log:
+                log(f"  cosido a {len(vecinos)} vecinos (corrección máxima {mayor * 100:.0f} cm)")
+    faldones(scene, (x0, y0, x1, y1))
     renombrar_terreno(scene, i, j)
     return scene, r["terr"]
 
@@ -142,7 +160,7 @@ def _generar(i, j, elementos, carpeta, partes_cat=None, ext=None):
     log = []
     try:
         scene, _ = _escena(i, j, elementos, partes_cat, log=lambda m: log.append(f"{time.time() - t0:5.1f} {m}"),
-                           ext=ext, excluir=_W.get("excluir"))
+                           ext=ext, excluir=_W.get("excluir"), carpeta=carpeta)
     except Exception:  # noqa: BLE001
         return {"i": i, "j": j, "error": traceback.format_exc(limit=6), "log": log[-12:]}
     x0, y0, x1, y1 = nucleo(i, j)
@@ -156,7 +174,8 @@ def _generar(i, j, elementos, carpeta, partes_cat=None, ext=None):
     os.replace(base + ".olv.part", base + ".olv")
     os.replace(base + ".glb.part", base + ".glb")       # el .glb al final: su presencia marca el pedazo listo
     log.append(f"{time.time() - t0:5.1f} exportado")
-    return {"i": i, "j": j, "seg": round(time.time() - t0, 1), "tri": n_tri, "log": log}
+    cosido = next((m.split("cosido", 1)[1].strip() for m in reversed(log) if "cosido" in m), "")
+    return {"i": i, "j": j, "seg": round(time.time() - t0, 1), "tri": n_tri, "log": log, "cosido": cosido}
 
 
 def recortar(scene, caja, excluir=None):
@@ -176,6 +195,9 @@ def recortar(scene, caja, excluir=None):
             m &= ~((p[:, 0] >= ex0) & (p[:, 0] < ex1) & (p[:, 1] >= ey0) & (p[:, 1] < ey1))
         return m
 
+    cortes = [(0, x0), (0, x1), (1, y0), (1, y1)]
+    if excluir is not None:
+        cortes += [(0, excluir[0]), (0, excluir[2]), (1, excluir[1]), (1, excluir[3])]
     for key, piezas in list(scene.pieces.items()):
         nuevas = []
         for p in piezas:
@@ -195,9 +217,12 @@ def recortar(scene, caja, excluir=None):
             if sin_cruce and bx0 >= x0 and bx1 < x1 and by0 >= y0 and by1 < y1:
                 nuevas.append(p)
                 continue
+            # corte exacto: los triángulos que cruzan una línea de corte se parten por ella (si se repartieran
+            # enteros según su centroide, el borde quedaría dentado y distinto en cada vecino)
             f = p.faces
-            keep = dentro(p.pos[f].mean(1)[:, :2])
-            if key[0] != "terreno":
+            # lo que se pisa y el suelo se cortan siempre por el borde (una pieza corta de calzada que fuera
+            # entera a un pedazo asomaría sobre el vecino y no se podría coser con él)
+            if key[0] != "terreno" and not _es_base(*key):
                 n = len(p.pos)
                 filas = np.concatenate([f[:, 0], f[:, 1]])
                 cols = np.concatenate([f[:, 1], f[:, 2]])
@@ -210,7 +235,26 @@ def recortar(scene, caja, excluir=None):
                 chico = (mx - mn).max(1) < 40.0
                 cen_ok = dentro((mn + mx) / 2)
                 lf = lab[f[:, 0]]
-                keep = np.where(chico[lf], cen_ok[lf], keep)
+                # lo pequeño va entero donde cae su centro; lo grande se parte por las líneas de corte
+                enteras = f[chico[lf] & cen_ok[lf]]
+                grande = f[~chico[lf]]
+                if len(grande):
+                    usados, inv = np.unique(grande.ravel(), return_inverse=True)
+                    pg = Piece(p.pos[usados], p.uv[usados], inv.reshape(-1, 3), p.nrm[usados])
+                    for eje, valor in cortes:
+                        pg = partir(pg, eje, valor)
+                    fg = pg.faces[dentro(pg.pos[pg.faces].mean(1)[:, :2])]
+                    if len(fg):
+                        usados, inv = np.unique(fg.ravel(), return_inverse=True)
+                        nuevas.append(Piece(pg.pos[usados], pg.uv[usados], inv.reshape(-1, 3), pg.nrm[usados]))
+                if len(enteras):
+                    usados, inv = np.unique(enteras.ravel(), return_inverse=True)
+                    nuevas.append(Piece(p.pos[usados], p.uv[usados], inv.reshape(-1, 3), p.nrm[usados]))
+                continue
+            for eje, valor in cortes:
+                p = partir(p, eje, valor)
+            f = p.faces
+            keep = dentro(p.pos[f].mean(1)[:, :2])
             if keep.all():
                 nuevas.append(p)
             elif keep.any():
@@ -222,6 +266,210 @@ def recortar(scene, caja, excluir=None):
         else:
             del scene.pieces[key]
     scene.dummies = []
+
+
+def partir(p, eje, valor, eps=1e-4):
+    """Parte por la recta `eje` = `valor` (0: x, 1: y) los triángulos de la pieza que la cruzan, interpolando
+    posición, uv y normal. No quita nada: después cada triángulo cae entero a un lado."""
+    from .mesh import Piece
+    d = p.pos[:, eje] - valor
+    lado = np.where(d > eps, 1, np.where(d < -eps, -1, 0))
+    lf = lado[p.faces]
+    cruza = (lf.max(1) > 0) & (lf.min(1) < 0)
+    if not cruza.any():
+        return p
+    pos, uv, nrm = [p.pos], [p.uv], [p.nrm]
+    n = len(p.pos)
+    nuevos = {}
+
+    def corte(a, b):
+        nonlocal n
+        k = (a, b) if a < b else (b, a)
+        if k not in nuevos:
+            u = d[a] / (d[a] - d[b])
+            q = p.pos[a] + (p.pos[b] - p.pos[a]) * u
+            q[eje] = valor
+            nn = p.nrm[a] + (p.nrm[b] - p.nrm[a]) * u
+            pos.append(q[None])
+            uv.append((p.uv[a] + (p.uv[b] - p.uv[a]) * u)[None])
+            nrm.append((nn / max(float(np.linalg.norm(nn)), 1e-9))[None])
+            nuevos[k] = n
+            n += 1
+        return nuevos[k]
+
+    caras = [p.faces[~cruza]]
+    extra = []
+    for tri in p.faces[cruza]:
+        s = lado[tri]
+        if (s == 0).any():                        # un vértice sobre la recta y los otros dos a cada lado
+            k = int(np.flatnonzero(s == 0)[0])
+            a, b, c = (int(tri[(k + m) % 3]) for m in range(3))
+            q = corte(b, c)
+            extra += [(a, b, q), (a, q, c)]
+            continue
+        k = int(np.flatnonzero(s == -np.sign(s.sum()))[0])    # el vértice que queda solo a su lado
+        a, b, c = (int(tri[(k + m) % 3]) for m in range(3))
+        ab, ca = corte(a, b), corte(c, a)
+        extra += [(a, ab, ca), (ab, b, c), (ab, c, ca)]
+    caras.append(np.array(extra, np.int64).reshape(-1, 3))
+    return Piece(np.vstack(pos), np.vstack(uv), np.vstack(caras), np.vstack(nrm))
+
+
+FALDON = 1.0          # cuánto baja el faldón del suelo en el borde del pedazo (m)
+COSER_M = 10.0        # franja junto al borde en la que se reparte la diferencia de altura con el vecino (m)
+COSER_MAX = 0.8       # diferencias mayores no son la misma superficie (otro nivel): no se cosen
+
+
+def faldones(scene, caja):
+    """Faldón vertical hacia abajo en los bordes del suelo del pedazo: si el vecino queda unos centímetros más
+    bajo (o aún no está), no se ve el vacío por la rendija."""
+    x0, y0, x1, y1 = caja
+    for key, piezas in list(scene.pieces.items()):
+        if key[0] != "terreno":
+            continue
+        for p in list(piezas):
+            en = [np.abs(p.pos[:, 0] - x0) < 1e-3, np.abs(p.pos[:, 0] - x1) < 1e-3,
+                  np.abs(p.pos[:, 1] - y0) < 1e-3, np.abs(p.pos[:, 1] - y1) < 1e-3]
+            pos, uv, nrm, caras = [], [], [], []
+            for m in en:
+                if m.sum() < 2:
+                    continue
+                for a, b in ((0, 1), (1, 2), (2, 0)):
+                    e = p.faces[m[p.faces[:, a]] & m[p.faces[:, b]]][:, [a, b]]
+                    for va, vb in e:
+                        k = sum(len(x) for x in pos)
+                        bajo = p.pos[[va, vb]] - [0, 0, FALDON]
+                        pos.append(np.vstack([p.pos[[va, vb]], bajo]))
+                        uv.append(p.uv[[va, vb, va, vb]])
+                        nrm.append(p.nrm[[va, vb, va, vb]])
+                        # la arista va en el sentido del triángulo (interior a su izquierda): el faldón mira afuera
+                        caras += [(k + 1, k, k + 2), (k + 1, k + 2, k + 3)]
+            if caras:
+                scene.add(key[0], key[1], np.vstack(pos), np.vstack(uv), caras, normals=np.vstack(nrm), phys=None)
+
+
+def leer_olv(path):
+    """[(nombre, material, física, pos Nx3 en ejes locales (x este, y norte, z arriba), caras)] de un .olv."""
+    with open(path, "rb") as fh:
+        d = fh.read()
+    if d[:4] != b"OLV1":
+        raise ValueError("no es un .olv")
+    n = struct.unpack_from("<I", d, 4)[0]
+    o = 8
+    out = []
+    for _ in range(n):
+        txt = []
+        for _ in range(4):
+            k = struct.unpack_from("<H", d, o)[0]
+            txt.append(d[o + 2:o + 2 + k].decode())
+            o += 2 + k
+        nv, ni = struct.unpack_from("<II", d, o)
+        o += 8
+        v = np.frombuffer(d, "<f4", nv * 8, o).reshape(nv, 8)
+        o += nv * 32
+        idx = np.frombuffer(d, "<u2", ni, o).reshape(-1, 3).astype(np.int64)
+        o += ni * 2
+        out.append((txt[0], txt[1], txt[2], np.column_stack([v[:, 0], -v[:, 2], v[:, 1]]).astype(float), idx))
+    return out
+
+
+def _alturas_en(tris, pts):
+    """Alturas de los triángulos (Mx3x3) que cubren en planta cada punto: lista de arrays, una por punto."""
+    out = [[] for _ in pts]
+    if not len(tris):
+        return out
+    mn, mx = tris[..., :2].min(1), tris[..., :2].max(1)
+    for k, q in enumerate(pts):
+        c = np.flatnonzero((mn[:, 0] <= q[0] + 1e-6) & (mx[:, 0] >= q[0] - 1e-6) &
+                           (mn[:, 1] <= q[1] + 1e-6) & (mx[:, 1] >= q[1] - 1e-6))
+        for t3 in tris[c]:
+            a, b, c3 = t3[:, :2]
+            det = (b[1] - c3[1]) * (a[0] - c3[0]) + (c3[0] - b[0]) * (a[1] - c3[1])
+            if abs(det) < 1e-12:
+                continue
+            w0 = ((b[1] - c3[1]) * (q[0] - c3[0]) + (c3[0] - b[0]) * (q[1] - c3[1])) / det
+            w1 = ((c3[1] - a[1]) * (q[0] - c3[0]) + (a[0] - c3[0]) * (q[1] - c3[1])) / det
+            w2 = 1 - w0 - w1
+            if min(w0, w1, w2) >= -1e-6:
+                out[k].append(w0 * t3[0, 2] + w1 * t3[1, 2] + w2 * t3[2, 2])
+    return out
+
+
+def _es_base(grupo, material, fisica):
+    """Superficies que mandan en la costura: lo que se pisa (calzada, banqueta…) y el suelo."""
+    return fisica in ("ROAD", "PAVEMENT", "KERB", "LOOSE", "MXCOBBLE", "DIRT", "GRASS", "PITLANE") or \
+        grupo == "terreno" or material.startswith(("tv_", "terreno_"))
+
+
+def coser(scene, caja, vecinos):
+    """Lleva las alturas del borde del pedazo a las de los vecinos ya generados. `vecinos`: [(eje, valor, mallas
+    del vecino como las da leer_olv)], con el borde común en `eje` = `valor`. En cada vértice de borde de una
+    superficie base se mira la altura del vecino en ese punto; la diferencia se aplica a todo lo que hay cerca
+    de esa superficie (rayas, bordillos, desgaste…) y se desvanece hacia dentro en COSER_M metros. Devuelve la
+    mayor corrección aplicada (m)."""
+    from scipy.spatial import cKDTree
+    x0, y0, x1, y1 = caja
+    mayor = 0.0
+    for eje, valor, mallas in vecinos:
+        otro = 1 - eje
+        hacia = 1.0 if abs(valor - (x1, y1)[eje]) < 1e-6 else -1.0      # de qué lado queda el vecino
+        # triángulos base del vecino pegados al borde, por tipo de superficie: la calzada se cose con la calzada
+        # y la banqueta con la banqueta (si los anchos no coinciden, la calzada no debe subir al bordillo de al lado)
+        tv = {}
+        for nombre, mat, phys, pos, idx in mallas:
+            if not len(idx) or not _es_base(nombre.split("_")[0], mat, phys):
+                continue
+            t3 = pos[idx]
+            cerca = np.abs(t3[..., eje] - valor).min(1) < 0.05
+            tv.setdefault(phys or "suelo", []).append(t3[cerca])
+        # vértices de borde de las superficies base de este pedazo
+        mios = {}
+        for key, piezas in scene.pieces.items():
+            if not _es_base(key[0], key[1], key[2]):
+                continue
+            for p in piezas:
+                m = np.abs(p.pos[:, eje] - valor) < 1e-3
+                if m.any():
+                    mios.setdefault(key[2] or "suelo", []).append(p.pos[m][:, [otro, 2]])
+        bs, bz, dz = [], [], []
+        for clase, lista in mios.items():
+            if clase not in tv:
+                continue
+            tris = np.concatenate(tv[clase])
+            sz = np.unique(np.round(np.concatenate(lista), 3), axis=0)
+            pts = np.zeros((len(sz), 2))
+            pts[:, eje] = valor + hacia * 0.01
+            pts[:, otro] = sz[:, 0]
+            for k, zs in enumerate(_alturas_en(tris, pts)):
+                if zs:
+                    zs = np.array(zs)
+                    j = int(np.argmin(np.abs(zs - sz[k, 1])))
+                    if abs(zs[j] - sz[k, 1]) <= COSER_MAX:
+                        bs.append(sz[k, 0])
+                        bz.append(sz[k, 1])
+                        dz.append(zs[j] - sz[k, 1])
+        if not bs:
+            continue
+        bs, bz, dz = np.array(bs), np.array(bz), np.array(dz)
+        mayor = max(mayor, float(np.abs(dz).max()))
+        arbol = cKDTree(np.column_stack([bs, bz * 2.0]))       # la altura pesa doble: no mezclar niveles
+        for piezas in scene.pieces.values():
+            for p in piezas:
+                d = (valor - p.pos[:, eje]) * hacia
+                m = (d > -1e-3) & (d < COSER_M)
+                if not m.any():
+                    continue
+                q = np.column_stack([p.pos[m][:, otro], p.pos[m][:, 2] * 2.0])
+                dist, ii = arbol.query(q, k=min(2, len(bs)), distance_upper_bound=4.0)
+                dist, ii = np.atleast_2d(dist.T).T.reshape(len(q), -1), np.atleast_2d(ii.T).T.reshape(len(q), -1)
+                vale = np.isfinite(dist)
+                w = np.where(vale, 1.0 / np.maximum(dist, 0.02), 0.0)
+                sw = w.sum(1)
+                corr = (w * dz[np.where(vale, ii, 0)]).sum(1) / np.maximum(sw, 1e-9)
+                u = np.clip(d[m] / COSER_M, 0.0, 1.0)
+                peso = 1.0 - u * u * (3.0 - 2.0 * u)
+                p.pos[m, 2] += np.where(sw > 0, corr * peso, 0.0)
+    return mayor
 
 
 def renombrar_terreno(scene, i, j):
@@ -763,7 +1011,8 @@ class Vivo:
                 with self.lock:
                     self.listos[k] = r["seg"]
                 self.tiempos.append(r["seg"])
-                self.log(f"pedazo {k}: {r['seg']:.1f} s, {r['tri']:,} triángulos")
+                self.log(f"pedazo {k}: {r['seg']:.1f} s, {r['tri']:,} triángulos"
+                         + (f", cosido {r['cosido']}" if r.get("cosido") else ""))
         self._grafo_al_dia()
         act = self.activos()
         self.caminos = {c: self.camino(f) for c, f in act.items()}
@@ -809,6 +1058,10 @@ class Vivo:
                 continue
             if k in self.precarga_vuelo:
                 continue            # que termine de bajar sus rásteres (dos procesos no deben bajar lo mismo)
+            # dos vecinos a la vez no pueden coserse entre sí (ninguno ve al otro terminado): el segundo espera,
+            # salvo que el coche ya esté encima
+            if pr > 150 and any((k[0] + di, k[1] + dj) in self.en_curso for di, dj in ((-1, 0), (1, 0), (0, -1), (0, 1))):
+                continue
             x0, y0, x1, y1 = nucleo(*k)
             rect = rect_pedazo(*k)
             if not self.osm.listas(rect):

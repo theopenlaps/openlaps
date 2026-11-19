@@ -388,7 +388,7 @@ def build(scene, buildings, terrain, log=print):
             # cara interior del pretil
             inner = np.column_stack([pts[::-1], np.full(len(pts), top)])
             p, uv, f = wall_strip(inner, C.PARAPET, u_scale=4.0, v_scale=3.0, both=False)
-            scene.add("edificios", mat, p, uv, f)
+            scene.add("edificios", mat, p, uv, f, phys="WALL")      # misma malla que el muro: una llamada menos
         if nave and shape != "flat" and _hip_roof(scene, poly, top, roof_mat or "chapa", pitch=0.16, eave=0.25):
             continue
         # bloques de pisos (3 o más plantas): faldones tendidos que desde la calle apenas asoman

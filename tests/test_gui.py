@@ -1,5 +1,6 @@
 """La interfaz de escritorio: opciones -> línea de comandos, caja de la precarga y servidor local."""
 import json
+import sys
 import urllib.error
 import urllib.request
 
@@ -275,6 +276,7 @@ def test_vivo_params_y_cli_envivo(tmp_path, monkeypatch):
     assert envivo.esperar_puerto(1, timeout=0.05, proc=FalsoProc()) is False
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="los enlaces (junction) a content/tracks son de Windows")
 def test_enlace_en_ac_renombrar_y_limpiar(tmp_path):
     """La pista enlazada se reconoce como enlazada (os.readlink devuelve la ruta con prefijo de ruta larga),
     renombrarla no deja el enlace viejo colgando y los enlaces a carpetas borradas se quitan."""
@@ -312,3 +314,81 @@ def test_trafico_opcion_y_modo_de_juego():
     con = assetto._modo(sin, True)
     assert con.count("__CM_CUSTOM_MODE=traffic") == 1 and "NAME=Traffic" in con
     assert assetto._modo(con, True) == con
+
+
+def test_zonas_en_vivo_en_mis_pistas(tmp_path, monkeypatch):
+    """Una zona preparada en vivo desde la app sale en «Mis pistas» y se puede reanudar con sus opciones."""
+    from openlaps.gui import ajustes, app, assetto
+    monkeypatch.setattr(ajustes, "salida", lambda a=None: tmp_path)
+    monkeypatch.setattr(assetto, "detectar", lambda preferida=None: None)
+    api = app.Api(servidor.Eventos())
+    op = {"modo": "libre", "centro": [40.4, -3.7], "ancho": 2000, "alto": 1500, "nombre": "Madrid centro"}
+    monkeypatch.setattr(api._vivo, "iniciar", lambda *a, **k: {"puerto": 1, "nombre": "madrid_centro", "pista_ac": None,
+                                                                 "zona": [2000, 1500], "url": "x"})
+    assert api.vivo_iniciar(op)["ok"]
+    (tmp_path / "vivo" / "madrid_centro" / "p_0_0.glb").write_bytes(b"x")
+    z = [p for p in api.pistas() if p.get("vivo")]
+    assert len(z) == 1 and z[0]["nombre"] == "madrid_centro" and z[0]["pedazos"] == 1 and z[0]["zona"] == [2000, 1500]
+    r = api.vivo_reanudar("madrid_centro")
+    assert r["ok"] and r["op"]["centro"] == [40.4, -3.7]
+    assert "error" in api.vivo_reanudar("no_existe")
+
+
+def test_espacio_medir_borrar_y_limpiar(tmp_path, monkeypatch):
+    """El espacio que ocupa cada cosa, borrar una pista o una zona en vivo con todo lo suyo, quitar los pedazos de
+    otra versión y el tope de la caché (se va primero lo menos usado)."""
+    import os
+    import time
+
+    from openlaps import vivo
+    from openlaps.gui import ajustes, assetto, espacio
+    from openlaps.sources import cache
+    sal = tmp_path / "sal"
+    monkeypatch.setattr(ajustes, "salida", lambda a=None: sal)
+    monkeypatch.setattr(ajustes, "DATOS", tmp_path / "datos")
+    monkeypatch.setattr(assetto, "detectar", lambda preferida=None: None)
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+
+    def pon(p, n):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * n)
+    pon(sal / "uno.glb", 1000)
+    pon(sal / "uno.json", 10)
+    pon(sal / "assetto_corsa" / "uno" / "uno.kn5", 3000)
+    pon(sal / "vivo" / "zona" / "p_0_0.glb", 500)
+    pon(sal / "vivo" / "zona" / "p_0_0.olv", 300)
+    pon(sal / "assetto_corsa" / "zona_vivo" / "zona_vivo.kn5", 700)
+    (sal / "vivo" / "zona" / "vivo.json").write_text('{"version": %d}' % (vivo.VERSION - 1), encoding="utf-8")
+    pon(tmp_path / "cache" / "a.tif", 4000)
+    pon(tmp_path / "cache" / "b.tif", 4000)
+    pon(tmp_path / "cache" / "c.csv.gz.idx.sqlite", 100)          # índice de un formato anterior
+    pon(tmp_path / "local" / "OpenLaps" / "runtime" / "cache" / "x.whl", 50)
+    pon(tmp_path / "local" / "OpenLaps" / "runtime" / "env" / "python.exe", 5)
+    viejo = time.time() - 5 * 86400
+    os.utime(tmp_path / "cache" / "a.tif", (viejo, viejo))
+    os.utime(tmp_path / "cache" / "b.tif", (viejo + 86400, viejo + 86400))
+
+    m = {p["clave"]: p for p in espacio.medir({})["partes"]}
+    assert m["pistas"]["bytes"] == 4010 and m["pistas"]["n"] == 1
+    assert m["vivo"]["bytes"] > 800 and m["vivo_ac"]["bytes"] == 700 and m["cache"]["bytes"] == 8100
+    assert espacio.medir({})["total"] >= sum(p["bytes"] for p in m.values()) - 1
+
+    libres = espacio.limpiar_obsoletos({})
+    assert libres == 500 + 300 + 100 + 50
+    (sal / "vivo" / "vacia").mkdir()                              # zona sin nada que conservar: se quita entera
+    (sal / "vivo" / "vacia" / "vivo.json").write_text('{"version": 1}', encoding="utf-8")
+    assert espacio.limpiar_obsoletos({}) == 14 and not (sal / "vivo" / "vacia").exists()
+    assert (sal / "vivo" / "zona").exists()                       # esta conserva su pista de AC
+    assert not (sal / "vivo" / "zona" / "p_0_0.glb").exists() and (sal / "vivo" / "zona" / "vivo.json").exists()
+    assert (tmp_path / "cache" / "a.tif").exists()
+
+    assert espacio.podar_cache(5000 / 1e9) == 4000                # el tope deja uno: se va el menos usado
+    assert not (tmp_path / "cache" / "a.tif").exists() and (tmp_path / "cache" / "b.tif").exists()
+    assert espacio.podar_cache(0) == 0
+
+    assert espacio.borrar_vivo(None, sal, "zona") > 700
+    assert not (sal / "vivo" / "zona").exists() and not (sal / "assetto_corsa" / "zona_vivo").exists()
+    assert espacio.borrar_pista(None, sal, "uno") == 4010
+    assert not (sal / "uno.glb").exists() and not (sal / "assetto_corsa" / "uno").exists()
+    assert espacio.vaciar_cache() == 4000

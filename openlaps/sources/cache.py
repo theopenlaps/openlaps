@@ -14,7 +14,12 @@ CACHE_DIR = os.environ.get("OPENLAPS_CACHE") or os.path.expanduser("~/.cache/ope
 def cache_path(key, ext=""):
     os.makedirs(CACHE_DIR, exist_ok=True)
     h = hashlib.sha1(key.encode()).hexdigest()[:20]
-    return os.path.join(CACHE_DIR, h + ext)
+    path = os.path.join(CACHE_DIR, h + ext)
+    try:
+        os.utime(path)          # marca de uso: el tope de la caché borra primero lo que lleva más sin usarse
+    except OSError:
+        pass
+    return path
 
 
 def fetch(url, data=None, ext="", retries=3, timeout=300, log=print):
