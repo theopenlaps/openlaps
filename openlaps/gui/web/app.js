@@ -16,7 +16,7 @@ const NO_CONDUCIBLE = new Set(["footway", "path", "steps", "cycleway", "pedestri
 // ------------------------------------------------------------------ estado
 const S = {
   modo: "libre", centro: null, ancho: 800, alto: 800, ruta: [],
-  calidad: "normal", nombre: "", nombreAuto: "", ac: true, jugar: false,
+  calidad: "normal", nombre: "", nombreAuto: "", ac: true, jugar: false, trafico: true,
   maxKm2: 24, csp: false, vivo: null, vivoModo: false,
   temporada: "seca", region: "auto", vegetacion: 1, usar: Object.fromEntries(FUENTES.map((k) => [k, true])), dem: null,
   lugar: "", lugarElegido: false, lugarEsPunto: false, regionInfo: null, osm: null,
@@ -736,7 +736,7 @@ function opciones() {
   return {
     modo: S.modo, centro: S.centro, ancho: S.ancho, alto: S.alto, ruta: S.ruta, calidad: S.calidad, nombre: nombreFinal(),
     vivo: esVivo(),
-    titulo: S.lugar && !S.lugarEsPunto ? S.lugar : "", ac: S.ac,
+    titulo: S.lugar && !S.lugarEsPunto ? S.lugar : "", ac: S.ac, trafico: S.trafico,
     temporada: S.temporada, region: S.region, vegetacion: S.vegetacion,
     sin: FUENTES.filter((k) => !S.usar[k]), dem: S.dem,
   };
@@ -1150,7 +1150,7 @@ function pintarPistas() {
   }
   for (const p of S.pistas) {
     const li = document.createElement("li");
-    const meta = [p.fecha, t("dato.mb", { v: fmt(p.mb, 1) }), t(`modo_nombre.${p.modo}`)].join(" · ");
+    const meta = [p.fecha, t("dato.mb", { v: fmt(p.mb, 1) }), t(`modo_nombre.${p.modo}`)].concat(p.trafico ? [t("pistas.con_trafico")] : []).join(" · ");
     li.innerHTML = `${p.cenital ? `<img src="${p.cenital}" alt="" loading="lazy">` : `<div class="sin-img"></div>`}
       <div><b data-tip="${escapar(p.nombre)}" data-tip-truncado>${escapar(p.nombre)}</b><small>${escapar(meta)}</small>
       <div class="fila-botones">
@@ -1389,6 +1389,7 @@ document.addEventListener("input", (e) => {
     }
     if (k === "ac") api("guardar_ajustes", { exportar_ac: S.ac });
     if (k === "jugar") api("guardar_ajustes", { jugar_al_terminar: S.jugar });
+    if (k === "trafico") api("guardar_ajustes", { trafico: S.trafico });
     if (k === "google3d") api("guardar_ajustes", { google3d: S.google3d });
     if (k === "tokenCesium") api("guardar_ajustes", { token_cesium: S.tokenCesium.trim() });
     if (k === "vivoModo") dibujarZona();
@@ -2029,6 +2030,7 @@ function montarVidrioLiquido(host, { pildora = false, bisel = 10, prof = 12, lup
   S.calidad = a.calidad || "normal";
   S.ac = a.exportar_ac !== false;
   S.jugar = !!a.jugar_al_terminar;
+  S.trafico = a.trafico !== false;
   S.google3d = !!a.google3d;
   S.tokenCesium = a.token_cesium || "";
   S.maxKm2 = r?.max_km2 || 24;

@@ -125,8 +125,8 @@ class Scene:
                     nv += len(p.pos)
         return out
 
-    def stats(self):
-        ms = self.meshes()
+    def stats(self, ms=None):
+        ms = self.meshes() if ms is None else ms
         return {"mallas": len(ms), "vertices": int(sum(len(m["pos"]) for m in ms)),
                 "triangulos": int(sum(len(m["faces"]) for m in ms)),
                 "materiales": len(self.materials), "texturas": len(self.textures)}

@@ -96,6 +96,8 @@ def argumentos(op, salida, nombre=None):
     if calidad != "borrador":
         if op.get("ac"):
             a.append("--ac")
+            if op.get("trafico") is False:
+                a.append("--sin-trafico")
         if op.get("titulo"):
             a += ["--titulo", str(op["titulo"])[:60]]
         if op.get("vegetacion") not in (None, "", 1, 1.0):   # va después: en argparse gana el último

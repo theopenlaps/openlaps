@@ -11,6 +11,7 @@ import json
 import math
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import numpy as np
@@ -411,27 +412,32 @@ def ortho(bbox, source, mpp=0.25, log=print):
     H = int(math.ceil((y1 - y0) / res))
     step = min(2048, maxpx)
     out = np.zeros((3, H, W), np.uint8)
-    n_ok = 0
-    for r0 in range(0, H, step):
-        for c0 in range(0, W, step):
-            w, h = min(step, W - c0), min(step, H - r0)
-            bx0, bx1 = x0 + c0 * res, x0 + (c0 + w) * res
-            by1, by0 = y1 - r0 * res, y1 - (r0 + h) * res
-            if arcgis:
-                q = (f"{url}?bbox={bx0:.2f},{by0:.2f},{bx1:.2f},{by1:.2f}&bboxSR=3857&imageSR=3857&size={w},{h}"
-                     f"&format=jpg&bandIds=0,1,2&compressionQuality=90&f=image")
-            else:
-                q = (f"{url}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS={layer}&STYLES=&CRS=EPSG:3857"
-                     f"&BBOX={bx0:.2f},{by0:.2f},{bx1:.2f},{by1:.2f}&WIDTH={w}&HEIGHT={h}&FORMAT=image/jpeg")
-            try:
-                path = fetch(q, ext=".jpg", log=log)
-                img = Image.open(path).convert("RGB")
-                if img.size != (w, h):
-                    raise ValueError(f"tamaño {img.size}")
-                out[:, r0:r0 + h, c0:c0 + w] = np.asarray(img).transpose(2, 0, 1)
-                n_ok += 1
-            except Exception as e:  # noqa: BLE001
-                log(f"  aviso: tesela de ortofoto fallida ({e.__class__.__name__}: {e})")
+
+    def tesela(r0, c0):
+        w, h = min(step, W - c0), min(step, H - r0)
+        bx0, bx1 = x0 + c0 * res, x0 + (c0 + w) * res
+        by1, by0 = y1 - r0 * res, y1 - (r0 + h) * res
+        if arcgis:
+            q = (f"{url}?bbox={bx0:.2f},{by0:.2f},{bx1:.2f},{by1:.2f}&bboxSR=3857&imageSR=3857&size={w},{h}"
+                 f"&format=jpg&bandIds=0,1,2&compressionQuality=90&f=image")
+        else:
+            q = (f"{url}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS={layer}&STYLES=&CRS=EPSG:3857"
+                 f"&BBOX={bx0:.2f},{by0:.2f},{bx1:.2f},{by1:.2f}&WIDTH={w}&HEIGHT={h}&FORMAT=image/jpeg")
+        try:
+            path = fetch(q, ext=".jpg", log=log)
+            img = Image.open(path).convert("RGB")
+            if img.size != (w, h):
+                raise ValueError(f"tamaño {img.size}")
+            out[:, r0:r0 + h, c0:c0 + w] = np.asarray(img).transpose(2, 0, 1)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log(f"  aviso: tesela de ortofoto fallida ({e.__class__.__name__}: {e})")
+            return False
+
+    # las teselas se piden de cuatro en cuatro (una tras otra, 800 m de PNOA eran ~50 s de espera)
+    celdas = [(r0, c0) for r0 in range(0, H, step) for c0 in range(0, W, step)]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        n_ok = sum(ex.map(lambda rc: tesela(*rc), celdas))
     if n_ok == 0:
         return None
     log(f"  ortofoto {source}: {W}x{H} px (~{mpp:.2f} m/px)")

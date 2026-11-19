@@ -47,11 +47,10 @@ def load(asset_id, size=1024, log=print):
 
 
 def load_all(size=1024, log=print):
-    out = {}
-    for slot, aid in ASSETS.items():
-        r = load(aid, size, log)
-        if r:
-            out[slot] = r
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:          # una tras otra eran ~30 s la primera vez
+        res = list(ex.map(lambda aid: load(aid, size, log), ASSETS.values()))
+    out = {slot: r for slot, r in zip(ASSETS, res) if r}
     log(f"  texturas CC0 de ambientCG: {len(out)}/{len(ASSETS)}")
     return out
 

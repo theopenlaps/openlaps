@@ -223,6 +223,19 @@ def test_osm_download_respaldo_api_y_precarga_cancelable(tmp_path, monkeypatch):
     out = OSM.download(BBox(19.41, -99.14, 19.42, -99.13), log=lambda *a: None)
     assert len(llamadas_api) == 1 and len(out["elements"]) == 1
 
+    # un espejo que tarda no detiene la descarga: tras el escalón se pregunta a la siguiente fuente y gana la primera
+    import time
+    monkeypatch.setattr(OSM, "ESCALON", 0.05)
+
+    def post_lento(ep, *a, **kw):
+        time.sleep(5.0)
+        raise TimeoutError("lento")
+
+    monkeypatch.setattr(OSM, "post_form", post_lento)
+    t = time.time()
+    out = OSM.download(BBox(19.43, -99.14, 19.44, -99.13), log=lambda *a: None)
+    assert len(llamadas_api) == 2 and len(out["elements"]) == 1 and time.time() - t < 2.0
+
     from openlaps.__main__ import parser as cli_parser
     ns = cli_parser().parse_args(["--centro=19.43,-99.13", "--ac", "--res", "1.5"])
     assert not hasattr(ns, "calidad") and ns.res == 1.5

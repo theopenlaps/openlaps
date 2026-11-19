@@ -46,11 +46,50 @@ def detectar(preferida=None):
     return None
 
 
+def _sin_prefijo(ruta):
+    """os.readlink devuelve los enlaces de Windows como \\\\?\\C:\\…; sin quitarlo, ninguna comparación de rutas acierta."""
+    s = str(ruta)
+    if s.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + s[8:]
+    return s[4:] if s.startswith(("\\\\?\\", "\\??\\")) else s
+
+
+def _misma(a, b):
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+
+
 def _destino_de_enlace(p):
     try:
-        return Path(os.readlink(p)).resolve()
-    except OSError:
+        return Path(_sin_prefijo(os.readlink(p)))
+    except (OSError, ValueError):
         return None
+
+
+def _quitar_enlace(dst):
+    """Quita el enlace (no lo enlazado). False si Windows no deja (carpeta en uso)."""
+    for _ in range(2):
+        try:
+            os.rmdir(dst)
+        except OSError:
+            subprocess.run(["cmd", "/c", "rmdir", str(dst)], capture_output=True, creationflags=_NO_VENTANA)
+        if not os.path.lexists(dst):
+            return True
+    return False
+
+
+def limpiar_rotos(ac):
+    """Quita de content/tracks los enlaces a pistas de OpenLaps cuya carpeta ya no existe (se borró o se renombró
+    a mano): Content Manager las enseña con error y no deja abrirlas. Devuelve los nombres quitados."""
+    quitados = []
+    try:
+        entradas = list((Path(ac) / "content" / "tracks").iterdir()) if ac else []
+    except OSError:
+        return quitados
+    for p in entradas:
+        d = _destino_de_enlace(p)
+        if d is not None and d.parent.name == "assetto_corsa" and not d.exists() and _quitar_enlace(p):
+            quitados.append(p.name)
+    return quitados
 
 
 def estado(ac, origen):
@@ -61,7 +100,14 @@ def estado(ac, origen):
     if not os.path.lexists(dst):
         return "no"
     destino = _destino_de_enlace(dst)
-    return "enlazada" if destino and destino == Path(origen).resolve() else "otra"
+    if destino is None:
+        return "otra"
+    if _misma(destino, Path(origen).resolve()) or _misma(destino.resolve(), Path(origen).resolve()):
+        return "enlazada"
+    # un enlace nuestro que se quedó apuntando a una carpeta que ya no existe no estorba: se quita
+    if destino.parent.name == "assetto_corsa" and not destino.exists() and _quitar_enlace(dst):
+        return "no"
+    return "otra"
 
 
 def instalar(ac, origen):
@@ -95,11 +141,8 @@ def renombrar(ac, salida, viejo, nuevo):
         raise RuntimeError(t("nombre_existe", n=nuevo))
     ac_src = salida / "assetto_corsa" / viejo
     enlazada = bool(ac and ac_src.is_dir() and estado(ac, ac_src) == "enlazada")
-    if enlazada:
-        try:
-            os.rmdir(Path(ac) / "content" / "tracks" / viejo)
-        except OSError:
-            enlazada = False
+    if enlazada and not _quitar_enlace(Path(ac) / "content" / "tracks" / viejo):
+        raise RuntimeError(t("ac_en_uso", n=viejo))      # si no, quedaría en AC un enlace a una carpeta que ya no existe
     for suf in (".glb", ".json", "_cenital.jpg", "_cobertura.jpg"):
         p = salida / f"{viejo}{suf}"
         if p.exists():
@@ -146,10 +189,26 @@ def jugando():
     return "acs.exe" in (r.stdout or "").lower()
 
 
-def jugar(ac, pista):
+def tiene_trafico(carpeta):
+    """¿La pista se generó con tráfico (carriles para el modo Traffic de CSP)?"""
+    return (Path(carpeta) / "data" / "traffic.json").is_file()
+
+
+def _modo(txt, trafico):
+    """Pone o quita en race.ini el modo Traffic de CSP (la misma clave que escribe Content Manager). Sin esto se
+    heredaba el modo de la última sesión: una pista sin tráfico se abría en modo Traffic y al revés."""
+    txt = re.sub(r"(?m)^__CM_CUSTOM_MODE=.*\r?\n?", "", txt)
+    if trafico:
+        txt = re.sub(r"(?m)^\[RACE\]\s*$", lambda m: m.group(0).rstrip() + "\n__CM_CUSTOM_MODE=traffic", txt, count=1)
+    return re.sub(r"(?ms)(^\[SESSION_0\].*?^NAME=)[^\r\n]*", lambda m: m.group(1) + ("Traffic" if trafico else "Practice"),
+                  txt, count=1)
+
+
+def jugar(ac, pista, trafico=None):
     """Abre una práctica de AC en esa pista, sin launcher (como el botón Drive): escribe TRACK en race.ini
     (guarda una copia la primera vez) con el coche que ya tenía elegido, o el Abarth 500 si no hay ninguno, y
-    arranca acs.exe. Steam tiene que estar abierto."""
+    arranca acs.exe. Steam tiene que estar abierto. `trafico`: True abre el modo Traffic de CSP, False una
+    práctica normal, None deja el modo que hubiera."""
     if jugando():
         raise RuntimeError(t("ac_abierto"))
     ac = Path(ac)
@@ -169,6 +228,8 @@ def jugar(ac, pista):
             txt = re.sub(r"(?m)^SKIN=.*$", "SKIN=" + skins[0], txt, count=1)
     txt = re.sub(r"(?m)^TRACK=.*$", "TRACK=" + pista, txt, count=1)
     txt = re.sub(r"(?m)^CONFIG_TRACK=.*$", "CONFIG_TRACK=", txt, count=1)
+    if trafico is not None:
+        txt = _modo(txt, trafico)
     ri.write_text(txt, encoding="latin-1")
     appid = ac / "steam_appid.txt"
     if not appid.exists():
@@ -177,4 +238,4 @@ def jugar(ac, pista):
         except OSError:
             pass
     subprocess.Popen([str(ac / "acs.exe")], cwd=str(ac), creationflags=_NO_VENTANA)
-    return t("ac_jugando", p=pista)
+    return t("ac_jugando_trafico" if trafico else "ac_jugando", p=pista)

@@ -18,7 +18,7 @@ from . import roadside as RS
 from .geo import BBox, LocalProjection
 from .mesh import Scene
 from .sources import osm as OSM, rasters, msbuildings, catastro, overture
-from . import export_glb, export_ac, regions
+from . import export_glb, export_ac, regions, trafico
 
 ATTRIBUTION = """Atribuciones de datos de esta pista
 - Calles, edificios y usos de suelo: (c) OpenStreetMap contributors, ODbL 1.0
@@ -206,10 +206,10 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     rd = roads.build_roads(net, scene, blds_poly_pre, water_poly, urban_poly, log=log, osm_guardrails=has_gr,
                            ortho=orto, proj=proj, rails=rails,
                            plazas=unary_union([p for p, _ in plazas]) if plazas else None)
-    roads.armonizar_calzadas(scene, log=log)
     keep_out = rd["ground_union"]          # sobre un túnel sí puede haber edificios
-    if rd["sidewalks"] is not None and keep_out is not None:
-        keep_out = unary_union([keep_out, rd["sidewalks"]])
+    # (la banqueta de norma, no su prolongación hasta las fachadas: esa llega justo hasta el edificio)
+    if rd.get("sidewalks_core") is not None and keep_out is not None:
+        keep_out = unary_union([keep_out, rd["sidewalks_core"]])
     blds = B.drop_on_roads(blds, keep_out)
     # un edificio encima de un puente (huella del Catastro u OSM que cae bajo el tablero) salía plantado en medio
     # de la calzada del puente
@@ -327,11 +327,19 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
         log(f"  pedazo listo en {time.time() - t0:.1f} s")
         return {"scene": scene, "proj": proj, "net": net, "terr": terr}
 
+    # tráfico para AC (antes de exportar: los semáforos ponen su poste en la escena)
+    datos_trafico = None
+    if args.ac and not getattr(args, "sin_trafico", False):
+        datos_trafico = trafico.construir(net, scene, log=log)
+        if datos_trafico:
+            trafico.poner_postes(scene, datos_trafico)
+
     # ------------------------------------------------------------ exportar
     log("7/7 Exportando…")
     os.makedirs(args.salida, exist_ok=True)
     name = args.nombre
-    st = scene.stats()
+    mallas = scene.meshes()          # las mismas para el resumen y el .glb (armarlas cuesta ~1 s)
+    st = scene.stats(mallas)
     log(f"  escena: {st['mallas']} mallas, {st['vertices']:,} vértices, {st['triangulos']:,} triángulos, "
         f"{st['texturas']} texturas")
     prev = T.mosaic(terr.tiles, proj, 2.0)
@@ -344,7 +352,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     jx = [(net.node_xy[n][0], net.node_xy[n][1], net.node_z[n], len(j["inc"])) for n, j in net.junctions.items() if net.node_inside(n) and not j.get("codo")]
     extras["cruces"] = [[round(float(x), 2), round(float(z), 2), round(float(-y), 2), k] for x, y, z, k in jx]
     glb = os.path.join(args.salida, f"{name}.glb")
-    size = export_glb.write(scene, glb, extras)
+    size = export_glb.write(scene, glb, extras, meshes=mallas)
     log(f"  {glb} ({size / 1e6:.1f} MB)")
     if args.ac:
         # el muro invisible de borde queda en el .glb, pero en AC estorbaría si el usuario activa el modo en vivo
@@ -371,6 +379,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
                              "vegetacion": float(args.vegetacion), "sin": sin,
                              "dem": getattr(args, "dem", None),
                              "tuneles": getattr(args, "tuneles", "principales")}}
+        info["trafico"] = datos_trafico
         export_ac.write_track(scene, os.path.join(args.salida, "assetto_corsa"), name, info, map_lines, route, log=log)
     with open(os.path.join(args.salida, f"{name}.json"), "w", encoding="utf-8") as f:
         json.dump({"area_km2": area_km2, "stats": st, "carreteras": rd["stats"], "cobertura": cob.stats,

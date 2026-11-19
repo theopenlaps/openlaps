@@ -49,6 +49,7 @@ class Api:
     def iniciar(self):
         a = ajustes.cargar()
         ac = assetto.detectar(a.get("ac"))
+        assetto.limpiar_rotos(ac)      # enlaces a pistas que ya no existen: Content Manager las da por rotas
         return {"version": __version__, "ajustes": a, "salida": str(ajustes.salida(a)),
                 "ac": ac, "csp": assetto.csp(ac), "max_km2": MAX_KM2, "pistas": self.pistas(),
                 "vivo": self._vivo.estado()}
@@ -263,6 +264,7 @@ class Api:
             "area_km2": info.get("area_km2"), "segundos": info.get("segundos"), "modo": info.get("modo", "libre"),
             "centro": info.get("centro"), "km": (info.get("carreteras") or {}).get("km"),
             "ac": ac, "ac_estado": assetto.estado(assetto.detectar(a.get("ac")), ac_dir) if ac else "no",
+            "trafico": ac and assetto.tiene_trafico(ac_dir),
         }
 
     def abrir_carpeta(self, nombre=None):
@@ -409,7 +411,9 @@ class Api:
             # edificios de Google 3D (opcional): con la opción apagada se quita el script y la pista queda tal cual
             aviso = self._g3d.preparar(origen, ajustes.salida() / f"{nombre}.glb", bool(a.get("google3d")),
                                        str(a.get("token_cesium") or "").strip())
-            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre)}
+            # con tráfico: el modo Traffic de CSP, si la pista lo trae y la opción está puesta; si no, práctica
+            con_trafico = bool(a.get("trafico", True)) and assetto.tiene_trafico(origen) and assetto.csp(ac)
+            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre, trafico=con_trafico), "trafico": con_trafico}
             if aviso:
                 r["aviso"] = t(aviso)
             return r
@@ -487,7 +491,7 @@ class Api:
                                        str(a.get("token_cesium") or "").strip(),
                                        vivo=ajustes.salida() / "vivo" / self._vivo.nombre,
                                        vivo_url=f"http://127.0.0.1:{self._vivo.puerto}" if self._vivo.puerto else None)
-            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre)}
+            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre, trafico=False)}    # en vivo aún no hay tráfico
             if aviso:
                 r["aviso"] = t(aviso)
             return r

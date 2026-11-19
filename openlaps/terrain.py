@@ -44,7 +44,10 @@ class Terrain:
         gx = x0 + np.arange(nx) * self.wres
         gy = y0 + np.arange(ny) * self.wres
         GX, GY = np.meshgrid(gx, gy)
-        z = dem.sample(proj, GX, GY, order=1)
+        # media de 4 muestras por celda: con un MDE fino (1-5 m) una sola muestra cada 10 m recogía el ruido del
+        # lidar (bordillos, coches, muretes) y el relieve salía con bultos que el MDE no tiene
+        q = self.wres / 4
+        z = np.mean([dem.sample(proj, GX + dx, GY + dy, order=1) for dx in (-q, q) for dy in (-q, q)], axis=0)
         self.lc_work = landcover.sample(proj, GX, GY, order=0).astype(np.uint8) if landcover is not None else None
         if not dem_is_dtm:
             z = self.dsm_to_dtm(z)
@@ -107,7 +110,9 @@ class Terrain:
         sg = sigma_m / self.res
         bs, bc = gaussian_filter(sz, sg), gaussian_filter(cnt, sg)
         S = np.where(bc > 1e-6, bs / np.maximum(bc, 1e-6), self.Z)
-        cover = np.clip(bc / (bc.max() * 0.02 + 1e-9), 0, 1)
+        # umbral fijo (antes, el 2 % del máximo del área: dos pedazos vecinos del modo en vivo, con máximos
+        # distintos, aplanaban distinto y el terreno no casaba en la costura)
+        cover = np.clip(bc / (0.06 * (self.res / 2.0) ** 2), 0, 1)
         U = gaussian_filter(urban_fn(GX.ravel(), GY.ravel()).reshape(self.Z.shape).astype(float), 8.0 / self.res)
         w = U * cover
         target = S + np.clip(self.Z - S, -1.5, 1.5) * 0.25
@@ -120,27 +125,39 @@ class Terrain:
         flat = np.column_stack([GX.ravel(), GY.ravel()])
         tree = cKDTree(carve_pts[:, :2])
         maxr = float(carve_pts[:, 3].max()) + 46.0   # alcance del talud más ancho (45 m)
-        d, ii = tree.query(flat, k=6, distance_upper_bound=maxr)
+        d, ii = tree.query(flat, k=8, distance_upper_bound=maxr)
         valid = np.isfinite(d)
         ii = np.where(valid, ii, 0)
         hw = carve_pts[ii, 3]
         zr = carve_pts[ii, 2]
         edge = np.where(valid, d - hw, 1e9)               # distancia a la orilla de la franja plana
-        best = np.argmin(edge, axis=1)
-        rows = np.arange(len(flat))
-        e = edge[rows, best]
-        zroad = zr[rows, best]
+        e = edge.min(axis=1)
+        # altura de la calle: media de los puntos cercanos con mucho más peso para el más pegado. Con solo el más
+        # cercano, la altura saltaba donde el vértice cambiaba de un punto a otro (de una calle a la de al lado,
+        # o a lo largo de una calle en cuesta) y el talud salía a escalones
+        w = np.where(valid, 1.0 / (np.maximum(edge, 0.0) + 0.3) ** 4, 0.0)
+        zroad = (w * zr).sum(axis=1) / np.maximum(w.sum(axis=1), 1e-12)
         z0 = self.Z.ravel().copy()
+        zroad = np.where(valid.any(axis=1), zroad, z0)
         dz = np.abs(z0 - zroad)
-        # talud ~1:3 (antes 1:1.6): más tendido y natural, y estira menos la ortofoto
+        # talud ~1:3 (antes 1:1.6): más tendido y natural, y estira menos la ortofoto. El ancho del talud se
+        # suaviza en la rejilla: depende del desnivel de cada vértice y de uno al siguiente cambiaba a saltos
         blend = np.clip(dz * 3.0, 3.0, 45.0)
+        blend = np.maximum(3.0, gaussian_filter(blend.reshape(self.Z.shape), 4.0 / self.res).ravel())
         t = np.clip(e / blend, 0, 1)
-        t = t * t * (3 - 2 * t)
+        t = t * t * t * (t * (6 * t - 15) + 10)          # sin quiebre de pendiente ni al pie ni en la cabeza del talud
         inside = e <= 0
         znew = np.where(inside, zroad - 0.25, (zroad - 0.08) * (1 - t) + z0 * t)
         affected = e < blend
-        z = np.where(affected, znew, z0)
-        self.Z = z.reshape(self.Z.shape)
+        z = np.where(affected, znew, z0).reshape(self.Z.shape)
+        # segunda pasada: alisado del talud. Solo fuera de la franja de la calle (dentro manda la calzada), con
+        # todo su efecto a partir de ~4 m de la orilla y nada donde el relieve no se tocó
+        eg = e.reshape(self.Z.shape)
+        m = np.clip((eg - 0.6) / 3.5, 0.0, 1.0)
+        m = m * m * (3 - 2 * m) * gaussian_filter(affected.reshape(self.Z.shape).astype(float), 3.0 / self.res)
+        for _ in range(2):
+            z = z * (1 - m) + gaussian_filter(z, 2.5 / self.res) * m
+        self.Z = z
 
     def bajo_calles(self, carve_pts, calles, margen=0.2):
         """Dentro de las calzadas el terreno nunca queda por encima de la calle. El tallado toma la altura de la

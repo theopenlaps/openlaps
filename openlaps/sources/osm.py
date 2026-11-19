@@ -1,6 +1,8 @@
 """Descarga y lectura de OpenStreetMap vía Overpass (© OpenStreetMap contributors, ODbL)."""
 import json
 import os
+import queue
+import threading
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -81,22 +83,48 @@ def _post_overpass(ep, q, timeout, retries=1):
         raise
 
 
+ESCALON = 3.0     # s que se le dan a cada fuente antes de preguntar también a la siguiente
+
+
 def _descargar_osm(bbox, espejos, log, timeout_api=30):
+    """Pregunta a los espejos de Overpass de forma escalonada y, después del último, a la API oficial: la siguiente
+    fuente arranca cuando la anterior falla o lleva `ESCALON` s sin contestar, y gana la primera respuesta buena.
+    Uno tras otro con su espera entera, un día con los espejos caídos o lentos costaba más de un minuto antes de
+    llegar a la API (que contesta en unos 4 s). Si el primer espejo responde pronto, no se molesta a nadie más."""
     q = query(bbox)
     cached = _leer_cache_osm(bbox, q)
     if cached is not None:
         return cached
-    last = None
-    for ep, espera in espejos:
+    fuentes = [(ep.split("/")[2], lambda ep=ep, espera=espera: _post_overpass(ep, q, timeout=espera, retries=1))
+               for ep, espera in espejos]
+    fuentes.append(("API OSM", lambda: download_api(bbox, log=log, timeout=timeout_api)))
+    cola = queue.Queue()
+
+    def correr(nombre, fn):
         try:
-            return _post_overpass(ep, q, timeout=espera, retries=1)
+            cola.put((nombre, fn(), None))
         except Exception as e:  # noqa: BLE001
-            last = e
-            log(f"  Overpass {ep.split('/')[2]} falló: {str(e)[:100]}")
-    try:
-        return download_api(bbox, log=log, timeout=timeout_api)
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Overpass no respondió ({last}; API OSM: {e})") from e
+            cola.put((nombre, None, e))
+
+    fallos, lanzadas, terminadas, otra = [], 0, 0, True
+    while True:
+        if lanzadas < len(fuentes) and (otra or lanzadas == terminadas):
+            threading.Thread(target=correr, args=fuentes[lanzadas], daemon=True).start()
+            lanzadas += 1
+        otra = False
+        try:
+            nombre, data, err = cola.get(timeout=ESCALON if lanzadas < len(fuentes) else None)
+        except queue.Empty:
+            otra = True             # nadie contestó en este escalón: se suma la siguiente fuente
+            continue
+        terminadas += 1
+        if err is None:
+            return data
+        fallos.append(f"{nombre}: {str(err)[:100]}")
+        if nombre != "API OSM":
+            log(f"  Overpass {nombre} falló: {str(err)[:100]}")
+        if terminadas == len(fuentes):
+            raise RuntimeError("OpenStreetMap no respondió (" + "; ".join(fallos) + ")")
 
 
 def download(bbox, log=print, timeout=20):

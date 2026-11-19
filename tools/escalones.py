@@ -98,18 +98,22 @@ def costuras(rutas, celda=0.2, dmin=0.05, dmax=0.6):
     x0, z0 = T[:, :, 0].min(), T[:, :, 2].min()
     nx = int((T[:, :, 0].max() - x0) / celda) + 2
     nz = int((T[:, :, 2].max() - z0) / celda) + 2
-    alturas = np.full((nx, nz, K), np.nan)
+    alturas = np.full((nx, nz, 4), np.nan)
     n = np.zeros((nx, nz), np.int64)
     _rasterizar(T, x0, z0, nx, nz, celda, alturas, n)
     malos = []
     for di, dj in ((1, 0), (0, 1)):
         a = alturas[:nx - di, :nz - dj]
         b = alturas[di:, dj:]
-        # para cada capa de a, la capa de b más cercana en altura
-        d = np.abs(a[:, :, :, None] - b[:, :, None, :])
+        # para cada capa de a, la capa de b más cercana en altura (capa a capa: con todas a la vez, una pista de
+        # 1 km pedía más de 5 GB)
+        peor = np.zeros(a.shape[:2], np.float32)
         with np.errstate(all="ignore"):
-            dm = np.nanmin(d.reshape(*d.shape[:3], -1), axis=3)       # (nx, nz, K)
-            peor = np.nanmax(np.where(dm < dmax, dm, np.nan), axis=2)
+            for ka in range(a.shape[2]):
+                dm = np.full(a.shape[:2], np.inf, np.float32)
+                for kb in range(b.shape[2]):
+                    dm = np.fmin(dm, np.abs(a[:, :, ka] - b[:, :, kb]).astype(np.float32))
+                peor = np.maximum(peor, np.where(dm < dmax, dm, 0.0))
         sel = peor > dmin
         for i, j in zip(*np.nonzero(sel)):
             malos.append((x0 + (i + 0.5 + di / 2) * celda, z0 + (j + 0.5 + dj / 2) * celda, float(peor[i, j])))

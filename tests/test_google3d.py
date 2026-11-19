@@ -88,6 +88,45 @@ def test_recorte_respeta_edificios_y_quita_flotantes_grandes(tmp_path):
     assert 8 in kept        # apoya en el suelo: conservado
 
 
+def test_recortar_lleva_fachadas_a_la_pared_y_quita_objetos_enteros(tmp_path):
+    from PIL import Image
+    from openlaps import export_glb
+    from openlaps.mesh import Scene
+    sc = Scene()
+    sc.images["gris"] = Image.new("RGB", (4, 4), (80, 80, 80))
+    sc.textures["gris"] = None
+    sc.material("asfalto", "gris")
+    sc.material("fachada", "gris")
+    # calzada x=[0,20], norte=[0,8] (AC z=[-8,0]); edificio con fachada en norte=12 (AC z=-12) y techo hasta 20
+    pos = np.array([[0, 0, 650.0], [20, 0, 650.0], [20, 8, 650.0], [0, 8, 650.0]])
+    sc.add("calzada", "asfalto", pos, pos[:, :2] / 3, np.array([[0, 1, 2], [0, 2, 3]]), phys="ROAD")
+    pared = np.array([[2, 12, 650.0], [18, 12, 650.0], [18, 12, 665.0], [2, 12, 665.0]])
+    techo = np.array([[2, 12, 665.0], [18, 12, 665.0], [18, 20, 665.0], [2, 20, 665.0]])
+    sc.add("edificios", "fachada", np.r_[pared, techo], np.zeros((8, 2)),
+           np.array([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]]))
+    ruta = str(tmp_path / "f.glb")
+    export_glb.write(sc, ruta, {})
+    c = G.Calles(ruta, avisar=False)
+    _, d = c.pared(np.array([[10.0, -10.0]]))
+    assert abs(d[0] - 2.0) < 0.05
+    m = object.__new__(G.Mundo)
+    m.calles = c
+    p = np.array([
+        [8, 650.2, -5], [12, 650.2, -5], [10, 650.2, -2],        # 0-2: suelo de Google sobre la calzada
+        [8, 660, -12.5], [12, 660, -12.5], [10, 650.7, -10],       # 3-5: fachada derretida 2 m hacia la calle
+        [9, 654, 1], [11, 654, 1], [10, 656, 2.5],               # 6-8: árbol junto a la calle
+        [9, 654, 2.5], [11, 654, 2.5], [10, 656, 4.5],           # 9-11: el mismo árbol, más lejos de la calle
+        [9, 654, 15], [11, 654, 15], [10, 656, 17],              # 12-14: árbol lejos de la calle
+    ], float)
+    tris = np.arange(15).reshape(-1, 3)
+    res = m.recortar(p, tris)
+    kept = {int(t[0]) for t in res}
+    assert kept == {3, 12}                       # suelo y árbol entero fuera; fachada y árbol lejano se quedan
+    assert abs(p[5, 2] + 12.0) < 0.05            # el vértice derretido vuelve a la pared...
+    assert p[5, 1] < 650.0                       # ...y baja hasta el suelo (sin hueco por debajo)
+    assert p[3, 2] == -12.5                      # lo que ya estaba dentro de la planta no se mueve
+
+
 def test_seleccionar_detalle_cerca_y_padres():
     class FakeGoogle:
         raiz_url = "https://t/root.json"

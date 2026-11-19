@@ -5,10 +5,14 @@ video que un PNG descomprimido y no parpadean a distancia. El codificador usa el
 "caja envolvente sobre el eje principal": por cada bloque de 4x4 se proyectan los colores sobre
 la diagonal de su caja RGB, los extremos se cuantizan a RGB565 y cada pixel toma el más
 cercano de los 4 colores de la paleta.
+
+`_bloques` hace lo mismo que `_color_blocks` y `_alpha_blocks` (que quedan como referencia para las pruebas), pero
+compilado y en paralelo: comprimir las ~300 texturas de una pista era casi la mitad del cálculo (25 de 60 s).
 """
 import struct
 
 import numpy as np
+from numba import njit, prange
 from PIL import Image
 
 
@@ -86,6 +90,106 @@ def _alpha_blocks(al):
     return out
 
 
+@njit(cache=True)
+def _565(c):
+    v = np.rint(c)
+    v = min(max(v, np.float32(0.0)), np.float32(255.0))
+    return np.int64(v)
+
+
+@njit(cache=True, parallel=True)
+def _bloques(a, alfa):
+    """a: (H, W, 4) uint8 con H y W múltiplos de 4 -> (nbloques, 8) DXT1 o (nbloques, 16) DXT5."""
+    bh, bw = a.shape[0] // 4, a.shape[1] // 4
+    off = 8 if alfa else 0
+    out = np.zeros((bh * bw, 8 + off), np.uint8)
+    f0, f1 = np.float32(0.0), np.float32(1e-6)
+    w0 = np.array([1, 0, 6, 5, 4, 3, 2, 1]) / np.array([1, 1, 7, 7, 7, 7, 7, 7])
+    w1 = np.array([0, 1, 1, 2, 3, 4, 5, 6]) / np.array([1, 1, 7, 7, 7, 7, 7, 7])
+    for by in prange(bh):
+        px = np.empty((16, 3), np.float32)
+        pal = np.empty((4, 3), np.float32)
+        lo = np.empty(3, np.float32)
+        eje = np.empty(3, np.float32)
+        for bx in range(bw):
+            n = by * bw + bx
+            for k in range(16):
+                for c in range(3):
+                    px[k, c] = a[by * 4 + k // 4, bx * 4 + k % 4, c]
+            norma = f0
+            for c in range(3):
+                mn, mx = px[0, c], px[0, c]
+                for k in range(1, 16):
+                    mn, mx = min(mn, px[k, c]), max(mx, px[k, c])
+                lo[c], eje[c] = mn, mx - mn
+                norma += eje[c] * eje[c]
+            norma = max(norma, f1)
+            tmin, tmax = np.float32(np.inf), np.float32(-np.inf)
+            for k in range(16):
+                t = f0
+                for c in range(3):
+                    t += (px[k, c] - lo[c]) * eje[c]
+                t = t / norma
+                tmin, tmax = min(tmin, t), max(tmax, t)
+            c0 = ((_565(lo[0] + eje[0] * tmax) >> 3) << 11) | ((_565(lo[1] + eje[1] * tmax) >> 2) << 5)                 | (_565(lo[2] + eje[2] * tmax) >> 3)
+            c1 = ((_565(lo[0] + eje[0] * tmin) >> 3) << 11) | ((_565(lo[1] + eje[1] * tmin) >> 2) << 5)                 | (_565(lo[2] + eje[2] * tmin) >> 3)
+            # en modo de 4 colores c0 > c1; si son iguales, todo apunta a c0
+            if c0 < c1:
+                c0, c1 = c1, c0
+            if c0 == c1:
+                if c0 > 0:
+                    c1 = c0 - 1
+                else:
+                    c0 = 1
+            for j, v in enumerate((c0, c1)):
+                pal[j, 0] = np.float32(((v >> 11) & 31) * 255 / 31)
+                pal[j, 1] = np.float32(((v >> 5) & 63) * 255 / 63)
+                pal[j, 2] = np.float32((v & 31) * 255 / 31)
+            for c in range(3):
+                pal[2, c] = (np.float32(2.0) * pal[0, c] + pal[1, c]) / np.float32(3.0)
+                pal[3, c] = (pal[0, c] + np.float32(2.0) * pal[1, c]) / np.float32(3.0)
+            bits = np.int64(0)
+            for k in range(16):
+                mejor, dmin = 0, np.float32(np.inf)
+                for j in range(4):
+                    d = f0
+                    for c in range(3):
+                        e = px[k, c] - pal[j, c]
+                        d += e * e
+                    if d < dmin:
+                        mejor, dmin = j, d
+                bits |= np.int64(mejor) << (2 * k)
+            out[n, off] = c0 & 255
+            out[n, off + 1] = c0 >> 8
+            out[n, off + 2] = c1 & 255
+            out[n, off + 3] = c1 >> 8
+            for j in range(4):
+                out[n, off + 4 + j] = (bits >> (8 * j)) & 255
+            if alfa:
+                a0 = a1 = np.int64(a[by * 4, bx * 4, 3])
+                for k in range(1, 16):
+                    v = np.int64(a[by * 4 + k // 4, bx * 4 + k % 4, 3])
+                    a0, a1 = max(a0, v), min(a1, v)
+                if a0 == a1:
+                    if a0 < 255:
+                        a0 += 1
+                    else:
+                        a1 = 254
+                ab = np.uint64(0)
+                for k in range(16):
+                    v = np.float64(a[by * 4 + k // 4, bx * 4 + k % 4, 3])
+                    mejor, dmin = 0, np.inf
+                    for j in range(8):
+                        d = abs(v - (a0 * w0[j] + a1 * w1[j]))
+                        if d < dmin:
+                            mejor, dmin = j, d
+                    ab |= np.uint64(mejor) << np.uint64(3 * k)
+                out[n, 0], out[n, 1] = a0, a1
+                for j in range(6):
+                    out[n, 2 + j] = (ab >> np.uint64(8 * j)) & np.uint64(255)
+    return out
+
+
 def bleed(arr, thr=8):
     """Rellena el color de los pixeles transparentes con el del pixel opaco más cercano.
 
@@ -118,13 +222,11 @@ def encode(img, alpha=None, max_size=None):
         if alpha:
             arr = bleed(arr)
             cur = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGBA")
-        bl = _blocks(arr)
-        col = _color_blocks(bl[..., :3])
-        if alpha:
-            data = np.hstack([_alpha_blocks(bl[..., 3]), col]).tobytes()
-        else:
-            data = col.tobytes()
-        levels.append(data)
+        u8 = np.clip(arr, 0, 255).astype(np.uint8)
+        H, W = (u8.shape[0] + 3) // 4 * 4, (u8.shape[1] + 3) // 4 * 4
+        if (H, W) != u8.shape[:2]:
+            u8 = np.pad(u8, ((0, H - u8.shape[0]), (0, W - u8.shape[1]), (0, 0)), mode="edge")
+        levels.append(_bloques(np.ascontiguousarray(u8), alpha).tobytes())
         if cur.size == (1, 1):
             break
         nw, nh = max(1, cur.size[0] // 2), max(1, cur.size[1] // 2)

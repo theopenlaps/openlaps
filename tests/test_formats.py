@@ -80,3 +80,18 @@ def test_large_pieces_are_split_for_16bit_indices():
     assert len(meshes) > 1
     assert all(len(m["pos"]) <= MAX_VERTS for m in meshes)
     assert sum(len(m["faces"]) for m in meshes) == len(faces)
+
+
+def test_dds_compilado_igual_que_la_referencia_numpy():
+    """El codificador compilado (`_bloques`) da los mismos bytes que las funciones de referencia con numpy."""
+    rng = np.random.default_rng(3)
+    g = np.linspace(0, 255, 64)
+    casos = [rng.integers(0, 256, (36, 52, 4), dtype=np.uint8),
+             np.dstack([np.add.outer(g, g) / 2, np.outer(g, g) / 255, np.tile(g, (64, 1)),
+                        255 * (np.add.outer(g, g) > 200)]).astype(np.uint8),
+             np.zeros((8, 8, 4), np.uint8), np.full((8, 8, 4), 255, np.uint8)]
+    for a in casos:
+        bl = dds._blocks(a.astype(np.float32))
+        color = dds._color_blocks(bl[..., :3])
+        assert np.array_equal(dds._bloques(a, False), color)
+        assert np.array_equal(dds._bloques(a, True), np.hstack([dds._alpha_blocks(bl[..., 3]), color]))

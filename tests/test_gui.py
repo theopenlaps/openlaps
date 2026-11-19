@@ -273,3 +273,42 @@ def test_vivo_params_y_cli_envivo(tmp_path, monkeypatch):
     assert cmd[cmd.index("--trabajadores") + 1] == "3"
 
     assert envivo.esperar_puerto(1, timeout=0.05, proc=FalsoProc()) is False
+
+
+def test_enlace_en_ac_renombrar_y_limpiar(tmp_path):
+    """La pista enlazada se reconoce como enlazada (os.readlink devuelve la ruta con prefijo de ruta larga),
+    renombrarla no deja el enlace viejo colgando y los enlaces a carpetas borradas se quitan."""
+    from openlaps.gui import assetto
+    ac = tmp_path / "ac"
+    (ac / "content" / "tracks").mkdir(parents=True)
+    sal = tmp_path / "sal"
+    src = sal / "assetto_corsa" / "uno"
+    (src / "ui").mkdir(parents=True)
+    (src / "uno.kn5").write_bytes(b"x")
+    (src / "models.ini").write_text("FILE=uno.kn5", encoding="utf-8")
+    (sal / "uno.glb").write_bytes(b"x")
+    assetto.instalar(str(ac), src)
+    assert assetto.estado(str(ac), src) == "enlazada"
+    assetto.renombrar(str(ac), sal, "uno", "dos")
+    pistas = ac / "content" / "tracks"
+    assert [p.name for p in pistas.iterdir()] == ["dos"]
+    assert assetto.estado(str(ac), sal / "assetto_corsa" / "dos") == "enlazada"
+    (sal / "assetto_corsa" / "dos").rename(sal / "assetto_corsa" / "tres")      # renombrada a mano: enlace roto
+    assert assetto.limpiar_rotos(str(ac)) == ["dos"]
+    assert not list(pistas.iterdir())
+    (pistas / "ajena").mkdir()                                                 # una pista de verdad no se toca
+    assert assetto.limpiar_rotos(str(ac)) == [] and (pistas / "ajena").is_dir()
+
+
+def test_trafico_opcion_y_modo_de_juego():
+    from openlaps.gui import assetto
+    op = {"modo": "libre", "centro": [19.0, -99.0], "tam": 500, "nombre": "x", "ac": True}
+    assert "--sin-trafico" not in G.argumentos(op, "sal")
+    assert "--sin-trafico" in G.argumentos(dict(op, trafico=False), "sal")
+    assert "--sin-trafico" not in G.argumentos(dict(op, trafico=False, ac=False), "sal")
+    ini = "[RACE]\nTRACK=a\n__CM_CUSTOM_MODE=traffic\nCARS=1\n\n[SESSION_0]\nNAME=Traffic\nTYPE=1\n"
+    sin = assetto._modo(ini, False)
+    assert "__CM_CUSTOM_MODE" not in sin and "NAME=Practice" in sin and "CARS=1" in sin
+    con = assetto._modo(sin, True)
+    assert con.count("__CM_CUSTOM_MODE=traffic") == 1 and "NAME=Traffic" in con
+    assert assetto._modo(con, True) == con

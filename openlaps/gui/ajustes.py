@@ -40,6 +40,7 @@ DEFECTO = {
     "calidad": "normal",
     "exportar_ac": True,
     "jugar_al_terminar": False,  # abrir Assetto Corsa en la pista al terminar de generarla
+    "trafico": True,      # AC: generar los carriles de tráfico y abrir la pista en el modo Traffic de CSP
     "capa": "mapa",
     "vista": None,        # mapa y zona de la última sesión
     "idioma": None,       # "es" | "en"; None = el de Windows

@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from . import CREDIT, URL, __version__, dds, regions, textures
+from . import trafico as T
 from .export_glb import to_yup, mesh_name
 
 
@@ -98,10 +99,10 @@ def write_kn5(scene, path, log=print):
     total_tex = 0
     for t in names:
         img = _image(scene, t)
-        alpha = img.mode == "RGBA" and not t.endswith(("_mask.png", "mascara_r.png"))
-        data = dds.encode(img, alpha=None if alpha else False)
         if t.endswith(("_mask.png", "mascara_r.png")):
             data = dds.encode(img, alpha=True)
+        else:
+            data = dds.encode(img, alpha=None if img.mode == "RGBA" else False)
         total_tex += len(data)
         b.write(struct.pack("<i", 1))
         _s(b, _dds_name(t))
@@ -209,7 +210,9 @@ SURFACE_DEFS = [
 ]
 
 
-def surfaces_ini(extendido=True):
+def surfaces_ini(extendido=True, nuevos_modos=False):
+    """Superficies. `extendido`: física extendida de CSP y scripts de pista (el modo en vivo); `nuevos_modos`:
+    además deja correr los modos de juego nuevos de CSP con física de script (el modo Traffic)."""
     out = []
     for i, (k, fr, dm, wav, wp, ff, dirt, valid, sh, sl, pit, vg, vl) in enumerate(SURFACE_DEFS):
         wp_i = "extended-0" if extendido and i == 0 else wp
@@ -217,7 +220,7 @@ def surfaces_ini(extendido=True):
                    f"DIRT_ADDITIVE={dirt}\nBLACK_FLAG_TIME=0\nIS_VALID_TRACK={valid}\nSIN_HEIGHT={sh}\nSIN_LENGTH={sl}\n"
                    f"IS_PITLANE={pit}\nVIBRATION_GAIN={vg}\nVIBRATION_LENGTH={vl}\n")
     if extendido:
-        out.append("[_SCRIPTING_PHYSICS]\nALLOW_TRACK_SCRIPTS=1\n")
+        out.append("[_SCRIPTING_PHYSICS]\nALLOW_TRACK_SCRIPTS=1\n" + ("ALLOW_NEW_MODE_SCRIPTS=1\n" if nuevos_modos else ""))
     return "\n".join(out)
 
 
@@ -334,7 +337,15 @@ def write_track(scene, out_dir, track_id, info, map_lines, route=None, log=print
     write_kn5(scene, os.path.join(root, f"{track_id}.kn5"), log=log)
     w = lambda rel, txt: open(os.path.join(root, rel), "w", newline="\r\n", encoding="utf-8").write(txt)  # noqa: E731
     w("models.ini", f"[MODEL_0]\nFILE={track_id}.kn5\nPOSITION=0,0,0\nROTATION=0,0,0\n")
-    w(os.path.join("data", "surfaces.ini"), surfaces_ini())
+    trafico = info.get("trafico")
+    w(os.path.join("data", "surfaces.ini"), surfaces_ini(nuevos_modos=bool(trafico)))
+    ruta_trafico = os.path.join(root, "data", "traffic.json")
+    if trafico:
+        # carriles y cruces para la herramienta de tráfico de CSP (modo Traffic): ver trafico.py
+        with open(ruta_trafico, "w", encoding="utf-8") as f:
+            json.dump(T.a_ac(trafico), f, ensure_ascii=False, separators=(",", ":"))
+    elif os.path.exists(ruta_trafico):
+        os.remove(ruta_trafico)
     w(os.path.join("data", "lighting.ini"), "[LIGHTING]\nSUN_PITCH_ANGLE=45\nSUN_HEADING_ANGLE=-40\n")
     ext_txt = ext_config(scene, info["lat"], info["lon"])
     if not info.get("es_semilla_vivo"):
@@ -375,7 +386,12 @@ def write_track(scene, out_dir, track_id, info, map_lines, route=None, log=print
     if info.get("preview_png"):
         with open(os.path.join(root, "ui", "preview.png"), "wb") as f:
             f.write(info["preview_png"])
-    ui = {"name": info["name"], "description": f"{info['description']} {CREDIT}", "tags": info.get("tags", []),
+    tags = list(info.get("tags", [])) + ([T.ETIQUETA] if trafico else [])
+    desc = info["description"]
+    if trafico:
+        desc += (f" Tráfico: modo Traffic de CSP con unos {T.coches_recomendados(trafico)} coches "
+                 "(con los 1000 de partida el área se atasca).")
+    ui = {"name": info["name"], "description": f"{desc} {CREDIT}", "tags": tags,
           "geotags": [f"{info['lat']:.5f}", f"{info['lon']:.5f}"], "country": regions.active().country,
           "city": info.get("city", ""), "length": str(int(info.get("length", 0))), "width": str(info.get("width", "")),
           "pitboxes": str(info.get("pitboxes", 8)), "run": info.get("run", "A-B"),

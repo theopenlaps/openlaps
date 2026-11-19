@@ -83,6 +83,7 @@ local enVuelo = 0
 local pidiendoLista = false
 local ultimaLista = -10
 local avisado = false
+local tVersion, tCreando, nCreadas = 0, 0, 0   -- para el registro: cuánto tarda cada versión en estar completa
 
 local function tidDe(id)
   return id:match('^[^_]+_([^_]+)_')
@@ -97,6 +98,7 @@ local function pedirLista()
     local ok, datos = pcall(JSON.parse, r.body)
     if not ok or not datos or not datos.listo or datos.version == version then return end
     version, material, creditos = datos.version, datos.material, datos.creditos
+    tVersion, tCreando, nCreadas, avisado = os.clock(), 0, 0, false
     deseadas, deseadasPorTid, orden = {}, {}, {}
     for _, m in ipairs(datos.mallas) do
       deseadas[m.id] = { tex = m.tex }
@@ -127,6 +129,19 @@ local function pedirMalla(id)
   end)
 end
 
+-- copia de golpe (memcpy): el binario ya tiene el mismo orden que ac.MeshVertex (8 float32) y los índices de AC (uint16);
+-- se comprueba el tamaño en bytes de cada buffer y, si algo no cuadra o falla, se vuelve a leer valor por valor
+local copiaRapida = ffi ~= nil and ffi.copy ~= nil and ffi.cast ~= nil
+local function copiar(dest, g, desde, bytes)
+  if not copiaRapida or not dest then return false end
+  local ok = pcall(function () ffi.copy(dest, ffi.cast('const char*', g) + desde, bytes) end)
+  if not ok then
+    copiaRapida = false
+    ac.log('google3d: copia rápida no disponible, se usa la lenta')
+  end
+  return ok
+end
+
 local function crear(item)
   -- binario de openlaps.google3d: uint32 nv, uint32 ni, nv × 8 float32 (pos, normal, uv), ni × uint16
   -- escribe directo en vb.raw / ib.raw (punteros FFI 0-based de GenericList) sin crear vec3/MeshVertex por vértice
@@ -134,7 +149,9 @@ local function crear(item)
   local nv, ni, at = string.unpack('<I4I4', g, 1)
   local vb = ac.VertexBuffer(nv)
   local vr = vb.raw
-  if vr then
+  if vb:sizeBytes() == nv * 32 and #g >= 8 + nv * 32 + ni * 2 and copiar(vr, g, 8, nv * 32) then
+    at = 9 + nv * 32
+  elseif vr then
     local i = 0
     while i + 4 <= nv do
       local x1, y1, z1, nx1, ny1, nz1, u1, v1,
@@ -164,6 +181,7 @@ local function crear(item)
   local ib = ac.IndicesBuffer(ni)
   local ir = ib.raw
   local i = 1
+  if ib:sizeBytes() == ni * 2 and copiar(ir, g, at - 1, ni * 2) then i = ni + 1 end
   while i <= ni do
     if ni - i + 1 >= 48 then
       local vals = { string.unpack(FMT_I48, g, at) }
@@ -232,7 +250,9 @@ function script.update(dt)
     local item = table.remove(cola, 1)
     encargadas[item.id] = nil
     if deseadas[item.id] and not creadas[item.id] then
+      local tc = os.clock()
       local ok, malla = pcall(crear, item)
+      tCreando, nCreadas = tCreando + os.clock() - tc, nCreadas + 1
       if ok and malla then creadas[item.id] = malla else ac.log('google3d: error ' .. tostring(malla)) end
       hechas = hechas + 1
     end
@@ -276,7 +296,8 @@ function script.update(dt)
   end
   if not faltan and not avisado then
     avisado = true
-    ac.log(string.format('google3d: versión %d completa', version))
+    ac.log(string.format('google3d: versión %d completa en %.1f s (%d mallas nuevas, %.0f ms creándolas, copia %s)',
+      version, os.clock() - tVersion, nCreadas, tCreando * 1000, copiaRapida and 'rápida' or 'lenta'))
   end
 end
 

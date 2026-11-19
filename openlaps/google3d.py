@@ -25,7 +25,9 @@ import collections
 import concurrent.futures
 import gzip
 import hashlib
+import heapq
 import http.client
+import itertools
 import http.server
 import json
 import math
@@ -53,6 +55,11 @@ MARCA = "; OpenLaps: edificios de Google 3D (opcional)"
 UMBRAL_MOVIDO = 60.0   # m que se mueve el coche antes de recalcular las teselas
 FRANJA = 3.5           # m alrededor de la calzada donde se quitan coches y suelo de Google (no fachadas)
 CELDA = 0.5            # rejilla de la calzada de OpenLaps (m)
+PARED = 3.0            # m: lo que está a esta distancia de una pared de OpenLaps es fachada (se lleva a la pared)
+MOVER = 6.0            # m: hasta dónde se mueven los vértices de esas fachadas (las partes derretidas hacia la calle)
+SUELO_G = 0.6          # m: lo de Google por debajo de esto sobre la calle o la banqueta es suelo (lo pone OpenLaps)
+CERCA_OBJ = 2.0        # m de la calle: un objeto de Google (árbol, coche, kiosco) que llega aquí se quita entero
+ARISTA_BURDA = 4.0     # m: con triángulos más grandes la tesela es lejana y solo pierde el suelo
 
 
 def log(texto):
@@ -219,12 +226,17 @@ def distancia(bv, punto):
 
 
 def seleccionar(google, centro, radio, error_por_metro, max_teselas, error_cerca=0.01, radio_cerca=150.0,
-                foco_actual=None, padres=None):
+                foco_actual=None, padres=None, al_elegir=None, hilos=None):
     """Teselas glb a dibujar alrededor de `centro` (ECEF): como Cesium, se baja de nivel mientras el error
     geométrico sea grande para su distancia (refinamiento REPLACE). En los primeros `radio_cerca` m usa un error más
-    fino (`error_cerca`). Por niveles (ordenados por cercanía), con peticiones en paralelo."""
+    fino (`error_cerca`).
+
+    Sin esperas por nivel: cada rama se abre en cuanto llega su subárbol, siempre la más cercana primero (Google tarda
+    ~0,4 s en contestar cada subárbol y esperar al más lento de cada nivel sumaba 6-8 s). `al_elegir(url)` se llama
+    al elegir cada tesela, para empezar a bajarla sin esperar al resto del árbol. `hilos`: grupo de hilos fijo (así
+    las conexiones no se cierran); sin él se crea uno para esta llamada."""
     elegidas = []
-    frente = [(google.subarbol(google.raiz_url), google.raiz_url, ())]
+    ref = foco_actual if foco_actual is not None else centro
 
     def expandir(item):
         tile, base, anc = item
@@ -247,16 +259,30 @@ def seleccionar(google, centro, radio, error_por_metro, max_teselas, error_cerca
             anc = anc + (tid(u),)
         return [], [(h, base, anc) for h in hijos]
 
-    with concurrent.futures.ThreadPoolExecutor(16) as ex:
-        while frente and len(elegidas) < max_teselas:
-            nuevos = []
-            for sel, sig in ex.map(expandir, frente):
-                elegidas += sel
-                nuevos += sig
-            # si hay muchas ramas abiertas, prioriza las más cercanas al coche
-            if len(nuevos) > max_teselas:
-                nuevos.sort(key=lambda it: distancia(it[0]["boundingVolume"], foco_actual if foco_actual is not None else centro))
-            frente = nuevos
+    propio = hilos is None
+    ex = concurrent.futures.ThreadPoolExecutor(16) if propio else hilos
+    orden = itertools.count()
+    cola = []          # (distancia al coche, orden, rama): se abre siempre la más cercana
+    en_vuelo = set()
+    try:
+        heapq.heappush(cola, (0.0, next(orden), (google.subarbol(google.raiz_url), google.raiz_url, ())))
+        while (cola or en_vuelo) and len(elegidas) < max_teselas:
+            while cola and len(en_vuelo) < 48:
+                en_vuelo.add(ex.submit(expandir, heapq.heappop(cola)[2]))
+            hechos, en_vuelo = concurrent.futures.wait(en_vuelo, return_when=concurrent.futures.FIRST_COMPLETED)
+            for f in hechos:
+                sel, sig = f.result()
+                for e in sel:
+                    elegidas.append(e)
+                    if al_elegir is not None:
+                        al_elegir(e[0])
+                for it in sig:
+                    heapq.heappush(cola, (distancia(it[0]["boundingVolume"], ref), next(orden), it))
+    finally:
+        for f in en_vuelo:
+            f.cancel()
+        if propio:
+            ex.shutdown(wait=False)
     # las más cercanas primero: son las que se ven y las que se publican antes
     elegidas.sort(key=lambda e: e[1])
     elegidas = elegidas[:max_teselas]
@@ -490,6 +516,55 @@ def _rasterizar(tris, x0, z0, nx, nz, celda, alto, cubre):
                     alto[i, j] = y
 
 
+class Paredes:
+    """Las paredes de los edificios de OpenLaps (su planta exacta, de OSM o del Catastro) como segmentos en planta,
+    para llevar a ellas las fachadas de Google que se derriten hacia la calle."""
+    TROZO = 4.0    # m: los segmentos largos se parten para que el más cercano esté entre los vecinos del árbol
+
+    def __init__(self, tris_edif):
+        self.arbol = None
+        if not tris_edif:
+            return
+        T = np.concatenate(tris_edif)
+        n = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0])
+        T = T[np.abs(n[:, 1]) < 0.2 * np.maximum(np.linalg.norm(n, axis=1), 1e-12)][:, :, [0, 2]]
+        if not len(T):
+            return
+        # la arista más larga en planta de cada triángulo vertical es su trozo de pared
+        aristas = np.stack([T[:, [0, 1]], T[:, [1, 2]], T[:, [0, 2]]], axis=1)          # (n, 3, 2, 2)
+        largo = np.linalg.norm(aristas[:, :, 1] - aristas[:, :, 0], axis=-1)
+        s = aristas[np.arange(len(T)), largo.argmax(axis=1)]                              # (n, 2, 2)
+        s = s[np.linalg.norm(s[:, 1] - s[:, 0], axis=1) > 0.05]
+        s = np.unique(np.round(s.reshape(-1, 4), 2), axis=0)
+        if not len(s):
+            return
+        L = np.linalg.norm(s[:, 2:] - s[:, :2], axis=1)
+        k = np.maximum(1, np.ceil(L / self.TROZO)).astype(int)
+        f0 = np.concatenate([np.arange(n_) / n_ for n_ in k])
+        f1 = np.concatenate([np.arange(1, n_ + 1) / n_ for n_ in k])
+        base = np.repeat(s, k, axis=0)
+        a, b = base[:, :2], base[:, 2:]
+        self.a, self.b = a + (b - a) * f0[:, None], a + (b - a) * f1[:, None]
+        from scipy.spatial import cKDTree
+        self.arbol = cKDTree((self.a + self.b) / 2)
+
+    def cercano(self, xz, k=8):
+        """(punto más cercano sobre una pared, distancia) para cada punto en planta (x, z)."""
+        xz = np.asarray(xz, float).reshape(-1, 2)
+        if self.arbol is None or not len(xz):
+            return xz.copy(), np.full(len(xz), np.inf)
+        k = min(k, len(self.a))
+        _, ii = self.arbol.query(xz, k=k)
+        ii = ii.reshape(len(xz), k)
+        A, AB = self.a[ii], self.b[ii] - self.a[ii]
+        t = np.clip(((xz[:, None] - A) * AB).sum(-1) / np.maximum((AB * AB).sum(-1), 1e-12), 0, 1)
+        Q = A + AB * t[..., None]
+        d = np.linalg.norm(Q - xz[:, None], axis=-1)
+        m = d.argmin(axis=1)
+        r = np.arange(len(xz))
+        return Q[r, m], d[r, m]
+
+
 class Calles:
     """Dónde están la calzada y las banquetas de OpenLaps y a qué altura, en una rejilla de 0,5 m (coordenadas de AC).
     Sale del .glb de la pista: en lugar de polígonos, máscaras (consultarlas es instantáneo)."""
@@ -558,6 +633,9 @@ class Calles:
         # altura del suelo en toda la rejilla: la de la calzada más cercana
         self.suelo_r = alto[ii, jj]
         self.nx, self.nz = nx, nz
+        # cerca de la calle (calzada o banqueta): los objetos de Google que llegan aquí se quitan enteros
+        self.cerca = d_cubre <= (CERCA_OBJ / CELDA)
+        self.paredes = Paredes(tris_edif)
         if avisar:
             log(f"calzada de OpenLaps: {cubre.sum() * CELDA * CELDA:,.0f} m²")
 
@@ -576,6 +654,9 @@ class Calles:
     def suelo(self, x, z):
         i, j = self._ij(x, z)
         return self.suelo_r[i, j]
+
+    def pared(self, xz):
+        return self.paredes.cercano(xz)
 
 
 class CallesVivo:
@@ -673,7 +754,21 @@ class CallesVivo:
         return out
 
     # misma interfaz que Calles (las máscaras se piden por nombre)
-    via, franja, limpieza, edif, cubre = "via", "franja", "limpieza", "edif", "cubre"
+    via, franja, limpieza, edif, cubre, cerca = "via", "franja", "limpieza", "edif", "cubre", "cerca"
+
+    def pared(self, xz):
+        """Pared de OpenLaps más cercana (en el pedazo de cada punto; sin pedazo, ninguna)."""
+        xz = np.asarray(xz, float).reshape(-1, 2)
+        q, d = xz.copy(), np.full(len(xz), np.inf)
+        with self._lock:
+            pedazos = dict(self.pedazos)
+        ki, kj = self._claves(xz[:, 0], xz[:, 1])
+        for a, b in set(zip(ki.tolist(), kj.tolist())):
+            c = pedazos.get((a, b))
+            if c is not None:
+                sel = (ki == a) & (kj == b)
+                q[sel], d[sel] = c.paredes.cercano(xz[sel])
+        return q, d
 
     def en(self, mascara, x, z):
         return self._consulta("en", x, z, mascara)
@@ -731,6 +826,28 @@ class Mundo:
         self._vivo_url = getattr(args, "vivo_url", None) or ("http://127.0.0.1:8790" if getattr(args, "vivo", None) else None)
         self._t_camino, self._zona_tam = 0.0, (1200.0, 1200.0)
         self._hechas_zona = set()
+        # grupos de hilos fijos: cada hilo guarda su conexión con Google (crear un grupo por tanda las cerraba) y con
+        # 32 descargas a la vez se bajan ~3 veces más teselas por segundo (Google tarda ~0,4 s en contestar cada una)
+        self.hilos_arbol = concurrent.futures.ThreadPoolExecutor(32, thread_name_prefix="g3d-arbol")
+        self.hilos_bajar = concurrent.futures.ThreadPoolExecutor(32, thread_name_prefix="g3d-bajar")
+        self.hilos_precarga = concurrent.futures.ThreadPoolExecutor(8, thread_name_prefix="g3d-precarga")
+        self._bajando = {}                           # tid -> Future con el glb (empieza al elegir la tesela)
+
+    def _bajar(self, u):
+        """Descarga de la tesela, empezada en cuanto se elige (sin esperar al resto del árbol)."""
+        t = tid(u)
+        with self.cerrojo:
+            f = self._bajando.get(t)
+            if f is None or (f.done() and (f.cancelled() or f.exception() is not None)):   # falló: otra vez
+                f = self._bajando[t] = self.hilos_bajar.submit(self.google.get, u)
+            return f
+
+    def _al_elegir(self, u):
+        t = tid(u)
+        with self.cerrojo:
+            if t in self.teselas or t in self.en_proceso or t in self._bajando:
+                return
+        self._bajar(u)
 
     def prevista(self):
         """Dónde estará el coche en ~6 s (como mucho 150 m por delante)."""
@@ -835,6 +952,14 @@ class Mundo:
                 self.despertar.set()
 
     def actualizar(self, x, z):
+        err_cerca = getattr(self.args, "error_cerca", 0.01)
+        if not self.completo_tids and getattr(self.args, "burda", True):
+            # nada dibujado aún: primero la zona entera con poco detalle (pocas teselas, se ve en segundos) y luego la
+            # fina, que va sustituyendo a la burda por ramas (como al acercarse)
+            self._pasada(x, z, self.args.error * 4, err_cerca * 4, 250, burda=True)
+        self._pasada(x, z, self.args.error, err_cerca, self.args.max)
+
+    def _pasada(self, x, z, error, err_cerca, maximo, burda=False):
         t0 = time.time()
         self.centro = (x, z)
         fx, fz = self.foco
@@ -844,9 +969,11 @@ class Mundo:
             if nuevos_p:
                 self._invalidar(nuevos_p)
         padres = {}
-        err_cerca = getattr(self.args, "error_cerca", 0.01)
-        urls = seleccionar(self.google, self._ecef_de(x, z), self.args.radio, self.args.error, self.args.max,
-                           error_cerca=err_cerca, radio_cerca=150.0, foco_actual=self._ecef_de(fx, fz), padres=padres)
+        urls = seleccionar(self.google, self._ecef_de(x, z), self.args.radio, error, maximo,
+                           error_cerca=err_cerca, radio_cerca=150.0, foco_actual=self._ecef_de(fx, fz), padres=padres,
+                           al_elegir=self._al_elegir, hilos=self.hilos_arbol)
+        t_elegir = time.time() - t0
+        t_esperar = t_convertir = 0.0
         vigentes = list(dict.fromkeys(tid(u) for u in urls))
         with self.cerrojo:
             self.padres_de.update(padres)
@@ -860,6 +987,10 @@ class Mundo:
         # sustitutos listos dejan de publicarse al instante (nunca coexiste una tesela burda encima de sus hijas)
         TANDA = 24
         self.bucle_activo = True
+        with self.cerrojo:
+            libres = [u for u in nuevas if tid(u) not in self.en_proceso]
+        for u in libres:      # todas bajándose ya (la mayoría empezó al elegirlas); las tandas solo esperan a las suyas
+            self._bajar(u)
         try:
             pend_sin_desfase = []
             for k0 in range(0, max(len(nuevas), 1), TANDA):
@@ -873,8 +1004,10 @@ class Mundo:
                             grupo.append(u)
                 if grupo:
                     try:
-                        with concurrent.futures.ThreadPoolExecutor(16) as ex:
-                            crudas = list(ex.map(self.google.get, grupo))
+                        ta = time.time()
+                        crudas = [self._bajar(u).result() for u in grupo]
+                        tb = time.time()
+                        t_esperar += tb - ta
                         prims = [primitivas(d) for d in crudas]
                         n_anc_antes = len(self.marco.anclas)
                         if self.marco.desfase is None and prims:
@@ -893,10 +1026,12 @@ class Mundo:
                             self._guardar_teselas(grupo, convertidas)
                             if len(self.marco.anclas) > n_anc_antes:
                                 self._invalidar()
+                        t_convertir += time.time() - tb
                     finally:
                         with self.cerrojo:
                             for u in grupo:
                                 self.en_proceso.discard(tid(u))
+                                self._bajando.pop(tid(u), None)
                 ultima = k0 + TANDA >= len(nuevas)
                 if ultima and pend_sin_desfase:
                     if self.marco.desfase is None:
@@ -938,12 +1073,16 @@ class Mundo:
                     for i in ids:
                         self.mallas.pop(i, None)
                         self.centro_malla.pop(i, None)
+                # descargas ya terminadas que esta selección no usa (se eligieron y luego quedaron fuera del máximo)
+                for t in [t for t, f in self._bajando.items() if f.done() and t not in self.vigentes_set]:
+                    self._bajando.pop(t, None)
         finally:
             self.bucle_activo = False
         if math.hypot(*np.subtract(self.prevista(), (x, z))) > UMBRAL_MOVIDO:
             self.despertar.set()
-        log(f"v{self.version - self.inicial}: {len(vigentes)} teselas ({len(nuevas)} nuevas, "
-            f"{self.google.pedidas} peticiones), {len(self.publicadas)} mallas, {time.time() - t0:.1f} s")
+        log(f"v{self.version - self.inicial}{' (burda)' if burda else ''}: {len(vigentes)} teselas ({len(nuevas)} nuevas, "
+            f"{self.google.pedidas} peticiones), {len(self.publicadas)} mallas, {time.time() - t0:.1f} s "
+            f"[árbol {t_elegir:.1f} s, esperando descargas {t_esperar:.1f} s, convertir {t_convertir:.1f} s]")
 
     def _camino_vivo(self, fx, fz, vx, vz):
         """Puntos previstos sobre las calles de OSM (desde el servidor en vivo) y tamaño de la zona preparada."""
@@ -969,7 +1108,7 @@ class Mundo:
         padres = {}
         err_cerca = getattr(self.args, "error_cerca", 0.01)
         urls = seleccionar(self.google, self._ecef_de(tx, tz), radio, self.args.error, 400,
-                           error_cerca=err_cerca, radio_cerca=radio, padres=padres)
+                           error_cerca=err_cerca, radio_cerca=radio, padres=padres, hilos=self.hilos_precarga)
         with self.cerrojo:
             self.padres_de.update(padres)
             pend = [u for u in urls if tid(u) not in self.teselas and tid(u) not in self.en_proceso]
@@ -991,8 +1130,7 @@ class Mundo:
             if not grupo:
                 continue
             try:
-                with concurrent.futures.ThreadPoolExecutor(8) as ex:
-                    crudas = list(ex.map(self.google.get, grupo))
+                crudas = list(self.hilos_precarga.map(self.google.get, grupo))
                 convertidas = [self.convertir(primitivas(d)) for d in crudas]
                 self._guardar_teselas(grupo, convertidas)
                 hechas += len(grupo)
@@ -1132,25 +1270,15 @@ class Mundo:
             c = (p[tris[:, 0]] + p[tris[:, 1]] + p[tris[:, 2]]) / 3
             cxs.append(float(c[:, 0].mean()))
             czs.append(float(c[:, 2].mean()))
-            # sobre la calzada y las banquetas se va todo (si no, árboles derretidos y "telarañas" entre edificios
-            # hacen túneles)
-            en_via = cl.en(cl.via, c[:, 0], c[:, 2])
-            # franja junto a la calzada: solo lo que queda entero por debajo de 2 m (suelo, coches estacionados); la
-            # base de las fachadas de Google viene deformada y si se quita quedan planos colgando
-            en_franja = cl.en(cl.franja, c[:, 0], c[:, 2]) & ~en_via
-            if en_franja.any():
-                k = np.nonzero(en_franja)[0]
-                alto = np.maximum.reduce([p[tris[k, n], 1] for n in range(3)])
-                en_franja[k[alto >= cl.suelo(c[k, 0], c[k, 2]) + 2.0]] = False
-            tris = tris[~(en_via | en_franja)]
+            if len(tris) and len(p) >= len(tris) * 2:
+                # soldar vértices duplicados (mallas sin indexar): alivia AC y hace que las fachadas se muevan juntas
+                _, idx_u, inv = np.unique(np.c_[np.round(p, 3), np.round(uv, 4)], axis=0,
+                                          return_index=True, return_inverse=True)
+                p, uv, tris = p[idx_u], uv[idx_u], inv.reshape(-1)[tris]
+            tris = self.recortar(p, tris)
             if len(tris):
                 tris = self.sin_flotantes(p, tris)
             if len(tris):
-                if len(p) >= len(tris) * 2:
-                    # soldar vértices duplicados (mallas sin indexar) para aliviar AC
-                    _, idx_u, inv = np.unique(np.c_[np.round(p, 3), np.round(uv, 4)], axis=0,
-                                              return_index=True, return_inverse=True)
-                    p, uv, tris = p[idx_u], uv[idx_u], inv[tris]
                 cen = p[np.unique(tris)][:, [0, 2]].mean(axis=0)
                 salida += [{"geo": empacar(pp, uu, tt), "tex": jpeg, "centro": (float(cen[0]), float(cen[1]))}
                            for pp, uu, tt in partir(p, uv, tris)]
@@ -1161,6 +1289,66 @@ class Mundo:
         else:
             meta = None
         return salida, meta
+
+    def recortar(self, p, tris):
+        """Qué se queda de una primitiva de Google junto a la calle de OpenLaps (mueve `p` en su sitio).
+
+        La malla de Google es una sola cáscara: el suelo, las fachadas, los árboles y los coches van pegados, y a pie de
+        calle la fachada viene "derretida" hacia la banqueta. Recortar por zonas dejaba fachadas flotando (si se cortaba
+        mucho) o árboles y coches a medias (si se cortaba poco). Por eso se separa cada triángulo según lo que es:
+        - suelo (menos de SUELO_G sobre el suelo) donde OpenLaps ya tiene calle o banqueta: fuera;
+        - fachada (a menos de PARED m de una pared de OpenLaps): se queda y sus vértices fuera de la planta se llevan a
+          la pared (la parte derretida queda vertical); los de abajo, hasta el suelo (sin hueco por debajo);
+        - sobre la calle y lejos de toda pared: fuera (copas de árboles, farolas, coches);
+        - fuera de la calle y lejos de las paredes (árboles, coches, kioscos): se agrupan en la rejilla y el grupo se
+          quita entero si llega a menos de CERCA_OBJ m de la calle (sin medias copas colgando).
+        Las teselas lejanas (triángulos de más de ARISTA_BURDA m) solo pierden el suelo: quitar uno de sus triángulos
+        grandes se llevaba media fachada y quedaban trozos volando."""
+        if not len(tris):
+            return tris
+        cl = self.calles
+        c = p[tris].mean(axis=1)
+        suelo_c = cl.suelo(c[:, 0], c[:, 2])
+        suelo_t = p[tris, 1].max(axis=1) - suelo_c < SUELO_G
+        en_sup = cl.en(cl.cubre, c[:, 0], c[:, 2])
+        quitar = suelo_t & en_sup
+        arista = float(np.median(np.linalg.norm(p[tris[:, 1]] - p[tris[:, 0]], axis=1)))
+        if arista > ARISTA_BURDA:
+            return tris[~quitar]
+        _, d_pared = cl.pared(c[:, [0, 2]])
+        lejos = d_pared > PARED
+        quitar |= en_sup & lejos
+        obj = ~suelo_t & lejos & ~en_sup
+        if obj.any():
+            i, j = np.floor(c[obj, 0] / CELDA).astype(np.int64), np.floor(c[obj, 2] / CELDA).astype(np.int64)
+            i0, j0 = i.min() - 2, j.min() - 2
+            M = np.zeros((i.max() - i0 + 3, j.max() - j0 + 3), bool)
+            M[i - i0, j - j0] = True
+            lab, n = ndimage.label(ndimage.binary_dilation(M, iterations=2))
+            grupo = lab[i - i0, j - j0]
+            toca = np.zeros(n + 1, bool)
+            np.logical_or.at(toca, grupo, cl.en(cl.cerca, c[obj, 0], c[obj, 2]))
+            q = np.zeros(len(tris), bool)
+            q[np.nonzero(obj)[0]] = toca[grupo]
+            quitar |= q
+        # fachadas: solo los vértices de triángulos junto a una pared que se quedan; el suelo que se queda (plazas sin
+        # calle de OpenLaps) no se toca
+        queda = ~quitar
+        usa = np.zeros(len(p), bool)
+        usa[tris[queda & ~suelo_t & ~lejos].reshape(-1)] = True
+        usa[tris[queda & suelo_t].reshape(-1)] = False
+        v = np.nonzero(usa)[0]
+        if len(v):
+            v = v[~cl.en(cl.edif, p[v, 0], p[v, 2])]
+        if len(v):
+            q, d = cl.pared(p[v][:, [0, 2]])
+            ok = d <= MOVER
+            v, q = v[ok], q[ok]
+            p[v, 0], p[v, 2] = q[:, 0], q[:, 1]
+            sv = cl.suelo(p[v, 0], p[v, 2])
+            bajo = p[v, 1] - sv < 1.0
+            p[v[bajo], 1] = sv[bajo] - 0.3
+        return tris[queda]
 
     def sin_flotantes(self, p, tris, alto_min=2.5, area_max=20.0):
         """Quita los pedazos sueltos que dejan los recortes cerca de la calle: componentes chicos (y grandes si no
@@ -1249,6 +1437,8 @@ def main(argv=None):
     p.add_argument("--error-cerca", type=float, default=0.01, help="error geométrico en los primeros 150 m")
     p.add_argument("--max", type=int, default=1200, help="máximo de teselas a la vez")
     p.add_argument("--cache", type=int, default=3000, help="teselas convertidas que se guardan en memoria")
+    p.add_argument("--sin-burda", dest="burda", action="store_false",
+                   help="no dibujar primero la zona con poco detalle (va directo al detalle fino)")
     p.add_argument("--vivo", help="modo en vivo: carpeta de los pedazos (salida/vivo/<nombre>) en lugar de --glb")
     p.add_argument("--vivo-url", help="URL del servidor openlaps.vivo (para la ruta prevista al precargar)")
     p.add_argument("--puerto", type=int, default=PUERTO)
