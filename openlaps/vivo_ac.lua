@@ -12,6 +12,7 @@ local HORNEADOS = { __HORNEADOS__ }   -- pedazos que ya vienen en el .kn5
 local L = __L__
 local ORIGEN = { __LAT__, __LON__ }   -- el servidor tiene que ser de este mismo lugar (si no, sus pedazos caerían mal)
 local RECT_HORNEADO = __RECT_HORNEADO__   -- { x0, y0, x1, y1 } en coordenadas locales cuando viene de pista normal
+local TRAFICO_PISTA = true   -- la casilla «Con tráfico» de la app (lo cambia la app antes de abrir el juego)
 local vivoActivo = not __MODO_ESPERA__
 local vivoActivando = false
 local vivoError = nil
@@ -167,6 +168,7 @@ local function activarEnVivo()
   end)
 end
 
+local trUi = nil      -- los ajustes del tráfico dentro del juego (se define más abajo, con el tráfico)
 local shared = nil
 if ac.connect and ac.StructItem then
   local ok, res = pcall(function ()
@@ -198,6 +200,10 @@ if ui and ui.addSettings then
         shared.g3dMostrar = not shared.g3dMostrar
       end
       ui.textDisabled(shared.g3dMostrar and 'Visibles (se ocultan los de OpenLaps)' or 'Ocultos (usando edificios de OpenLaps)')
+      ui.separator()
+    end
+    if trUi then
+      trUi()
       ui.separator()
     end
     if vivoActivo then
@@ -244,15 +250,22 @@ if ui and ui.addSettings then
       if not vivoActivo then
         CFG.pad_osm = sl('##padosm', CFG.pad_osm, 50, 400, 25, 'Margen OSM: %.0f m', true)
         CFG.tesela_osm = sl('##tesosm', CFG.tesela_osm, 512, 2048, 256, 'Tesela OSM: %.0f m', true)
-        if ui.button('Por defecto', vec2(-1, 0)) then
+      end
+      -- volver a los valores de fábrica: todos, o con el modo en vivo ya activo solo los que aún se pueden cambiar
+      -- (el tamaño de tesela, el margen y los procesos quedan fijados al activarlo)
+      if ui.button('Restablecer valores por defecto', vec2(-1, 0)) then
+        if vivoActivo then
+          aplicarCfgTabla({ intervalo = 0.25, radio = 300, radio_fondo = 1200, r_carga = 430, r_soltar = 640 })
+        else
           aplicarCfgTabla({
             lado = 256, margen = 64, intervalo = 0.25, trabajadores = 0,
             radio = 300, radio_fondo = 1200, pad_osm = 200, tesela_osm = 1024,
             r_carga = 430, r_soltar = 640
           })
-          cambio = true
         end
+        cambio = true
       end
+      if vivoActivo then ui.textDisabled('Tesela, margen y procesos: fijos hasta reiniciar la sesion') end
     end)
 
     if cambio then
@@ -567,6 +580,368 @@ local function conducir(c, dt, esperando)
   mandos(gas, freno, giro)
 end
 
+-- ---------------------------------------------------------------- tráfico
+-- La simulación de tráfico de CSP (la del modo Traffic; dominio público), en una copia que la app deja en
+-- extension/trafico: un script de pista no puede leer la carpeta de la herramienta. Con ella aquí, los coches
+-- cercanos van pegados al suelo de verdad (en un giro CSP traza una curva recta en altura entre los dos carriles y
+-- el coche volaba o se hundía en cuanto la calle tenía pendiente).
+-- En una pista normal lee su data/traffic.json entero, con semáforos. En el modo en vivo el servidor da los
+-- carriles y los cruces de una ventana de 1,6 km alrededor del coche; al alejarse del centro se pide la siguiente
+-- y los coches que había cerca pasan a ella (el resto vuelve a aparecer solo); ahí los coches aparecen a
+-- 180-400 m y se quitan a 520 m: más lejos no hay escenario.
+local TR = {
+  mod = nil,            -- nil: sin intentar; false: no se puede; true: módulos cargados
+  sim = nil, clave = '', centro = nil, pendiente = nil, datos = nil,
+  pidiendo = false, tPedir = -10, apagado = false, roto = false, motivo = nil, coches = 0, reiniciar = false,
+}
+-- cochesPista 0 = según la pista; velocidad en % de la de cada calle
+local trCfg = ac.storage({ trafico = true, coches = 120, cochesPista = 0, velocidad = 100 })
+local TR_LEJOS = 300      -- a esta distancia del centro de la ventana se pide otra (m)
+
+local function trFallo(donde, err)
+  TR.roto = true
+  TR.motivo = donde .. ': ' .. tostring(err)
+  diag.error = 'trafico ' .. TR.motivo
+  ac.log('vivo: trafico, ' .. TR.motivo)
+end
+
+local function trCargar()
+  if TR.mod ~= nil then return TR.mod end
+  TR.mod = false
+  if ac.load('newmode.traffic.active') then
+    TR.motivo = 'ya lo pone el modo Traffic'
+    return false
+  end
+  local base = __dirname .. '/trafico'
+  if not io.fileExists(base .. '/openlaps.txt') then
+    TR.motivo = 'esta pista no trae la simulacion (abre la pista desde la app de OpenLaps)'
+    return false
+  end
+  -- los modelos y el tipo de letra de las matrículas, con ruta relativa a la carpeta del juego si se puede
+  local raizAC = ac.getFolder(ac.FolderID.Root)
+  local datos = base .. '/data'
+  if raizAC and datos:sub(1, #raizAC):lower() == raizAC:lower() then datos = datos:sub(#raizAC + 2) end
+  OPENLAPS_TRAFICO_DATOS = datos:gsub('\\', '/')
+  -- CSP manda require('TrafficConfig') y demás a la carpeta de su herramienta: se registra cada módulo de la copia
+  local function registrar(dir, prefijo)
+    for _, n in ipairs(io.scanDir(__dirname .. '/' .. dir, '*.lua')) do
+      local m = n:sub(1, -5)
+      package.preload[prefijo .. m] = function () return require(dir .. '/' .. m) end
+    end
+  end
+  registrar('trafico/src/common', '')
+  registrar('trafico/src/editor', '')
+  registrar('trafico/src/simulation', '')
+  for _, s in ipairs({ 'data', 'search', 'sort', 'mst', 'connectivity', 'shortest_paths', 'flow' }) do
+    registrar('trafico/lib/luagraphs/' .. s, 'luagraphs.' .. s .. '.')
+  end
+  DebugShapes = DebugShapes or {}
+  ErrorPos = ErrorPos or function (msg) error(msg) end
+  -- velocidad del tráfico (la copia de TrafficDriver.lua multiplica por esto el límite de la calle y el del coche)
+  OPENLAPS_TRAFICO_VEL = trCfg.velocidad / 100
+  -- altura del suelo bajo un coche del tráfico (lo llama la copia de TrafficDriver.lua para los cercanos)
+  local desde, abajo = vec3(), vec3(0, -1, 0)
+  OPENLAPS_SUELO = function (p)
+    desde.x, desde.y, desde.z = p.x, p.y + 1.5, p.z
+    local d = physics.raycastTrack(desde, abajo, 3.5)
+    if d ~= -1 then p.y = p.y + 1.5 - d end
+  end
+  local ok, err = pcall(function ()
+    local C = require('TrafficConfig')
+    C.speedMultiplier, C.carnageMode, C.debugBehaviour, C.debugSpawnAround = 1, false, false, false
+    TR.Config = C
+    if #require('CarsList') == 0 then error('sin modelos de coche') end
+    TR.Editor = require('EditorMain')
+    TR.Sim = require('TrafficSimulation')
+    TR.Grid = require('TrafficGrid')
+    TR.Guide = require('TrafficGuide')
+    TR.Path = require('TrafficPath')
+    TR.Context = require('TrafficContext')
+    TR.Fisica = require('TrafficCarPhysics')
+  end)
+  if not ok then
+    trFallo('al cargar', err)
+    return false
+  end
+  TR.mod = true
+  return true
+end
+
+-- distancias y número de coches: en vivo solo hay escenario cerca; una pista normal está entera
+local function trModo(enVivo)
+  local C = TR.Config
+  TR.enVivo = enVivo
+  if enVivo then
+    C.distantSpawnFrom, C.distantSpawnTo, C.maxSpawnDistance, C.despawnDistance = 180, 400, 400, 520
+    C.driversCount = trCfg.coches
+  else
+    C.distantSpawnFrom, C.distantSpawnTo, C.maxSpawnDistance, C.despawnDistance = 400, 1000, 1000, 1500
+    C.driversCount = trCfg.cochesPista > 0 and trCfg.cochesPista or (TR.cochesAuto or 200)
+  end
+end
+
+local function trApagar()
+  if TR.sim then
+    pcall(function ()
+      TR.Fisica.clear()
+      TR.sim:dispose()
+    end)
+  end
+  TR.sim, TR.clave, TR.centro, TR.pendiente, TR.datos, TR.coches = nil, '', nil, nil, nil, 0
+end
+
+-- carril de la rejilla nueva que pasa por `pos` en el sentido `dir`: (carril, distancia desde su inicio)
+local function trBuscar(rejilla, pos, dir)
+  local mejor, mejorD, mejorS = nil, 2.5 * 2.5, 0
+  local px, py, pz = pos.x, pos.y, pos.z
+  local lanes = rejilla.lanes
+  for i = 1, #lanes do
+    local l = lanes[i]
+    if l.size > 1 and l.name:sub(1, 1) ~= '~' and l.aabb:closerToThan(pos, 3) then
+      local pts, meta, largo, cub = l.points, l.edgesMeta, l.edgesLength, l.edgesCubic
+      for j = 1, l.size - 1 do
+        local e, p = meta[j].dir, pts[j]
+        if e.x * dir.x + e.y * dir.y + e.z * dir.z > 0.6 then
+          local dx, dy, dz = px - p.x, py - p.y, pz - p.z
+          local s = math.max(0, math.min(largo[j], dx * e.x + dy * e.y + dz * e.z))
+          local qx, qy, qz = dx - e.x * s, dy - e.y * s, dz - e.z * s
+          local d2 = qx * qx + qy * qy + qz * qz
+          if d2 < mejorD then mejor, mejorD, mejorS = l, d2, cub[j].totalDistance + s end
+        end
+      end
+    end
+  end
+  return mejor, mejorS
+end
+
+-- pasa la simulación a la rejilla de otra ventana sin quitar los coches que van por un carril cerca de la cámara.
+-- Devuelve cuántos siguen, cuántos había y por qué se fueron los demás (texto para el registro)
+local function trMover(datos)
+  local sim, cam = TR.sim, ac.getSim().cameraPosition
+  TR.Context.lanesSpace = ac.HashSpace(15)
+  local nueva = TR.Grid(datos)
+  local pasan, total = 0, 0
+  local lejos, cruce, sinCarril, sinTramo, fallo = 0, 0, 0, 0, 0
+  for i = 1, sim.drivers.length do
+    local d = sim.drivers[i]
+    local guia, puesto = d.guide, false
+    if guia ~= nil then
+      local cur = guia._curCursor
+      local dir = nil
+      if d.car ~= nil then
+        total = total + 1
+        if d.car:crashed() or not d.pos:closerToThan(cam, 450) then
+          lejos = lejos + 1
+        else
+          -- vale también el que ya tiene pedido su giro (CSP lo marca 24 m antes del cruce) si sigue sobre un
+          -- carril; el que va por dentro del cruce no tiene carril debajo y se cuenta como tal
+          local m = cur ~= nil and cur.lane ~= nil and cur.lane.edgesMeta[cur.point] or nil
+          dir = d:getDirRef() or (m and m.dir) or nil
+          if dir == nil then cruce = cruce + 1 else dir = dir:clone() end
+        end
+      end
+      guia:detach(false)
+      d.guide = nil
+      if dir then
+        local carril, dist = trBuscar(nueva, d.pos, dir)
+        if not carril then
+          if cur == nil or cur.lane == nil then cruce = cruce + 1 else sinCarril = sinCarril + 1 end
+        else
+          local arista = dist > 0.5 and dist < carril.totalDistance - 0.5 and nueva.graph:findGEdge(carril, dist)
+          if not arista then
+            sinTramo = sinTramo + 1
+          else
+            puesto = pcall(function () d.guide = TR.Guide(TR.Path(nueva, arista.toID, carril, dist), d) end)
+              and d.guide ~= nil
+            if not puesto then fallo = fallo + 1 end
+          end
+        end
+      end
+    end
+    d.grid = nueva
+    if puesto then pasan = pasan + 1 else d.guide = nil end     -- sin guía, el conductor suelta su coche y vuelve a salir
+  end
+  sim.grid = nueva
+  TR.Context.grid = nueva
+  return pasan, total, string.format('%d lejos o chocados, %d en un cruce, %d sin carril igual, %d junto a un cruce, %d fallos',
+    lejos, cruce, sinCarril, sinTramo, fallo)
+end
+
+local function trAplicar(e)
+  local t0 = reloj()
+  local ok, err = pcall(function ()
+    local datos = TR.Editor(e):finalizeData()
+    local pasan, total, porque = 0, 0, ''
+    if TR.sim then
+      pasan, total, porque = trMover(datos)
+    else
+      trModo(true)
+      TR.sim = TR.Sim(datos)
+    end
+    TR.datos, TR.clave, TR.centro = datos, e.clave, e.centro
+    ac.log(string.format('vivo: trafico, ventana %s (%d carriles, %d cruces) en %.0f ms; siguen %d de %d coches%s',
+      e.clave, #datos.lanes, #datos.intersections, (reloj() - t0) * 1e3, pasan, total,
+      porque ~= '' and ' (' .. porque .. ')' or ''))
+  end)
+  if not ok then trFallo('al crear la ventana', err) end
+end
+
+local function trPedir(c)
+  TR.pidiendo = true
+  local q = string.format('?x=%.1f&z=%.1f&vx=%.2f&vz=%.2f&c=%s', c.position.x, c.position.z, c.velocity.x, c.velocity.z, TR.clave)
+  web.get(URL .. '/vivo/trafico' .. q, function (err, r)
+    TR.pidiendo = false
+    if err or not r or r.status ~= 200 then return end
+    local ok, e = pcall(JSON.parse, r.body)
+    if not ok or not e then return end
+    if e.apagado then
+      TR.apagado = true
+    elseif e.lanes and e.clave ~= TR.clave then
+      TR.pendiente = e
+    end
+  end)
+end
+
+-- cambió el número de coches: la simulación se rehace con los mismos carriles
+local function trRehacer()
+  if not TR.reiniciar or ui.isAnyMouseDown() then return end
+  TR.reiniciar = false
+  local datos, clave, centro, enVivo = TR.datos, TR.clave, TR.centro, TR.enVivo
+  trApagar()
+  if datos then
+    trModo(enVivo)
+    local ok, err = pcall(function () TR.sim = TR.Sim(datos) end)
+    if not ok then return trFallo('al reiniciar', err) end
+    TR.datos, TR.clave, TR.centro = datos, clave, centro
+  end
+end
+
+local function trSimular(dt)
+  local s = ac.getSim()
+  if TR.sim and s.dt > 0 and not s.isReplayActive then
+    local ok, err = pcall(TR.sim.update, TR.sim, dt)
+    if not ok then trFallo('al simular', err) end
+  end
+end
+
+-- pista normal (sin el modo en vivo activo): todo el tráfico de su data/traffic.json, con semáforos
+local function trLocal(dt)
+  if TR.roto or TR.sinDatos or not TRAFICO_PISTA then return end
+  if not trCfg.trafico then
+    if TR.sim then trApagar() end
+    return
+  end
+  if ac.getSim().isOnlineRace then return end
+  if not TR.sim then
+    TR.tLocal = TR.tLocal or os.clock()
+    if os.clock() - TR.tLocal < 1 then return end      -- que el modo Traffic, si lo hay, se anuncie antes
+    if not trCargar() then return end
+    local f = ac.getTrackDataFilename('traffic.json')
+    local txt = f and io.fileExists(f) and io.load(f, '') or ''
+    local ok, e = pcall(JSON.parse, txt)
+    if txt == '' or not ok or not e or not e.lanes or #e.lanes == 0 then
+      TR.sinDatos = true
+      return
+    end
+    local metros = 0
+    for _, l in ipairs(e.lanes) do
+      local p = l.points
+      for i = 2, #p do
+        metros = metros + math.sqrt((p[i][1] - p[i - 1][1]) ^ 2 + (p[i][3] - p[i - 1][3]) ^ 2)
+      end
+    end
+    TR.cochesAuto = math.max(30, math.min(1500, math.floor(metros / 150 / 10 + 0.5) * 10))
+    local t0 = reloj()
+    local bien, err = pcall(function ()
+      trModo(false)
+      TR.datos = TR.Editor(e):finalizeData()
+      TR.sim = TR.Sim(TR.datos)
+      TR.clave = 'pista'
+    end)
+    if not bien then return trFallo('al crear el trafico de la pista', err) end
+    ac.log(string.format('vivo: trafico de la pista (%d carriles, %d cruces, %d coches) en %.0f ms',
+      #TR.datos.lanes, #TR.datos.intersections, TR.Config.driversCount, (reloj() - t0) * 1e3))
+    return
+  end
+  trRehacer()
+  trSimular(dt)
+end
+
+local function trActualizar(dt, c)
+  if TR.roto or TR.apagado or otroLugar then return end
+  if not trCfg.trafico or not TRAFICO_PISTA then
+    if TR.sim then trApagar() end
+    return
+  end
+  if not trCargar() then return end
+  local s = ac.getSim()
+  if s.isOnlineRace then return end
+  if TR.sim and not TR.enVivo then trApagar() end      -- venía del tráfico de la pista: ahora manda el servidor
+  trRehacer()
+  local t = os.clock()
+  if not TR.pidiendo and not TR.pendiente and t - TR.tPedir > 1 then
+    local lejos = TR.centro == nil
+      or math.max(math.abs(c.position.x - TR.centro[1]), math.abs(c.position.z - TR.centro[2])) > TR_LEJOS
+    if lejos then
+      TR.tPedir = t
+      trPedir(c)
+    end
+  end
+  if TR.pendiente and descargas == 0 then
+    local e = TR.pendiente
+    TR.pendiente = nil
+    trAplicar(e)
+    return
+  end
+  trSimular(dt)
+end
+
+local function trDibujar()
+  if TR.sim and not TR.roto then
+    local ok, err = pcall(TR.sim.drawMain, TR.sim)
+    if not ok then trFallo('al dibujar', err) end
+  end
+end
+
+local function trEstadoTexto()
+  if TR.apagado or not TRAFICO_PISTA then return 'Apagado en la app de OpenLaps' end
+  if TR.roto or TR.mod == false then return 'No disponible: ' .. tostring(TR.motivo or '?') end
+  if not vivoActivo then
+    if TR.sinDatos then return 'Esta pista se genero sin trafico' end
+    return TR.sim and string.format('El de la pista: %d coches', TR.Config.driversCount) or 'Preparando...'
+  end
+  if not TR.sim then return 'Calculando los carriles de la zona...' end
+  return 'Ventana ' .. TR.clave .. (TR.pendiente and ' (cambiando)' or '')
+end
+
+trUi = function ()
+  if ui.checkbox('Trafico', trCfg.trafico) then trCfg.trafico = not trCfg.trafico end
+  if trCfg.trafico then
+    ui.setNextItemWidth(-1)
+    if vivoActivo then
+      local v, ch = ui.slider('##trcoches', trCfg.coches, 20, 400, 'Coches: %.0f', true)
+      if ch then
+        trCfg.coches = math.floor(v / 10 + 0.5) * 10
+        TR.reiniciar = true
+      end
+    else
+      local v, ch = ui.slider('##trcochesp', trCfg.cochesPista, 0, 1500,
+        trCfg.cochesPista > 0 and 'Coches: %.0f' or 'Coches: segun la pista', true)
+      if ch then
+        trCfg.cochesPista = math.floor(v / 10 + 0.5) * 10
+        TR.reiniciar = true
+      end
+    end
+    ui.setNextItemWidth(-1)
+    local vel, cambia = ui.slider('##trvel', trCfg.velocidad, 40, 200, 'Velocidad: %.0f %%', true)
+    if cambia then
+      trCfg.velocidad = math.floor(vel / 5 + 0.5) * 5
+      OPENLAPS_TRAFICO_VEL = trCfg.velocidad / 100       -- se nota al momento, sin rehacer nada
+    end
+    ui.textDisabled(trEstadoTexto())
+  end
+end
+
 -- ---------------------------------------------------------------- ciclo
 function script.update(dt)
   local ahora = os.clock()
@@ -574,6 +949,7 @@ function script.update(dt)
     enviarParametros()
   end
   if not vivoActivo then
+    trLocal(dt)
     if RECT_HORNEADO then
       local c = ac.getCar(0)
       if c then
@@ -606,6 +982,10 @@ function script.update(dt)
   if __MODO_ESPERA__ and not horizontesOcultos then
     ac.findMeshes('horizonte_?'):setVisible(false)
     horizontesOcultos = true
+  end
+  do
+    local coche = ac.getCar(0)
+    if coche then trActualizar(dt, coche) end
   end
   local t = os.clock()
   if not pidiendo and t - tFoco > T_FOCO then
@@ -710,6 +1090,7 @@ end
 
 function script.draw3D()
   local s = ac.getSim()
+  trDibujar()
   if not vivoActivo then
     if vivoActivando then
       render.debugText(s.cameraPosition + s.cameraLook * 3 + s.cameraUp * 0.6,

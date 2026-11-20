@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__, URL
-from .. import regions, vivo
+from .. import regions, trafico_vivo, vivo
 from . import ajustes, assetto, servidor
 from . import espacio
 from .envivo import EnVivo, _puerto_libre, esperar_puerto
@@ -533,13 +533,21 @@ class Api:
                 assetto.instalar(ac, origen)
             vp = ajustes.vivo_params(a)
             ctrl = f"http://127.0.0.1:{self._puerto_control_ac or vivo.PUERTO_CONTROL_AC}"
-            vivo.actualizar_control_lua(str(origen), control_url=ctrl, pista=nombre, params=vp)
+            quiere = bool(a.get("trafico", True))
+            vivo.refrescar_lua(str(origen))
+            vivo.actualizar_control_lua(str(origen), control_url=ctrl, pista=nombre, params=vp, trafico=quiere)
+            # el tráfico lo corre el script de la pista con una copia de la simulación de CSP (coches pegados al
+            # suelo); también sirve si luego se activa el modo en vivo desde AC
+            propio = trafico_vivo.instalar_simulacion(str(origen), str(ac))
             # edificios de Google 3D (opcional): con la opción apagada se quita el script y la pista queda tal cual
             aviso = self._g3d.preparar(origen, ajustes.salida() / f"{nombre}.glb", bool(a.get("google3d")),
                                        str(a.get("token_cesium") or "").strip())
-            # con tráfico: el modo Traffic de CSP, si la pista lo trae y la opción está puesta; si no, práctica
-            con_trafico = bool(a.get("trafico", True)) and assetto.tiene_trafico(origen) and assetto.csp(ac)
-            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre, trafico=con_trafico), "trafico": con_trafico}
+            # con tráfico, si la pista lo trae y la opción está puesta: práctica normal cuando lo lleva el script de
+            # la pista; el modo Traffic de CSP solo si esta instalación no deja copiar la simulación
+            con_trafico = quiere and assetto.tiene_trafico(origen) and assetto.csp(ac)
+            mensaje = assetto.jugar(ac, nombre, trafico=con_trafico and not propio)
+            r = {"ok": True, "mensaje": t("ac_jugando_trafico", p=nombre) if con_trafico else mensaje,
+                 "trafico": con_trafico}
             if aviso:
                 r["aviso"] = t(aviso)
             return r
@@ -617,14 +625,18 @@ class Api:
         try:
             nombre = f"{self._vivo.nombre}_vivo"
             ctrl = f"http://127.0.0.1:{self._puerto_control_ac or vivo.PUERTO_CONTROL_AC}"
+            vivo.refrescar_lua(str(Path(ac) / "content" / "tracks" / nombre))
             vivo.actualizar_control_lua(str(Path(ac) / "content" / "tracks" / nombre), control_url=ctrl,
-                                        pista=nombre, params=ajustes.vivo_params(a))
+                                        pista=nombre, params=ajustes.vivo_params(a),
+                                        trafico=bool(a.get("trafico", True)))
+            trafico_vivo.instalar_simulacion(str(Path(ac) / "content" / "tracks" / nombre), str(ac))
             # edificios de Google 3D (opcional): sobre la semilla ya instalada en AC, con los pedazos como calzada
             aviso = self._g3d.preparar(Path(ac) / "content" / "tracks" / nombre, None, bool(a.get("google3d")),
                                        str(a.get("token_cesium") or "").strip(),
                                        vivo=ajustes.salida() / "vivo" / self._vivo.nombre,
                                        vivo_url=f"http://127.0.0.1:{self._vivo.puerto}" if self._vivo.puerto else None)
-            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre, trafico=False)}    # en vivo aún no hay tráfico
+            # práctica normal: el tráfico del modo en vivo lo lleva el script de la pista, no el modo Traffic
+            r = {"ok": True, "mensaje": assetto.jugar(ac, nombre, trafico=False)}
             if aviso:
                 r["aviso"] = t(aviso)
             return r
@@ -717,6 +729,9 @@ def main(argv=None):
     p.add_argument("--no-abrir", action="store_true", help="con --navegador: solo mostrar la dirección")
     a = p.parse_args(argv)
 
+    # los servicios que lance la app (modo en vivo, Google 3D) salen solos si esta se cierra de golpe
+    from .. import procesos
+    os.environ[procesos.VARIABLE_APP] = str(os.getpid())
     eventos = servidor.Eventos()
     api = Api(eventos)
     srv_ctrl, puerto_ctrl = _iniciar_control_ac(api)

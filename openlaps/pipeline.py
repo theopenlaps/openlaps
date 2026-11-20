@@ -40,6 +40,70 @@ AREA_COLORS = {
 }
 
 
+def _relieve(args, R, big, log):
+    """(MDE de la caja `big`, si es de terreno): el local, el del país o Copernicus."""
+    if args.dem:
+        log(f"  MDE local: {args.dem} ({'superficie' if args.dem_es_superficie else 'terreno'})")
+        return rasters.local_raster(args.dem, big), not args.dem_es_superficie
+    if R.dem == "mdt05":
+        try:
+            return rasters.mdt05(big, log=log), True
+        except Exception as e:  # noqa: BLE001
+            log(f"  aviso: sin MDT05 ({e}); se usa Copernicus")
+    if R.dem == "3dep":
+        try:
+            return rasters.dem_3dep(big, log=log), True
+        except Exception as e:  # noqa: BLE001
+            log(f"  aviso: sin 3DEP ({e}); se usa Copernicus")
+    d = rasters.copernicus_dem(big, log=log)
+    log("  Copernicus GLO-30 (superficie, se corrige a terreno)")
+    return d, False
+
+
+def red_de_calles(args, proj, osm, log=lambda m: None):
+    """Solo la red de calles del área de `proj` (sin edificios, mallas ni texturas): lo que necesita el tráfico del
+    modo en vivo, que se calcula para una ventana grande alrededor del coche en unos segundos. Las alturas salen
+    del relieve; quien las use las ajusta luego a la calzada de verdad."""
+    R = regions.set_active(regions.elegir(args.region, getattr(args, "subregion", "auto"), proj.lat0, proj.lon0))
+    rect = (proj.xmin, proj.ymin, proj.xmax, proj.ymax)
+    big = proj.bbox().padded(450)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_dem = pool.submit(_relieve, args, R, big, log)
+        f_lc = pool.submit(rasters.worldcover, big, log=log)
+        dem, dem_is_dtm = f_dem.result()
+        try:
+            lc = f_lc.result()
+        except Exception:  # noqa: BLE001 - sin cobertura, todo cuenta como campo abierto
+            lc = None
+    terr = T.Terrain(proj, dem, lc, dem_is_dtm, 4.0, pad=300.0, log=log)
+    # zona urbana (límites de velocidad): usos de suelo de OSM y lo construido de WorldCover
+    partes = []
+    for a in osm["areas"]:
+        if a["tags"].get("landuse") not in ("residential", "commercial", "retail"):
+            continue
+        x, y = proj.to_local([c[0] for c in a["outer"]], [c[1] for c in a["outer"]])
+        if len(x) < 4:
+            continue
+        try:
+            pg = Polygon(list(zip(x, y))).buffer(0)
+        except Exception:  # noqa: BLE001
+            continue
+        if not pg.is_empty:
+            partes.append(pg)
+    if lc is not None:
+        from scipy.ndimage import binary_opening
+        GX, GY = np.meshgrid(np.arange(proj.xmin, proj.xmax, 20.0), np.arange(proj.ymin, proj.ymax, 20.0))
+        m = binary_opening(lc.sample(proj, GX, GY, order=0) == C.WC_BUILT, structure=np.ones((3, 3), bool))
+        if m.any():
+            partes.append(unary_union(shapely.buffer(shapely.points(GX[m], GY[m]), 18.0, quad_segs=2)))
+    urban_fn = None
+    if partes:
+        urbano = unary_union(partes)
+        shapely.prepare(urbano)
+        urban_fn = lambda x, y: shapely.contains_xy(urbano, x, y)  # noqa: E731
+    return roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log, tuneles=getattr(args, "tuneles", "principales"))
+
+
 def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_data=None, extension=None):
     """Genera la escena y la exporta. Modo en vivo (`pedazo` = (xmin, ymin, xmax, ymax), el centro que se conserva):
     usa la proyección `proj` ya fijada (origen común a todos los pedazos), la escena con los materiales ya
@@ -86,22 +150,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     big = bbox.padded(pad_relieve + 150)
 
     def relieve():
-        if args.dem:
-            log(f"  MDE local: {args.dem} ({'superficie' if args.dem_es_superficie else 'terreno'})")
-            return rasters.local_raster(args.dem, big), not args.dem_es_superficie
-        if R.dem == "mdt05":
-            try:
-                return rasters.mdt05(big, log=log), True
-            except Exception as e:  # noqa: BLE001
-                log(f"  aviso: sin MDT05 ({e}); se usa Copernicus")
-        if R.dem == "3dep":
-            try:
-                return rasters.dem_3dep(big, log=log), True
-            except Exception as e:  # noqa: BLE001
-                log(f"  aviso: sin 3DEP ({e}); se usa Copernicus")
-        d = rasters.copernicus_dem(big, log=log)
-        log("  Copernicus GLO-30 (superficie, se corrige a terreno)")
-        return d, False
+        return _relieve(args, R, big, log)
 
     usar_orto = bool(R.ortho) and not args.sin_orto
     f_osm = pool.submit(lambda: osm_data if osm_data is not None else OSM.parse(OSM.download(bbox.padded(200), log=log)))

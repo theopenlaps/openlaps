@@ -107,6 +107,34 @@ Objetivo: pistas reconocibles y conducibles de cualquier lugar real, siendo un p
 - **Modo en vivo en la app, a la par de una pista normal**: las zonas preparadas salen en «Mis pistas» y se reanudan
   sin dibujarlas otra vez; al detener, el panel se queda con «Reanudar», carpeta y mapa; se ve la zona, la calidad y
   el tiempo en marcha, y se dice lo que en vivo aún no hay (tráfico). «Conducir» pasa a llamarse «Vista previa 3D».
+- **Tráfico en el modo en vivo, primera versión** (`trafico_vivo.py`, `vivo_ac.lua`): el servidor calcula solo la red
+  de calles (sin mallas, `pipeline.red_de_calles`) de una ventana de 1,6 km alrededor del coche y saca sus carriles
+  y cruces (7-9 s en el centro de Madrid, en un proceso aparte); el script de la pista corre la misma simulación
+  del modo Traffic de CSP desde una copia que la app deja en `extension/trafico` (un script de pista no puede leer
+  la carpeta de la herramienta; los modelos de coche van por enlace duro). Al alejarse 300 m del centro pide la
+  ventana siguiente y pasa a ella los coches que van por un carril (siguen 86-112 de 120; el cambio para el juego
+  0,2-0,3 s). Los carriles se pegan a la calzada con rayos contra la física de los pedazos. Se apaga con la casilla
+  «Con tráfico» o dentro del juego (ajustes de OpenLaps, con el número de coches). Sin semáforos todavía.
+- **El tráfico lo lleva siempre el script de la pista** (también en una pista normal, con su `traffic.json` y sus
+  semáforos; el modo Traffic de CSP queda de respaldo): así los coches cercanos van pegados al suelo con un rayo
+  por cuadro (en un giro CSP traza una Bézier en 3D entre los dos carriles y la pendiente de los extremos sacaba el
+  coche del asfalto) y la velocidad del tráfico se ajusta dentro del juego. `vivo.refrescar_lua` pone al día el
+  script de las pistas ya generadas al abrirlas desde la app. Botón «Restablecer valores por defecto» en los
+  parámetros de generación dentro del juego.
+- **Google 3D, edificios sin planta en OpenLaps**: un grupo grande, alto y con caras ordenadas lejos de toda pared de
+  OpenLaps ya no se quita como «objeto» ni pierde la fachada que pisa la banqueta (en Ciudad de México, lo quitado
+  como objeto baja un 40 %). También se quita lo alto y suelto que cae donde OpenLaps ya tiene sus árboles.
+- **Google 3D, manzanas enteras sin edificios**: al corregirse la altura local en más de 1,5 m se descartaban las
+  teselas ya hechas de esa zona y no se rehacían hasta que el coche se movía 60 m; en Ciudad de México, 30 de 252
+  teselas quedaban sin malla (rectángulos vacíos). `_reponer` las rehace en la misma pasada: las plantas cubiertas
+  por Google pasan del 95,6 al 99,5 %. Y **faldones**: donde la malla termina en el aire (el relieve de Google y el
+  de OpenLaps difieren varios metros dentro de una manzana) se prolonga hasta el suelo, sin hueco por debajo.
+  El faldón continúa la fachada: va en franjas de hasta 2,5 m que repiten, reflejada, la pared de encima (el mapa
+  de textura del triángulo del que cuelga dice cuánto cambia por metro; no se lee ninguna imagen), en vez de estirar
+  el color del borde en rayas. Unos 4 ms por tesela.
+- **Procesos que no se quedan huérfanos** (`procesos.py`): los procesos de trabajo del modo en vivo salen cuando
+  muere quien los creó, y los servicios que lanza la app, cuando se cierra la app. Antes, tras cerrarla de golpe,
+  quedaban esperando para siempre con 1 GB reservado cada uno: tras unas sesiones Assetto Corsa ya no arrancaba.
 
 - **Espacio en disco bajo control** (`gui/espacio.py`): Ajustes enseña cuánto ocupa todo lo de OpenLaps (pistas,
   zonas en vivo y sus pistas de AC, caché de descargas, programa y datos de la ventana); «Mis pistas» dice cuánto

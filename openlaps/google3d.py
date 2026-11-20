@@ -60,6 +60,16 @@ MOVER = 6.0            # m: hasta dónde se mueven los vértices de esas fachada
 SUELO_G = 0.6          # m: lo de Google por debajo de esto sobre la calle o la banqueta es suelo (lo pone OpenLaps)
 CERCA_OBJ = 2.0        # m de la calle: un objeto de Google (árbol, coche, kiosco) que llega aquí se quita entero
 ARISTA_BURDA = 4.0     # m: con triángulos más grandes la tesela es lejana y solo pierde el suelo
+RODADA = 1.0           # m alrededor de la calzada (sin banquetas) donde nunca queda nada alto de Google
+AREA_EDIF = 120.0      # m² en planta fuera de la calle: un grupo de Google así de grande y de ALTO_EDIF m de alto es
+ALTO_EDIF = 5.0        # un edificio que OpenLaps no tiene (OSM sin esa planta), no un árbol ni un coche: se queda
+FALDON_MIN, FALDON_MAX = 0.4, 9.0   # m sobre el suelo: un borde abierto de la malla entre estas alturas se baja al suelo
+FALDON_EDIF = 8.0      # m: solo llevan faldón los bordes a esta distancia de una planta de edificio de OpenLaps
+FALDON_FRANJA, FALDON_FILAS = 2.5, 4   # el faldón va en franjas de hasta estos m (y como mucho estas), con la pared reflejada
+ARBOL = 3.0            # m alrededor de un árbol de OpenLaps: lo alto y suelto de Google ahí es ese mismo árbol
+ORDEN_EDIF = 0.3       # …si además un tercio de su superficie es techo plano o muro vertical (en una arboleda las
+                       # caras miran a todas partes y sale una cuarta parte por azar; con 0,5 la fotogrametría, que
+                       # es rugosa, dejaba fuera casi todos los edificios de verdad)
 
 
 def log(texto):
@@ -573,7 +583,7 @@ class Calles:
         with open(ruta_glb, "rb") as f:
             datos = f.read()
         gltf, binario = leer_glb(datos)
-        tris, tris_calz, tris_edif = [], [], []
+        tris, tris_calz, tris_edif, tris_veg = [], [], [], []
         self.salida = (0.0, 0.0)
         for nd in gltf["nodes"]:
             if nd.get("name") == "AC_START_0":
@@ -585,14 +595,15 @@ class Calles:
             nombre = m.get("name") or nd.get("name") or ""
             es_calle = any(k in nombre for k in ("calzada", "banqueta", "isleta"))
             es_edif = "edificios" in nombre
-            if not (es_calle or es_edif):
+            es_veg = "vegetacion" in nombre
+            if not (es_calle or es_edif or es_veg):
                 continue
             tr = np.array(nd.get("translation", [0, 0, 0]), float)
             for prim in m["primitives"]:
                 p = accesor(gltf, binario, prim["attributes"]["POSITION"]) + tr
                 idx = accesor(gltf, binario, prim["indices"]).astype(np.int64).reshape(-1, 3)
-                if es_edif:
-                    tris_edif.append(p[idx])
+                if es_edif or es_veg:
+                    (tris_edif if es_edif else tris_veg).append(p[idx])
                     continue
                 tris.append(p[idx])
                 if "calzada" in nombre:
@@ -625,6 +636,13 @@ class Calles:
         via_calz = (d_calz > (2.0 / CELDA)) if d_calz is not None else calz
         self.edif = edif
         self.cubre = cubre
+        self.junto_edif = (d_edif <= (FALDON_EDIF / CELDA)) if d_edif is not None else edif
+        # donde OpenLaps ya tiene un árbol (los suyos salen de la altura de vegetación medida): lo alto y suelto de
+        # Google ahí es ese mismo árbol, una copa sin tronco que se veía flotando
+        veg = mascara(tris_veg)
+        self.arbol = ((ndimage.distance_transform_edt(~veg) <= (ARBOL / CELDA)) & ~edif) if veg.any() else veg
+        # la calzada (sin banquetas) con un margen: ahí nunca queda nada alto de Google
+        self.rodada = (ndimage.distance_transform_edt(~calz) <= (RODADA / CELDA)) if calz.any() else calz
         self.via = (via_calz & ~(d_edif <= (1.5 / CELDA))) if d_edif is not None else via_calz
         # alrededor (banquetas incluidas): solo lo que queda entero por debajo de 2 m (coches, gente, suelo),
         # sin meterse nunca en las plantas de los edificios de OpenLaps (si no, les corta los bajos)
@@ -755,6 +773,7 @@ class CallesVivo:
 
     # misma interfaz que Calles (las máscaras se piden por nombre)
     via, franja, limpieza, edif, cubre, cerca = "via", "franja", "limpieza", "edif", "cubre", "cerca"
+    rodada, arbol, junto_edif = "rodada", "arbol", "junto_edif"
 
     def pared(self, xz):
         """Pared de OpenLaps más cercana (en el pedazo de cada punto; sin pedazo, ninguna)."""
@@ -1060,6 +1079,11 @@ class Mundo:
                     self.version += 1
                 if not ultima and math.hypot(*np.subtract(self.prevista(), (x, z))) > 2 * UMBRAL_MOVIDO:
                     break                    # el coche ya se fue lejos: mejor empezar otra selección desde donde está
+            else:
+                if self._reponer(urls):
+                    with self.cerrojo:
+                        self.publicadas = [i for t in vigentes if t in self.teselas for i in self.teselas[t]]
+                        self.version += 1
             with self.cerrojo:
                 for t in vigentes:
                     if t in self.teselas:
@@ -1083,6 +1107,31 @@ class Mundo:
         log(f"v{self.version - self.inicial}{' (burda)' if burda else ''}: {len(vigentes)} teselas ({len(nuevas)} nuevas, "
             f"{self.google.pedidas} peticiones), {len(self.publicadas)} mallas, {time.time() - t0:.1f} s "
             f"[árbol {t_elegir:.1f} s, esperando descargas {t_esperar:.1f} s, convertir {t_convertir:.1f} s]")
+
+    def _reponer(self, urls):
+        """Vuelve a convertir las teselas elegidas que se quedaron sin malla. Pasa cuando una tesela posterior de la
+        misma pasada corrige la altura local en más de 1,5 m: `_invalidar` descarta las ya hechas de esa zona, y hasta
+        que el coche no se movía 60 m nadie las rehacía. Quedaban rectángulos enteros sin edificios (donde el relieve
+        de Google y el de OpenLaps difieren mucho, como en Ciudad de México, una de cada ocho teselas). Aquí ya no se
+        invalida nada más, así que termina siempre. Devuelve cuántas repuso."""
+        repuestas = 0
+        for _ in range(2):
+            with self.cerrojo:
+                faltan = [u for u in urls if tid(u) not in self.teselas and tid(u) not in self.en_proceso]
+                for u in faltan:
+                    self.en_proceso.add(tid(u))
+            if not faltan:
+                break
+            try:
+                crudas = [self._bajar(u).result() for u in faltan]
+                self._guardar_teselas(faltan, [self.convertir(primitivas(d)) for d in crudas])
+                repuestas += len(faltan)
+            finally:
+                with self.cerrojo:
+                    for u in faltan:
+                        self.en_proceso.discard(tid(u))
+                        self._bajando.pop(tid(u), None)
+        return repuestas
 
     def _camino_vivo(self, fx, fz, vx, vz):
         """Puntos previstos sobre las calles de OSM (desde el servidor en vivo) y tamaño de la zona preparada."""
@@ -1279,6 +1328,8 @@ class Mundo:
             if len(tris):
                 tris = self.sin_flotantes(p, tris)
             if len(tris):
+                p, uv, tris = self.faldones(p, uv, tris)
+            if len(tris):
                 cen = p[np.unique(tris)][:, [0, 2]].mean(axis=0)
                 salida += [{"geo": empacar(pp, uu, tt), "tex": jpeg, "centro": (float(cen[0]), float(cen[1]))}
                            for pp, uu, tt in partir(p, uv, tris)]
@@ -1299,9 +1350,14 @@ class Mundo:
         - suelo (menos de SUELO_G sobre el suelo) donde OpenLaps ya tiene calle o banqueta: fuera;
         - fachada (a menos de PARED m de una pared de OpenLaps): se queda y sus vértices fuera de la planta se llevan a
           la pared (la parte derretida queda vertical); los de abajo, hasta el suelo (sin hueco por debajo);
-        - sobre la calle y lejos de toda pared: fuera (copas de árboles, farolas, coches);
-        - fuera de la calle y lejos de las paredes (árboles, coches, kioscos): se agrupan en la rejilla y el grupo se
-          quita entero si llega a menos de CERCA_OBJ m de la calle (sin medias copas colgando).
+        - sobre la calzada y lejos de toda pared: fuera (copas de árboles, farolas, coches);
+        - lo demás que queda lejos de las paredes (sobre la banqueta o fuera de la calle) se agrupa en la rejilla:
+          un grupo pequeño (árbol, coche, kiosco) pierde lo que pisa la banqueta y se quita entero si llega a menos
+          de CERCA_OBJ m de la calle (sin medias copas colgando), y también si cae donde OpenLaps ya tiene sus
+          árboles (parques, plazas: las copas de Google, sin tronco, se veían como láminas flotando); un grupo
+          grande y alto es un edificio que OpenLaps no tiene (en México a OSM le faltan muchas plantas) y se queda
+          entero, también la fachada que pisa la banqueta: antes se quitaba como si fuera un objeto y la manzana
+          quedaba hueca.
         Las teselas lejanas (triángulos de más de ARISTA_BURDA m) solo pierden el suelo: quitar uno de sus triángulos
         grandes se llevaba media fachada y quedaban trozos volando."""
         if not len(tris):
@@ -1317,8 +1373,9 @@ class Mundo:
             return tris[~quitar]
         _, d_pared = cl.pared(c[:, [0, 2]])
         lejos = d_pared > PARED
-        quitar |= en_sup & lejos
-        obj = ~suelo_t & lejos & ~en_sup
+        en_rod = cl.en(cl.rodada, c[:, 0], c[:, 2])
+        quitar |= lejos & (en_rod | (suelo_t & en_sup))
+        obj = ~suelo_t & lejos & ~en_rod
         if obj.any():
             i, j = np.floor(c[obj, 0] / CELDA).astype(np.int64), np.floor(c[obj, 2] / CELDA).astype(np.int64)
             i0, j0 = i.min() - 2, j.min() - 2
@@ -1328,8 +1385,24 @@ class Mundo:
             grupo = lab[i - i0, j - j0]
             toca = np.zeros(n + 1, bool)
             np.logical_or.at(toca, grupo, cl.en(cl.cerca, c[obj, 0], c[obj, 2]))
+            # planta de cada grupo fuera de la calle y su altura: ¿edificio sin planta en OpenLaps, u objeto?
+            ci, cj = np.nonzero(M)
+            fuera_c = ~cl.en(cl.cubre, (ci + i0 + 0.5) * CELDA, (cj + j0 + 0.5) * CELDA)
+            planta = np.bincount(lab[ci, cj], fuera_c.astype(float), n + 1) * CELDA * CELDA
+            alto_g = np.zeros(n + 1)
+            np.maximum.at(alto_g, grupo, p[tris[obj], 1].max(axis=1) - suelo_c[obj])
+            nrm = np.cross(p[tris[obj, 1]] - p[tris[obj, 0]], p[tris[obj, 2]] - p[tris[obj, 0]])
+            a2 = np.linalg.norm(nrm, axis=1)
+            ny = np.abs(nrm[:, 1]) / np.maximum(a2, 1e-12)
+            orden = (np.bincount(grupo, a2 * ((ny > 0.9) | (ny < 0.15)), n + 1)
+                     / np.maximum(np.bincount(grupo, a2, n + 1), 1e-9))
+            en_arbol = cl.en(cl.arbol, (ci + i0 + 0.5) * CELDA, (cj + j0 + 0.5) * CELDA)
+            arbolado = (np.bincount(lab[ci, cj], en_arbol.astype(float), n + 1)
+                        / np.maximum(np.bincount(lab[ci, cj], minlength=n + 1), 1))
+            edificio = (planta >= AREA_EDIF) & (alto_g >= ALTO_EDIF) & (orden >= ORDEN_EDIF) & (arbolado < 0.5)
+            arboles = ~edificio & (arbolado >= 0.3)
             q = np.zeros(len(tris), bool)
-            q[np.nonzero(obj)[0]] = toca[grupo]
+            q[np.nonzero(obj)[0]] = ~edificio[grupo] & (toca[grupo] | en_sup[obj] | arboles[grupo])
             quitar |= q
         # fachadas: solo los vértices de triángulos junto a una pared que se quedan; el suelo que se queda (plazas sin
         # calle de OpenLaps) no se toca
@@ -1349,6 +1422,80 @@ class Mundo:
             bajo = p[v, 1] - sv < 1.0
             p[v[bajo], 1] = sv[bajo] - 0.3
         return tris[queda]
+
+    def faldones(self, p, uv, tris):
+        """Baja hasta el suelo de OpenLaps los bordes abiertos de la malla que quedan en el aire, continuando la
+        fachada.
+
+        El relieve de Google y el de OpenLaps no coinciden al metro (donde el de OpenLaps sale de un modelo de 30 m,
+        como en México, se van varios metros en una misma manzana) y la altura solo se puede alinear de media: unos
+        edificios quedan hundidos y otros con la base en el aire, y por debajo se veía el solar vacío y el cielo. Cada
+        arista de borde (de un solo triángulo) de una cara casi vertical, junto a una planta de edificio de OpenLaps,
+        que queda entre FALDON_MIN y FALDON_MAX m sobre el suelo y no está sobre la calzada lleva un faldón vertical
+        hasta 0,3 m bajo el suelo, con el mismo sentido que la cara de la que cuelga.
+
+        La textura no se estira (salían rayas verticales): el faldón va en franjas de hasta FALDON_FRANJA m y cada
+        franja repite, reflejado como en un espejo, el trozo de pared que hay justo encima del borde. Para eso basta
+        el triángulo del que cuelga: su mapa de textura es afín, así que da cuánto cambia la textura por metro al
+        subir por la pared; no se lee ninguna imagen. Todo vectorizado: unas décimas de milisegundo por tesela."""
+        cl = self.calles
+        if float(np.median(np.linalg.norm(p[tris[:, 1]] - p[tris[:, 0]], axis=1))) > ARISTA_BURDA:
+            return p, uv, tris
+        ar = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
+        tercero = np.concatenate([tris[:, 2], tris[:, 0], tris[:, 1]])
+        clave = np.minimum(ar[:, 0], ar[:, 1]) * np.int64(len(p)) + np.maximum(ar[:, 0], ar[:, 1])
+        _, primero, veces = np.unique(clave, return_index=True, return_counts=True)
+        sel = primero[veces == 1]
+        borde, c = ar[sel], tercero[sel]
+        if not len(borde):
+            return p, uv, tris
+        suelo = cl.suelo(p[borde.reshape(-1), 0], p[borde.reshape(-1), 2]).reshape(-1, 2)
+        h = p[borde, 1] - suelo
+        medio = p[borde].mean(axis=1)
+        # solo bordes de fachada: la cara de la que cuelga es casi vertical y está junto a una planta de edificio
+        # (de los restos de un árbol, que son caras en cualquier dirección en mitad de un parque, colgaban cortinas)
+        nrm = np.cross(p[borde[:, 1]] - p[borde[:, 0]], p[c] - p[borde[:, 0]])
+        vertical = np.abs(nrm[:, 1]) < 0.5 * np.maximum(np.linalg.norm(nrm, axis=1), 1e-12)
+        ok = ((h > FALDON_MIN).all(axis=1) & (h < FALDON_MAX).all(axis=1) & vertical
+              & cl.en(cl.junto_edif, medio[:, 0], medio[:, 2])
+              & ~cl.en(cl.rodada, medio[:, 0], medio[:, 2]) & self._cargados_mask(medio[:, 0], medio[:, 2]))
+        borde, c, h = borde[ok], c[ok], h[ok] + 0.3
+        if not len(borde):
+            return p, uv, tris
+        a, b = borde[:, 0], borde[:, 1]
+        # cuánto cambia la textura por metro al entrar en la malla desde el borde (perpendicular a la arista, en el
+        # plano del triángulo del que cuelga): hacia arriba por la pared, en una fachada
+        e = p[b] - p[a]
+        largo2 = np.maximum((e * e).sum(axis=1), 1e-9)
+        ac = p[c] - p[a]
+        s0 = (ac * e).sum(axis=1) / largo2
+        alto_c = np.linalg.norm(ac - s0[:, None] * e, axis=1)
+        g = ((uv[c] - uv[a]) - s0[:, None] * (uv[b] - uv[a])) / np.maximum(alto_c, 1e-6)[:, None]
+        g[alto_c < 0.05] = 0.0                       # triángulo degenerado: sin dirección fiable, color del borde
+        # franjas: las justas para llegar al suelo; la textura sube `franja` m y vuelve, alternando
+        filas = np.clip(np.ceil(h.max(axis=1) / FALDON_FRANJA).astype(np.int64), 1, FALDON_FILAS)
+        franja = np.minimum(h.max(axis=1) / filas, np.maximum(2.0 * alto_c, 0.5))
+        pos_n, uv_n, tri_n = [p], [uv], [tris]
+        n0 = len(p)
+        for nf in range(1, FALDON_FILAS + 1):
+            s = np.nonzero(filas == nf)[0]
+            if not len(s):
+                continue
+            k = len(s)
+            arriba_a, arriba_b = a[s], b[s]              # la fila de arriba de cada franja (empieza en el borde)
+            for r in range(1, nf + 1):
+                fr = r / nf
+                va, vb = p[a[s]].copy(), p[b[s]].copy()
+                va[:, 1] -= h[s, 0] * fr
+                vb[:, 1] -= h[s, 1] * fr
+                sube = (franja[s] if r % 2 else 0.0) * np.ones(k)
+                pos_n += [va, vb]
+                uv_n += [uv[a[s]] + g[s] * sube[:, None], uv[b[s]] + g[s] * sube[:, None]]
+                abajo_a, abajo_b = n0 + np.arange(k), n0 + k + np.arange(k)
+                n0 += 2 * k
+                tri_n += [np.stack([arriba_b, arriba_a, abajo_a], axis=1), np.stack([arriba_b, abajo_a, abajo_b], axis=1)]
+                arriba_a, arriba_b = abajo_a, abajo_b
+        return np.concatenate(pos_n), np.concatenate(uv_n), np.concatenate(tri_n)
 
     def sin_flotantes(self, p, tris, alto_min=2.5, area_max=20.0):
         """Quita los pedazos sueltos que dejan los recortes cerca de la calle: componentes chicos (y grandes si no
@@ -1445,6 +1592,8 @@ def main(argv=None):
     p.add_argument("--instalar", action="store_true", help="solo poner el script en la pista de AC")
     p.add_argument("--quitar", action="store_true", help="solo quitar el script de la pista de AC")
     a = p.parse_args(argv)
+    from . import procesos
+    procesos.morir_con_la_app()
     if a.quitar:
         print("quitado" if quitar(a.pista) else "no estaba instalado")
         return

@@ -96,7 +96,8 @@ _W = {}
 
 
 def _iniciar(args_dict, lat0, lon0, excluir=None, lado=None, margen=None, pad_osm=None, tesela_osm=None):
-    from . import pipeline, regions
+    from . import pipeline, procesos, regions
+    procesos.morir_con_el_padre()
     configurar(lado, margen, pad_osm, tesela_osm)
     args = argparse.Namespace(**args_dict)
     regions.set_active(regions.elegir(args.region, getattr(args, "subregion", "auto"), lat0, lon0))
@@ -139,6 +140,8 @@ def _escena(i, j, elementos, partes_cat=None, log=None, ext=None, excluir=None, 
 
 
 def _iniciar_precarga(args_dict, lat0, lon0, lado=None, margen=None, pad_osm=None, tesela_osm=None):
+    from . import procesos
+    procesos.morir_con_el_padre()
     configurar(lado, margen, pad_osm, tesela_osm)
     _W.update(args=argparse.Namespace(**args_dict), origen=(lat0, lon0))
 
@@ -770,6 +773,8 @@ class Vivo:
         # un foco por cliente (el visor, AC…): x, y (norte), vx, vy, instante. Con uno solo, el visor y AC abiertos
         # a la vez se lo quitaban el uno al otro y la prioridad saltaba de un coche al otro.
         self.focos = {"inicio": (0.0, 0.0, 0.0, 0.0, time.time())}
+        from . import trafico_vivo
+        self.trafico = trafico_vivo.Ventanas(self)
         # ruta de prueba para el piloto automático del script de AC (id 0 = apagado)
         self.piloto = {"id": 0}
         self.caminos = {}
@@ -1429,8 +1434,45 @@ def escribir_lua(raiz, url, horneados, lat0, lon0, control_url=f"http://127.0.0.
         f.write(lua)
 
 
+def refrescar_lua(raiz):
+    """Pone al día el vivo.lua de una pista ya generada (el script cambia con las versiones: el tráfico, por ejemplo)
+    conservando lo suyo: servidor, pedazos horneados, origen, caja horneada y parámetros. False si no hay script o
+    no se reconoce."""
+    ruta = os.path.join(raiz, "extension", "vivo.lua")
+    if not os.path.isfile(ruta):
+        return False
+    viejo = open(ruta, encoding="utf-8").read()
+
+    def dato(patron, defecto=None):
+        m = re.search(patron, viejo, re.M)
+        return m.group(1) if m else defecto
+
+    v = {"__URL__": dato(r"^local URL = '([^']*)'"), "__CONTROL_URL__": dato(r"^local CONTROL_URL = '([^']*)'"),
+         "__PISTA__": dato(r"^local PISTA_ID = '([^']*)'", ""),
+         "__HORNEADOS__": dato(r"^local HORNEADOS = \{ (.*) \}\s+-- pedazos"),
+         "__L__": dato(r"^local L = ([0-9.]+)"), "__LAT__": dato(r"^local ORIGEN = \{ (\S+), \S+ \}"),
+         "__LON__": dato(r"^local ORIGEN = \{ \S+, (\S+) \}"),
+         "__RECT_HORNEADO__": dato(r"^local RECT_HORNEADO = (nil|\{[^}\n]*\})"),
+         "__MODO_ESPERA__": dato(r"^local vivoActivo = not (true|false)"),
+         "__R_CARGA__": dato(r"^local R_CARGA, R_SOLTAR = ([0-9.]+), [0-9.]+"),
+         "__R_SOLTAR__": dato(r"^local R_CARGA, R_SOLTAR = [0-9.]+, ([0-9.]+)"),
+         "__T_FOCO__": dato(r"^local T_FOCO = ([0-9.]+)"), "__CFG__": dato(r"^local CFG = (\{[^\n]*\})")}
+    if any(x is None for x in v.values()):
+        return False
+    with open(os.path.join(AQUI, "vivo_ac.lua"), encoding="utf-8") as f:
+        lua = f.read()
+    for k in sorted(v, key=len, reverse=True):
+        lua = lua.replace(k, v[k])
+    trafico = dato(r"^local TRAFICO_PISTA = (true|false)", "true")
+    lua = re.sub(r"^local TRAFICO_PISTA = (true|false)", f"local TRAFICO_PISTA = {trafico}", lua, count=1, flags=re.M)
+    if lua != viejo:
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write(lua)
+    return True
+
+
 def actualizar_control_lua(raiz, control_url=None, pista=None, lado=None, r_carga=None, r_soltar=None,
-                           t_foco=None, params=None):
+                           t_foco=None, params=None, trafico=None):
     ruta = os.path.join(raiz, "extension", "vivo.lua")
     if not os.path.isfile(ruta):
         return False
@@ -1438,6 +1480,9 @@ def actualizar_control_lua(raiz, control_url=None, pista=None, lado=None, r_carg
     nuevo = txt
     if control_url is not None:
         nuevo = re.sub(r"^local CONTROL_URL = '[^']*'", f"local CONTROL_URL = '{control_url}'", nuevo, count=1, flags=re.M)
+    if trafico is not None:
+        nuevo = re.sub(r"^local TRAFICO_PISTA = (true|false)", f"local TRAFICO_PISTA = {'true' if trafico else 'false'}",
+                       nuevo, count=1, flags=re.M)
     if pista is not None:
         nuevo = re.sub(r"^local PISTA_ID = '[^']*'", f"local PISTA_ID = '{pista}'", nuevo, count=1, flags=re.M)
     if params is not None:
@@ -1473,6 +1518,9 @@ def _instalar_semilla(raiz, carpeta_ac, nombre, log):
         destino = os.path.join(carpeta_ac, "content", "tracks", nombre)
         shutil.copytree(raiz, destino, dirs_exist_ok=True)
         log(f"semilla instalada en {destino}")
+        from . import trafico_vivo
+        if not trafico_vivo.instalar_simulacion(destino, carpeta_ac, log):
+            log("tráfico: esta instalación de CSP no trae la herramienta de tráfico con sus coches; irá sin tráfico")
 
 
 # =========================================================================== HTTP
@@ -1545,6 +1593,10 @@ def servidor(vivo, puerto):
                     return self._json({"camino": vivo.camino_ac(x, z, vx, vz),
                                        "zona_tam": list(vivo.zona_tam) if vivo.zona_tam else None,
                                        "salida": vivo.salida})
+                if u.path == "/vivo/trafico":
+                    r = vivo.trafico.pedir(float(q.get("x", 0)), float(q.get("z", 0)), float(q.get("vx", 0)),
+                                           float(q.get("vz", 0)), q.get("c", ""))
+                    return self._json(r) if isinstance(r, dict) else self._enviar(r, "application/json")
                 if u.path == "/vivo/ruta":
                     return self._json({"puntos": vivo.ruta(float(q.get("metros", 2500)), float(q.get("espera", 120)))})
                 if u.path.startswith("/vivo/p/"):
@@ -1601,6 +1653,8 @@ def main(argv=None):
     p.add_argument("--ac-carpeta", default=r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa",
                    help="carpeta de Assetto Corsa donde instalar la semilla ('' para no instalar)")
     a, resto = p.parse_known_args(argv)
+    from . import procesos
+    procesos.morir_con_la_app()
     lat0, lon0 = (float(v) for v in a.centro.split(","))
     gen = parser_openlaps().parse_args([f"--centro={a.centro}", "--tesela", "64", "--sin-horizonte"] + resto)
     carpeta = a.carpeta or os.path.join("salida", "vivo", f"{lat0:.5f}_{lon0:.5f}")
@@ -1636,6 +1690,7 @@ def main(argv=None):
     finally:
         vivo.pool.shutdown(wait=False, cancel_futures=True)
         vivo.precargador.shutdown(wait=False, cancel_futures=True)
+        vivo.trafico.cerrar()
 
 
 if __name__ == "__main__":

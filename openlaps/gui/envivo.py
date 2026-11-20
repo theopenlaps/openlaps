@@ -112,6 +112,8 @@ class EnVivo:
             argv += ["--region", str(op["region"])]
         if op.get("subregion") and op["subregion"] != "auto":
             argv += ["--subregion", str(op["subregion"])]
+        if op.get("trafico") is False:
+            argv.append("--sin-trafico")
         if op.get("dem"):
             argv += ["--dem", str(op["dem"])]
         if op.get("tuneles") in ("principales", "todos", "ninguno"):

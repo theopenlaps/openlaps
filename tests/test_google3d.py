@@ -210,3 +210,104 @@ def test_instalar_incluye_interruptor_ac(tmp_path):
     lua = (tmp_path / "extension" / G.LUA).read_text(encoding="utf-8")
     assert "openlaps_config" in lua and "aplicarVisible" in lua
 
+
+
+def test_reponer_teselas_que_se_quedaron_sin_malla(monkeypatch):
+    """Una tesela elegida que perdió su malla (descartada por una corrección de altura posterior) se rehace en la
+    misma pasada: antes quedaba un rectángulo sin edificios hasta que el coche se movía 60 m."""
+    import collections
+    import concurrent.futures
+    import threading
+    import types
+    m = object.__new__(G.Mundo)
+    m.cerrojo = threading.RLock()
+    m.teselas, m.mallas, m.centro_malla, m.tid_meta = collections.OrderedDict(), {}, {}, {}
+    m.en_proceso, m._bajando, m.vigentes_set, m.inicial = set(), {}, set(), 7
+    m.args = types.SimpleNamespace(cache=100)
+    monkeypatch.setattr(G, "tid", lambda u: u.rsplit("/", 1)[-1])
+    monkeypatch.setattr(G, "primitivas", lambda datos: [datos])
+    pedidas = []
+
+    def bajar(u):
+        pedidas.append(u)
+        f = concurrent.futures.Future()
+        f.set_result(u)
+        m._bajando[G.tid(u)] = f
+        return f
+
+    m._bajar = bajar
+    m.convertir = lambda prims: ([{"geo": b"x", "tex": None, "centro": (0.0, 0.0)}], None)
+    m.teselas["a"] = ["7_a_0"]                      # esta sigue con su malla
+    urls = ["http://g/a", "http://g/b", "http://g/c"]
+    assert m._reponer(urls) == 2
+    assert pedidas == ["http://g/b", "http://g/c"] and list(m.teselas) == ["a", "b", "c"]
+    assert m.teselas["b"] == ["7_b_0"] and "7_c_0" in m.mallas and not m.en_proceso and not m._bajando
+    assert m._reponer(urls) == 0                    # nada que reponer: no vuelve a bajar nada
+    assert len(pedidas) == 2
+
+
+def test_faldones_bajan_al_suelo_los_bordes_en_el_aire():
+    """Un trozo de malla de Google que acaba 3 m sobre el suelo se prolonga hasta el suelo; el que ya lo toca, el que
+    está muy alto (un techo) y lo que cae sobre la calzada se quedan como están."""
+    class Calles:
+        rodada, junto_edif = "rodada", "junto_edif"
+
+        def suelo(self, x, z):
+            return np.zeros(len(np.atleast_1d(x)))
+
+        def en(self, mascara, x, z):
+            x = np.atleast_1d(x)
+            return x > 100 if mascara == "rodada" else x > -50      # la calzada, lejos; edificios cerca salvo en x < -50
+
+    m = object.__new__(G.Mundo)
+    m.calles = Calles()
+    m._cargados_mask = lambda xs, zs: np.ones(len(xs), bool)
+
+    def pared(x0, y0, y1):                           # un cuadrado vertical de 2 m de ancho, de y0 a y1
+        p = np.array([[x0, y0, 0], [x0 + 2, y0, 0], [x0 + 2, y1, 0], [x0, y1, 0]], float)
+        return p, np.array([[0, 1, 2], [0, 2, 3]])
+
+    p, tris = pared(0.0, 3.0, 6.0)
+    uv = np.c_[p[:, 0] / 2, (p[:, 1] - 3.0) / 3.0]          # la textura sube 1/3 por metro de pared
+    p2, uv2, t2 = m.faldones(p.copy(), uv, tris)
+    nuevos, uv_n = p2[len(p):], uv2[len(p):]
+    assert len(t2) > len(tris) and len(uv2) == len(p2) and set(np.round(nuevos[:, 0])) == {0.0, 2.0}
+    assert np.isclose(p2[t2].reshape(-1, 3)[:, 1].min(), -0.3)
+    # bajo la arista de abajo (3,3 m hasta el suelo): dos franjas de 1,65 m. La primera sube por la textura lo mismo
+    # que baja (la pared de encima, reflejada) y la segunda vuelve al borde: nada de un solo color estirado
+    medio = np.isclose(nuevos[:, 1], 3.0 - 1.65) & np.isclose(uv_n[:, 1], 1.65 / 3.0)
+    abajo = np.isclose(nuevos[:, 1], -0.3) & np.isclose(uv_n[:, 1], 0.0)
+    assert medio.sum() == 2 and abajo.sum() >= 2
+    assert set(np.round(uv_n[medio, 0], 3)) == {0.0, 1.0}  # y a lo ancho, la misma columna de textura que arriba
+    # el sentido del faldón es el de la cara de la que cuelga (misma normal, hacia +z o -z igual que la pared)
+    n0 = np.cross(p[tris[0, 1]] - p[tris[0, 0]], p[tris[0, 2]] - p[tris[0, 0]])
+    nf = np.cross(p2[t2[len(tris), 1]] - p2[t2[len(tris), 0]], p2[t2[len(tris), 2]] - p2[t2[len(tris), 0]])
+    assert n0 @ nf > 0
+    # está muy alto o cae sobre la calzada: sin faldón; y la arista que ya toca el suelo tampoco lo lleva
+    for x0, y0, y1 in ((0.0, 0.1, 3.0), (0.0, 12.0, 15.0), (200.0, 3.0, 6.0), (-80.0, 3.0, 6.0)):
+        q, tq = pared(x0, y0, y1)
+        q2, _, tq2 = m.faldones(q.copy(), np.zeros((4, 2)), tq)
+        if x0 > 100 or x0 < -50 or y0 > G.FALDON_MAX:      # calzada, lejos de todo edificio (un árbol), o un techo
+            assert len(tq2) == len(tq) and len(q2) == len(q)
+        else:                                       # la arista de abajo ya toca el suelo: de ella no cuelga nada
+            assert len(tq2) < len(t2)
+
+
+def test_faldones_solo_de_caras_verticales():
+    """De una cara tumbada (un resto de copa de árbol, un toldo) no cuelga faldón aunque esté en el aire."""
+    class Calles:
+        rodada, junto_edif = "rodada", "junto_edif"
+
+        def suelo(self, x, z):
+            return np.zeros(len(np.atleast_1d(x)))
+
+        def en(self, mascara, x, z):
+            return np.full(len(np.atleast_1d(x)), mascara == "junto_edif")
+
+    m = object.__new__(G.Mundo)
+    m.calles = Calles()
+    m._cargados_mask = lambda xs, zs: np.ones(len(xs), bool)
+    p = np.array([[0, 4, 0], [2, 4, 0], [2, 4, 2], [0, 4, 2]], float)       # un cuadrado horizontal a 4 m
+    tris = np.array([[0, 1, 2], [0, 2, 3]])
+    p2, _, t2 = m.faldones(p.copy(), np.zeros((4, 2)), tris)
+    assert len(p2) == 4 and len(t2) == 2
