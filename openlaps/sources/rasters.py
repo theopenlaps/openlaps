@@ -100,7 +100,7 @@ def _macro(bbox, paso, tam):
     return bbox
 
 
-def _cacheado(nombre, mensual=False, macro=None):
+def _cacheado(nombre, mensual=False, macro=None, version=None):
     """Guarda en disco (~/.cache/openlaps) el recorte ráster que devuelve la función.
 
     Los COG remotos (Copernicus, WorldCover, dosel, Sentinel-2) se leían por HTTP en cada
@@ -112,7 +112,8 @@ def _cacheado(nombre, mensual=False, macro=None):
         def wrap(bbox, *args, log=print, **kw):
             b_req = _macro(bbox, *macro) if macro else bbox
             key = json.dumps([nombre, [round(v, 6) for v in (b_req.south, b_req.west, b_req.north, b_req.east)],
-                              list(args), kw, date.today().strftime("%Y-%m") if mensual else None])
+                              list(args), kw, date.today().strftime("%Y-%m") if mensual else None]
+                             + ([version] if version else []))     # (lo guardado con otra versión no vale)
             path = cache_path(key, ".raster.npz")
             if os.path.exists(path):
                 try:
@@ -160,14 +161,22 @@ def _read_tiles(urls, bbox, fill, log):
             log(f"  (sin tesela {u.rsplit('/', 1)[-1]}: {e.__class__.__name__})")
     if not datasets:
         return None
-    arr, tr = merge(datasets, bounds=(bbox.west, bbox.south, bbox.east, bbox.north), nodata=fill)
+    # el recorte, encajado en los pixeles del original: `merge` empieza su rejilla en la esquina que se le pide y
+    # remuestrea al vecino más cercano, así que cada caja salía corrida hasta medio pixel (15 m en el relieve de
+    # 30 m) y dos pedazos vecinos del modo en vivo veían relieves distintos (5 m de diferencia en un bosque)
+    t = datasets[0].transform
+    oeste = t.c + math.floor((bbox.west - t.c) / t.a) * t.a
+    este = t.c + math.ceil((bbox.east - t.c) / t.a) * t.a
+    norte = t.f + math.floor((bbox.north - t.f) / t.e) * t.e
+    sur = t.f + math.ceil((bbox.south - t.f) / t.e) * t.e
+    arr, tr = merge(datasets, bounds=(oeste, sur, este, norte), nodata=fill)
     crs = datasets[0].crs
     for d in datasets:
         d.close()
     return Raster(arr[0], tr, crs, nodata=fill)
 
 
-@_cacheado("relieve Copernicus", macro=(0.02, 0.036))
+@_cacheado("relieve Copernicus", macro=(0.02, 0.036), version="alineado")
 def copernicus_dem(bbox, log=print):
     urls = []
     for la in range(math.floor(bbox.south), math.floor(bbox.north) + 1):
@@ -179,7 +188,7 @@ def copernicus_dem(bbox, log=print):
     return r
 
 
-@_cacheado("WorldCover", macro=(0.02, 0.036))
+@_cacheado("WorldCover", macro=(0.02, 0.036), version="alineado")
 def worldcover(bbox, log=print):
     urls = []
     for la in range(math.floor(bbox.south / 3) * 3, math.floor(bbox.north / 3) * 3 + 1, 3):

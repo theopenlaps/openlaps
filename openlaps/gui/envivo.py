@@ -108,6 +108,10 @@ class EnVivo:
                     argv.append(f"--sin-{k}")
         if op.get("temporada") in ("seca", "lluvias"):
             argv += ["--temporada", op["temporada"]]
+        if op.get("terraceria") in ("osm", "rural"):
+            argv += ["--terraceria", op["terraceria"]]
+        if op.get("veredas"):
+            argv.append("--veredas")
         if op.get("region") and op["region"] != "auto":
             argv += ["--region", str(op["region"])]
         if op.get("subregion") and op["subregion"] != "auto":

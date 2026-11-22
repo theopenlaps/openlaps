@@ -400,7 +400,7 @@ def _alturas_en(tris, pts):
 
 def _es_base(grupo, material, fisica):
     """Superficies que mandan en la costura: lo que se pisa (calzada, banqueta…) y el suelo."""
-    return fisica in ("ROAD", "PAVEMENT", "KERB", "LOOSE", "MXCOBBLE", "DIRT", "GRASS", "PITLANE") or \
+    return fisica in ("ROAD", "PAVEMENT", "KERB", "LOOSE", "MXGRAVA", "MXTIERRA", "MXARENA", "MXPASTO", "MXVADO", "MXCOBBLE", "DIRT", "GRASS", "SAND", "MXROCA", "PITLANE") or \
         grupo == "terreno" or material.startswith(("tv_", "terreno_"))
 
 

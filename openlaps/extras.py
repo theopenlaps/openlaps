@@ -73,6 +73,14 @@ def edges_and_wear(net, scene, terrain=None, road_union=None):
                 n_edge += 1
             if e.mat == "asfalto" and e.hw >= 2.0:
                 n_wear += _asphalt_marks(scene, e, a, b)
+            if e.perfil is not None and len(e.perfil[4]) and not e.bridge:
+                # roderas de los caminos de tierra: la geometría las hunde, pero sin esta huella oscura no se ven
+                # (la textura de terracería es uniforme). Una fila de cada dos: sigue de sobra la rodera
+                sv2 = np.unique(np.concatenate([sv[::2], sv[-1:]]))
+                for r in e.perfil[4]:
+                    p, uv, f = strip(e, sv2, [r - 0.32, r, r + 0.32], dz=DZ_DESGASTE, u_scale=0.64, v_scale=8.0, u0=r - 0.32)
+                    scene.add("desgaste", "rodera", p, uv, f)
+                n_wear += 1
             if False:   # rodaduras: ahora van en la textura macro
                 carriage = min(e.lanes * e.lane_w, 2 * e.hw)
                 half = carriage / 2
@@ -314,7 +322,7 @@ def tv_cameras(scene, route, spacing=220.0):
 
 
 # ------------------------------------------------------------------ horizonte
-def horizon(scene, proj, dem_far, img_far, rect, far_m=5000.0, step=40.0, terrain=None):
+def horizon(scene, proj, dem_far, img_far, rect, far_m=5000.0, step=40.0, terrain=None, zona=None):
     """Relieve lejano (sin física) alrededor del área, con textura satelital o de cobertura.
 
     El horizonte nunca debe asomar por encima del terreno detallado: el MDE lejano es de
@@ -357,6 +365,12 @@ def horizon(scene, proj, dem_far, img_far, rect, far_m=5000.0, step=40.0, terrai
             Z[inner] = terrain.height(GX[inner], GY[inner]) - 1.0
     # las celdas completamente dentro del área (con un paso de margen) se descartan abajo
     inside = (GX > xmin + step) & (GX < xmax - step) & (GY > ymin + step) & (GY < ymax - step)
+    if zona is not None:
+        # tramo largo: dentro del rectángulo solo hay terreno detallado en el corredor; el resto lo cubre este
+        # relieve lejano (se quitan las celdas que caen bien dentro del corredor, donde quedaría bajo el detallado)
+        import shapely
+        dentro = zona.buffer(-1.5 * step)
+        inside &= shapely.contains_xy(dentro, GX, GY) if not dentro.is_empty else False
     pos = np.column_stack([GX.ravel(), GY.ravel(), Z.ravel()])
     uv = np.column_stack([(GX.ravel() - X0) / (X1 - X0), (Y1 - GY.ravel()) / (Y1 - Y0)])
     h, w = Z.shape

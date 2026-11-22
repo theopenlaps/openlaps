@@ -150,6 +150,68 @@ Objetivo: pistas reconocibles y conducibles de cualquier lugar real, siendo un p
   EE. UU. Se elige sola por coordenadas (cajas aproximadas) o a mano (`--subregion`, «Estilo de la zona» en la app,
   con la muestra de colores). Siempre 8 fachadas: no añade materiales, texturas ni mallas a la pista.
 
+- **Caminos sin asfalto, fase 1 (rally y offroad)**: la terracería ya no es una sola superficie. Grava, tierra,
+  arena y pasto de OSM llevan cada uno su física (`MXGRAVA`, `MXTIERRA`, `MXARENA`, `MXPASTO`, y `LOOSE` para lo
+  compactado), todas pista válida, con fricción por debajo de 0.9 y el tipo de superficie de CSP
+  (`_EXT_SURFACE_TYPE=GRAVEL`/`SAND`/`GRASS`, firmeza y ruido Perlin). Y se deduce la terracería que OSM no
+  etiqueta (`RoadNetwork._superficies`): `tracktype`, `smoothness`, el mismo camino partido en varias vías, el
+  ramal de una brecha y, en México, los caminos sin clasificar fuera de poblado; nunca una vía con señales de
+  asfalto. `--terraceria auto|osm|rural` («Caminos de tierra» en la app). En la Sierra de Lobos una zona de
+  1.5 km pasa de 0 a 4.7 km de terracería; Tepoztlán no cambia. El color de Sentinel-2 se probó y se descartó:
+  a 10 m separa asfalto de tierra en Guanajuato pero no en Finlandia. Falta probarlo en el juego, y siguen
+  pendientes la geometría de camino (fase 2), el terreno conducible (fase 3) y los tramos largos (fase 4).
+
+- **Caminos sin asfalto, fase 2 (geometría)**: un camino de tierra ya no es una cinta lisa. Cada uno lleva su
+  perfil según la física (`roads.PERFIL_CAMINO`, `Edge._camino`): roderas donde pisan las ruedas (2 a 5 cm, un
+  par si es de un carril y dos si caben dos coches), bombeo, baches largos (ondas de 7 a 47 m, 1 a 3.5 cm) y
+  ancho irregular (±6 a ±14 %, salvo que OSM dé el ancho). Sale todo de `Edge.at`, así que la calzada, sus
+  orillas, el corte del terreno y la línea de la IA ven la misma superficie; se apaga en 8 m hacia los cruces y
+  en las horquillas, y las ondas dependen de la posición en el mundo, no de cómo se parta la vía (dos pedazos
+  del modo en vivo dan la misma superficie). La malla gana un vértice en cada rodera: +2.6 % de triángulos en
+  Ouninpohja (15 km de caminos), sin costuras nuevas de más de 9 cm. Las roderas son geometría, no dibujo: la
+  textura sigue siendo la de siempre. Sin cunetas todavía: con el terreno a 2-4 m no se pueden tallar (fase 3).
+
+- **Caminos sin asfalto, fase 3 (offroad)**: el suelo fuera del camino ya no es todo pasto. Cada triángulo del
+  terreno toma su física del mapa de cobertura (`terrain.fisica_del_suelo`): pasto, tierra suelta bajo el bosque
+  y en lo urbano, arena en playas y cauces secos, roca (`MXROCA`, también en pendientes de más de 38°) y agua
+  en lagos y ríos, con el tipo de superficie de CSP; sigue sin contar como pista. `--veredas` («Veredas
+  conducibles» en la app) mete las sendas de monte de OSM (`path`, `bridleway`) como brechas de tierra de
+  2.6 m: 41 km en 1.5 km de La Pedriza. Y vados (`RoadNetwork.vadear`): donde un camino de tierra cruza un
+  arroyo sin puente (hasta 25 m, o `ford=yes`), la calzada baja con rampas de 9 m y el agua pasa 12 cm por
+  encima, en vez de cortarse como bajo lo asfaltado; en Landmannalaugar queda a 10-22 cm. El agua no frena
+  al coche en el vado (la física es la del camino). Sin hacer: malla de terreno más fina junto a los caminos y
+  cunetas (pide una malla adaptativa), y las teselas de terreno pasan a 2-3 mallas cada una (+6 % de mallas en
+  el KN5 de Tepoztlán).
+
+- **Repaso de las fases 1 a 3 de los caminos sin asfalto**: (1) cunetas (`Terrain.cunetas`, `--sin-cunetas`): zanja
+  en V de 1.6 m y 25 cm a cada lado de los caminos de tierra fuera de poblado, como franja de malla propia; el
+  terreno se recorta con exactitud por donde pasa (igual que en las bocas de túnel) y la franja se hunde bajo el
+  corte, sin rendijas; 8 km en Ouninpohja, +2.7 % de triángulos. (2) El vado frena: el trozo bajo el agua lleva la
+  física `MXVADO`; el camino baja a buscar la lámina del arroyo (antes el agua subía hasta el camino y quedaba un
+  lomo), con rampas del 10 % como mucho, y se vadean cruces de hasta 80 m. (3) Las roderas se ven: una huella
+  oscura (`rodera`) encima de cada una. (4) El perfil se apaga también donde otra calzada corre pegada al camino.
+  (5) `Terrain.z_plano` usaba el paso nominal de la rejilla y no el real: las tapas de túnel (y ahora las cunetas)
+  tomaban la altura de un punto corrido hasta 1 m. (6) **Relieve de 30 m corrido**: `rasters._read_tiles`
+  recortaba Copernicus y WorldCover empezando en la esquina pedida y no en un borde de pixel, así que cada
+  descarga salía desplazada hasta 15 m; dos pedazos vecinos del modo en vivo veían relieves distintos (en un
+  bosque de Finlandia, 19 cm de salto en la calzada y 75 cm en el terreno; ahora 0 y 0.6 cm). Afecta a toda zona
+  sin relieve nacional (México entero); la caché de esos dos rásteres se renueva sola. Queda: un salto de 7 cm
+  en el relleno de un cruce de la Sierra de Lobos entre una brecha ancha y un camino de servicio.
+
+- **Caminos sin asfalto, fase 4 (modo rally)**: tramos largos. Un tramo o circuito en una zona de más de 24 km²
+  se genera como **corredor** de 220 m a cada lado de la ruta (`--corredor auto|metros|0`,
+  `pipeline.ancho_corredor`): la ruta se calcula antes que nada y a ese polígono se acotan las calles
+  (`RoadNetwork.acotar`), las teselas de terreno, los edificios, el agua, la vegetación y lo demás de OSM; el
+  resto del rectángulo lo cubre el relieve lejano, y el muro invisible va por el borde del corredor. Un tramo de
+  12 km en la Sierra de Lobos: 4.7 km² de 30, 3.5 min, KN5 con 91 MB de texturas. En zonas así no se piden
+  ortofoto ni altura de dosel (no caben), y el terreno va a 4 m. **Notas de copiloto** (`openlaps/notas.py`):
+  de la curvatura del eje salen las curvas (lado, grado 1-6 por radio, larga, se cierra/abre, horquilla), las
+  rasantes y saltos, los cambios de superficie y los vados, con la distancia entre una y otra; van a `NOTAS.txt`
+  (libro de ruta), `data/notas.json` y `extension/notas.lua`, que las canta con los mensajes del sistema de AC
+  unos 4 s antes (un script de pista de CSP no puede dibujar un HUD propio: comprobado en las definiciones de
+  `extension/internal/lua-sdk`). 161 notas en ese tramo. Sin probar en el juego. Sin hacer: cintas y público, voz
+  del copiloto, y exportar las notas al formato de otros copilotos (no hay especificación pública que seguir).
+
 ## Pendiente
 
 | Tema | Qué falta |

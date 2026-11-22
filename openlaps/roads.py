@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from numba import njit
-from scipy.ndimage import gaussian_filter1d, median_filter
+from scipy.ndimage import gaussian_filter1d, median_filter, minimum_filter1d
 from scipy.spatial import cKDTree
 import shapely
 from shapely.geometry import LineString, Polygon
@@ -303,6 +303,8 @@ class Edge:
     s1: float = 0.0        # recorte en el extremo b (posición s)
     runs: list = field(default_factory=list)   # tramos dentro del área (s_ini, s_fin)
     sidewalk: bool = False
+    perfil: tuple = None   # camino sin asfalto: (roderas, bombeo, baches, ancho, posiciones de rodera), ver PERFIL_CAMINO
+    F: np.ndarray = None   # cuánto perfil lleva cada punto de `s` (0 en las curvas muy cerradas)
 
     @property
     def length(self):
@@ -318,7 +320,38 @@ class Edge:
         z = np.interp(s, self.s, self.Z)
         b = np.interp(s, self.s, self.B)
         o = np.asarray(o, float)
+        if self.perfil is not None:
+            o, dz = self._camino(s, px, py, o)
+            return np.stack(np.broadcast_arrays(px + nx * o, py + ny * o, z - b * o + dz), -1)
         return np.stack(np.broadcast_arrays(px + nx * o, py + ny * o, z - b * o), -1)
+
+    def fundido(self, s):
+        """Cuánto perfil de camino hay en la abscisa s: 0 en los cruces y en las horquillas, 1 en pleno tramo."""
+        if self.perfil is None:
+            return np.zeros(np.shape(s))
+        s = np.asarray(s, float)
+        f = np.clip(np.minimum(s - self.s0, self.s1 - s) / FUNDIDO_CAMINO, 0.0, 1.0)
+        return f * f * (3 - 2 * f) * np.interp(s, self.s, self.F)
+
+    def _camino(self, s, px, py, o):
+        """Perfil de un camino sin asfalto: desplazamiento lateral corregido (ancho irregular) y cambio de altura
+        (bombeo, roderas y baches). Todo sale de `at`, así que la calzada, sus orillas, el corte del terreno y la
+        línea de la IA ven la misma superficie. Las ondas dependen de la posición en el mundo y no de la abscisa:
+        dos pedazos vecinos del modo en vivo parten las vías distinto y aun así casan. Se apaga hacia los extremos
+        del tramo, donde manda el cruce, y en las curvas tan cerradas que la calzada se monta sobre sí misma."""
+        rod, bombeo, baches, ancho, pos_rod = self.perfil
+        f = self.fundido(s)
+        if ancho:
+            o = o * (1.0 + ancho * f * _ondas(px, py, 0))
+        x, y = np.broadcast_arrays(px + 0 * o, py + 0 * o)
+        nx = np.interp(s, self.s, self.N[:, 0])
+        ny = np.interp(s, self.s, self.N[:, 1])
+        dz = -bombeo * np.abs(o) + baches * _ondas(x + nx * o, y + ny * o, 1)
+        if len(pos_rod):
+            hondo = rod * (0.65 + 0.35 * _ondas(px, py, 2))
+            huella = sum(np.exp(-0.5 * ((o - r) / 0.24) ** 2) for r in pos_rod)
+            dz = dz - hondo * huella
+        return o, dz * f
 
     def frame(self, s):
         tx = np.interp(s, self.s, self.T[:, 0])
@@ -326,7 +359,46 @@ class Edge:
         return np.array([tx, ty])
 
     def key_attrs(self):
-        return (self.cls, round(self.hw, 2), self.mat, self.bridge, self.tunnel, self.layer, self.oneway)
+        return (self.cls, round(self.hw, 2), self.mat, self.phys, self.bridge, self.tunnel, self.layer, self.oneway)
+
+
+# Perfil de los caminos sin asfalto por física: (hondura de las roderas, bombeo, baches, variación del ancho).
+# Metros, salvo el bombeo (pendiente transversal) y el ancho (fracción). Son cotas que un coche de calle pasa:
+# el DEM de 30 m no trae el microrrelieve real, así que esto lo inventa con medida.
+PERFIL_CAMINO = {
+    "LOOSE":    (0.020, 0.020, 0.012, 0.06),
+    "MXGRAVA":  (0.030, 0.030, 0.018, 0.08),
+    "MXTIERRA": (0.050, 0.020, 0.030, 0.12),
+    "MXARENA":  (0.040, 0.000, 0.030, 0.12),
+    "MXPASTO":  (0.050, 0.000, 0.035, 0.14),
+}
+VADO_BAJADA_MAX = 2.0     # m: lo más que baja la calzada para alcanzar el agua
+VADO_HONDO = 0.12         # m de agua sobre la calzada en el vado
+VADO_RAMPA = 9.0          # m de bajada a cada lado
+VADO_LARGO_MAX = 80.0     # m: un cruce más largo es un río de verdad y ahí falta el puente en OSM, no se vadea
+VADO_LARGO_TOPE = 120.0   # m: ni con ford=yes se vadea algo más largo
+FUNDIDO_CAMINO = 8.0      # m desde cada extremo del tramo en los que el perfil crece de cero
+MEDIA_VIA = 0.75          # media distancia entre las dos roderas de un vehículo (m)
+# ondas por uso: 0 ancho (largas), 1 baches, 2 hondura de las roderas. Cada una: longitudes de onda en m.
+_ONDAS = []
+for _k, _lams in enumerate(((37.0, 61.0, 97.0), (7.0, 11.0, 17.0, 29.0, 47.0), (19.0, 43.0, 71.0))):
+    _rng = np.random.default_rng(1905 + _k)
+    _ONDAS.append((np.array(_lams), _rng.uniform(0, 2 * np.pi, len(_lams)), _rng.uniform(0, 2 * np.pi, len(_lams))))
+
+
+def _abrir(v, n):
+    """Mínimo de `v` en una ventana de ±n muestras (ensancha los tramos donde vale poco)."""
+    return minimum_filter1d(v, 2 * n + 1, mode="nearest")
+
+
+def _ondas(x, y, k):
+    """Suma de ondas planas de dirección y fase fijas, con valores en torno a [-1, 1], en coordenadas del mundo."""
+    lams, rumbo, fase = _ONDAS[k]
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    out = 0.0
+    for lam, th, ph in zip(lams, rumbo, fase):
+        out = out + np.sin((x * np.cos(th) + y * np.sin(th)) * (2 * np.pi / lam) + ph)
+    return out / np.sqrt(len(lams) * 0.5) / 2.0
 
 
 def radio_vertical_min(v_kmh):
@@ -402,8 +474,11 @@ def _velocidad(v):
 
 
 class RoadNetwork:
-    def __init__(self, osm, proj, dem_z, urban_fn, area_rect, log=print, tuneles="principales"):
+    def __init__(self, osm, proj, dem_z, urban_fn, area_rect, log=print, tuneles="principales", terraceria="auto",
+                 veredas=False):
+        self.veredas = veredas        # las sendas de monte (C.VEREDAS) entran a la red como brechas de tierra
         self.tuneles = tuneles        # "principales" | "todos" | "ninguno" (ver C.TUNNEL_MAIN_CLASSES)
+        self.terraceria = terraceria  # "auto" | "osm" | "rural" (ver _superficies)
         self.proj = proj
         self.dem_z = dem_z            # función (x, y) -> z del terreno sin tallar
         self.urban_fn = urban_fn      # función (x, y) -> bool
@@ -422,6 +497,7 @@ class RoadNetwork:
         self._trims()
         self._runs()
         self._islands()
+        self._perfil_caminos()
 
     # ---------------------------------------------------------------- 1. grafo
     def _build_graph(self, osm):
@@ -437,8 +513,13 @@ class RoadNetwork:
             if self.tuneles == "ninguno":
                 return True
             return self.tuneles == "principales" and t.get("highway") not in C.TUNNEL_MAIN_CLASSES
-        candidatas = [w for w in osm["ways"] if w["tags"].get("highway") in C.NETWORK
-                      and (not C.cerrada_a_coches(w["tags"]) if w["tags"].get("highway") not in C.PAVED_PATHS
+        # una vereda casi siempre lleva motor_vehicle=no: lo que se pide es justo meterse por ella, así que solo
+        # la cierra access=private/no; las que van por dentro de un edificio o bajo tierra, no
+        def vereda(t):
+            return self.veredas and t.get("highway") in C.VEREDAS and t.get("indoor") in (None, "no")                 and t.get("tunnel") in (None, "no") and t.get("bridge") in (None, "no") and _layer(t.get("layer")) == 0
+        candidatas = [w for w in osm["ways"] if (w["tags"].get("highway") in C.NETWORK or vereda(w["tags"]))
+                      and (not C.cerrada_a_coches(w["tags"])
+                           if w["tags"].get("highway") not in C.PAVED_PATHS | C.VEREDAS
                            else w["tags"].get("access") not in ("private", "no"))
                       and w["tags"].get("area") != "yes" and len(w["nodes"]) == len(w["coords"])]
         omitidas = [w for w in candidatas if tunel_omitido(w["tags"])]
@@ -472,15 +553,24 @@ class RoadNetwork:
             if len(cur) >= 2:
                 raw.append((cur, w["tags"]))
         edges = []
+        deducidas = self._superficies(raw)
         for i, (nodes, tags) in enumerate(raw):
             e = Edge(id=i, nodes=list(nodes), tags=tags, cls=tags["highway"])
-            self._attrs(e)
+            self._attrs(e, deducidas[i])
             e.a, e.b = nodes[0], nodes[-1]
             edges.append(e)
         self.edges = self._merge_deg2(edges)
         if bocas:
             self._quitar_rampas(bocas)
         self.log(f"  red: {len(ways)} vías OSM -> {len(self.edges)} aristas")
+        km = {}
+        for e in self.edges:
+            xy = np.array([self.node_xy[k] for k in e.nodes])
+            km[e.phys] = km.get(e.phys, 0.0) + float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum()) / 1000
+        if any(k in C.FISICAS_SUELTAS for k in km):
+            nombres = {"ROAD": "asfalto", "MXCOBBLE": "empedrado", "LOOSE": "terracería", "MXGRAVA": "grava",
+                       "MXTIERRA": "tierra", "MXARENA": "arena", "MXPASTO": "pasto"}
+            self.log("  superficies: " + ", ".join(f"{v:.1f} km de {nombres.get(k, k)}" for k, v in sorted(km.items(), key=lambda kv: -kv[1])))
 
     def _quitar_rampas(self, bocas, largo_max=150.0):
         """Quita las rampas que solo llevaban a un túnel omitido: tramos cortos que terminan, sin salida, en la
@@ -508,7 +598,225 @@ class RoadNetwork:
         if quitadas:
             self.log(f"  {quitadas} rampas sin salida hacia túneles omitidos quitadas")
 
-    def _attrs(self, e):
+    def vadear(self, cauces):
+        """Vados: donde un camino de tierra cruza un arroyo sin puente, la calzada baja hasta quedar bajo un palmo
+        de agua (antes ahí se quitaba el agua, como si hubiera una alcantarilla; eso sigue valiendo para lo
+        asfaltado). `cauces`: polígonos de agua que corre. Devuelve [(x, y, cota del agua, radio)] para que el agua
+        pase por encima a esa cota (agua.Agua). Solo cruces cortos, salvo que OSM diga ford=yes.
+
+        Un vado suele ser una vía aparte de OSM (la que lleva ford=yes), así que el cruce pasa de un tramo a otro
+        por sus nodos: la bajada se mide por distancia al agua y se aplica a todo lo que hay cerca, nodos
+        incluidos, y no tramo por tramo."""
+        self.vados = []
+        cauces = [g for g in (cauces or []) if g is not None and not g.is_empty]
+        if not cauces:
+            return self.vados
+        agua = unary_union(cauces)
+        shapely.prepare(agua)
+        tramos = []               # (arista, i0, i1, marcado): puntos seguidos del eje dentro del agua
+        for e in self.edges:
+            if e.mat != "terraceria" or e.bridge or e.tunnel or e.P is None or e.Z is None:
+                continue
+            dentro = shapely.contains_xy(agua, e.P[:, 0], e.P[:, 1])
+            if not dentro.any():
+                continue
+            marcado = e.tags.get("ford") not in (None, "no") \
+                or any(self.node_tags.get(k, {}).get("ford") not in (None, "no") for k in e.nodes)
+            cambios = np.flatnonzero(np.diff(np.concatenate([[False], dentro, [False]]).astype(np.int8)))
+            tramos += [(e, int(i0), int(i1) - 1, marcado) for i0, i1 in zip(cambios[::2], cambios[1::2])]
+        # los tramos mojados que se tocan en un nodo son el mismo vado
+        grupo = list(range(len(tramos)))
+
+        def raiz(i):
+            while grupo[i] != i:
+                grupo[i] = grupo[grupo[i]]
+                i = grupo[i]
+            return i
+        en_nodo = {}
+        for k, (e, i0, i1, _) in enumerate(tramos):
+            for nodo, toca in ((e.a, e.s[i0] < 3.0), (e.b, e.s[-1] - e.s[i1] < 3.0)):
+                if toca:
+                    if nodo in en_nodo:
+                        grupo[raiz(k)] = raiz(en_nodo[nodo])
+                    en_nodo[nodo] = k
+        mojados, bajadas = [], []
+        for g in {raiz(k) for k in range(len(tramos))}:
+            partes = [t for k, t in enumerate(tramos) if raiz(k) == g]
+            largo = sum(float(e.s[i1] - e.s[i0]) for e, i0, i1, _ in partes)
+            if largo > (VADO_LARGO_TOPE if any(m for *_, m in partes) else VADO_LARGO_MAX):
+                continue
+            pts = np.vstack([np.column_stack([e.P[i0:i1 + 1], e.Z[i0:i1 + 1]]) for e, i0, i1, _ in partes])
+            # el camino baja a buscar el agua, no al revés: la cota es la de la lámina del arroyo (la misma cuenta
+            # que agua.Agua: el fondo del valle en ~30 m, un poco por debajo). Si el agua subiera hasta la rasante
+            # del camino, que va suavizada por encima de las orillas, quedaba un lomo de agua en el vado
+            cota = float(np.median(self._lamina(pts[:, 0], pts[:, 1])))
+            mojados.append(pts[:, :2])
+            bajadas.append(np.clip(pts[:, 2] - (cota - VADO_HONDO), 0.0, VADO_BAJADA_MAX))
+            for e, i0, i1, _ in partes:
+                m = (i0 + i1) // 2
+                self.vados.append((float(e.P[m, 0]), float(e.P[m, 1]), cota,
+                                   0.5 * float(e.s[i1] - e.s[i0]) + e.hw + 2.0))
+        if not mojados:
+            return self.vados
+        arbol = cKDTree(np.vstack(mojados))
+        bajadas = np.concatenate(bajadas)
+
+        def baja(xy):
+            d, i = arbol.query(np.atleast_2d(xy))
+            hondo = bajadas[i]
+            # rampa del 10 % como mucho: más larga cuanto más hay que bajar
+            t = np.clip(1.0 - d / np.maximum(VADO_RAMPA, hondo / 0.10), 0.0, 1.0)
+            return -hondo * t * t * (3 - 2 * t)
+        for e in self.edges:
+            if not (e.bridge or e.tunnel) and e.P is not None and e.Z is not None:
+                e.Z = e.Z + baja(e.P)
+        for nodo in list(self.node_z):
+            if nodo in self.node_xy:
+                self.node_z[nodo] = float(self.node_z[nodo] + baja(self.node_xy[nodo])[0])
+        self.log(f"  {len(mojados)} vados: el camino de tierra cruza el arroyo por dentro del agua")
+        return self.vados
+
+    def _lamina(self, x, y, radio=15.0, paso=5.0):
+        """Cota aproximada del agua de un arroyo en (x, y): el punto más bajo del relieve alrededor, menos un
+        poco, sin hundirse demasiado bajo el propio punto (como agua.Agua.lamina, que aún no existe aquí)."""
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        d = np.arange(-radio, radio + 1e-6, paso)
+        DX, DY = np.meshgrid(d, d)
+        cerca = np.hypot(DX, DY) <= radio + 1e-6
+        fondo = np.min([self.dem_z(x + dx, y + dy) for dx, dy in zip(DX[cerca], DY[cerca])], axis=0)
+        return np.maximum(fondo - 0.25, self.dem_z(x, y) - 1.2)
+
+    def _perfil_caminos(self):
+        """A cada camino sin asfalto, su perfil (ver Edge._camino): roderas donde pisan las ruedas (un par si es de
+        un carril, dos si caben dos coches), bombeo, baches y ancho irregular. No en puentes ni túneles, ni en los
+        tramos tan cortos que todo sería fundido; el ancho no varía si OSM lo da."""
+        n = 0
+        # ejes de todas las vías (un punto cada ~3 m) para saber dónde corre otra calzada pegada a un camino
+        con_eje = [e for e in self.edges if e.P is not None and len(e.P) >= 2]
+        ejes = np.vstack([e.P[::2] for e in con_eje]) if con_eje else np.zeros((0, 2))
+        de = np.concatenate([np.full(len(e.P[::2]), k) for k, e in enumerate(con_eje)]) if con_eje else np.zeros(0, int)
+        ancho_de = np.array([e.hw for e in con_eje])
+        arbol = cKDTree(ejes) if len(ejes) else None
+        indice = {id(e): k for k, e in enumerate(con_eje)}
+        for e in self.edges:
+            if e.phys not in PERFIL_CAMINO or e.bridge or e.tunnel or e.s1 - e.s0 < 2 * FUNDIDO_CAMINO:
+                continue
+            rod, bombeo, baches, ancho = PERFIL_CAMINO[e.phys]
+            if e.hw < MEDIA_VIA + 0.45:
+                pos = ()
+            elif e.hw < 2 * MEDIA_VIA + 1.0:
+                pos = (-MEDIA_VIA, MEDIA_VIA)
+            else:
+                pos = (-e.hw / 2 - MEDIA_VIA, -e.hw / 2 + MEDIA_VIA, e.hw / 2 - MEDIA_VIA, e.hw / 2 + MEDIA_VIA)
+            e.perfil = (rod, bombeo, baches, 0.0 if "width" in e.tags else ancho, pos)
+            # en una horquilla la orilla interior se pliega y dos filas de la misma tira caen en el mismo sitio:
+            # con perfil quedarían a distinta altura. Radio menor que ~1.2 anchos: sin perfil; pleno desde 3
+            rumbo = np.unwrap(np.arctan2(e.T[:, 1], e.T[:, 0]))
+            curv = np.abs(np.gradient(rumbo, e.s))
+            radio = 1.0 / np.maximum(gaussian_filter1d(curv, 2.0, mode="nearest"), 1e-6)
+            cerrada = np.clip((radio / e.hw - 1.2) / 1.8, 0.0, 1.0)
+            f = gaussian_filter1d(_abrir(cerrada, int(round(6.0 / DS))), 2.0, mode="nearest")
+            # ni donde otra calzada va pegada (un ramal que sale en ángulo muy cerrado corre junto al camino más
+            # allá del cruce): las dos se montan y, con bombeo y ancho irregular en una sola, no casaban
+            d, ii = arbol.query(e.P, k=min(64, len(ejes)), distance_upper_bound=e.hw * 1.2 + 16.0)
+            d, ii = np.atleast_2d(d), np.atleast_2d(ii)
+            ajena = np.isfinite(d) & (de[np.minimum(ii, len(de) - 1)] != indice[id(e)])
+            hueco = np.where(ajena, d - ancho_de[de[np.minimum(ii, len(de) - 1)]], np.inf).min(axis=1) - e.hw * 1.2
+            libre = np.clip(hueco / 3.0, 0.0, 1.0)
+            f = np.minimum(f, gaussian_filter1d(_abrir(libre, int(round(3.0 / DS))), 1.5, mode="nearest"))
+            e.F = f * f * (3 - 2 * f)
+            n += 1
+        if n:
+            self.log(f"  {n} caminos sin asfalto con roderas, bombeo y baches")
+
+    def _superficies(self, raw):
+        """Superficie de cada tramo cuando OSM no la dice (un valor de `surface`, o None = lo de siempre). En las
+        zonas de rally casi nada lleva `surface`: en la Sierra de Lobos 68 km de 100 salían de asfalto siendo brechas.
+
+        "osm": solo lo etiquetado. "auto": además tracktype y smoothness, lo que se deduce de los tramos vecinos
+        (el mismo camino partido en varias vías, el ramal de una brecha) y, en regiones donde lo normal es la
+        tierra (Region.rural_sin_asfalto), los caminos sin clasificar fuera de poblado. "rural": todo camino menor
+        fuera de poblado, en cualquier región. Nunca se toca una vía con señales de estar asfaltada (clase alta, carriles, alumbrado, banqueta,
+        velocidad alta, puente o túnel, zona urbana)."""
+        n = len(raw)
+        sup = [None] * n          # valor de `surface`
+        fijo = [False] * n        # se sabe (por etiqueta o por señales): no se deduce encima
+        fuerte = [False] * n      # dato de OSM o deducido de uno: es el que se propaga a los vecinos
+        if self.terraceria == "osm":
+            return ["ground" if t.get("highway") in C.VEREDAS else None for _, t in raw]
+        suelta = lambda s: C.SURFACE_MAP.get(s) == "terraceria"  # noqa: E731
+        malas = ("bad", "very_bad", "horrible", "very_horrible", "impassable")
+        for i, (nodes, t) in enumerate(raw):
+            cls = t.get("highway")
+            if t.get("surface") in C.SURFACE_MAP:
+                sup[i], fijo[i], fuerte[i] = t["surface"], True, True
+            elif t.get("tracktype") in C.TRACKTYPE:
+                sup[i], fijo[i], fuerte[i] = C.TRACKTYPE[t["tracktype"]], True, True
+            elif t.get("tracktype") == "grade1":
+                sup[i], fijo[i], fuerte[i] = ("compacted" if cls == "track" else "asphalt"), True, True
+            elif cls == "track":
+                sup[i], fijo[i], fuerte[i] = "unpaved", True, True
+            elif cls in C.VEREDAS:
+                sup[i], fijo[i] = "ground", True
+            elif cls not in C.CLASES_MENORES:
+                sup[i], fijo[i] = "asphalt", True
+            elif t.get("smoothness") in malas:
+                sup[i], fijo[i], fuerte[i] = "unpaved", True, True
+            else:
+                lanes, vel = _num(t.get("lanes")), _velocidad(t.get("maxspeed"))
+                xy = np.array([self.node_xy[k] for k in nodes])
+                urbana = self.urban_fn is not None and bool(np.mean(self.urban_fn(xy[:, 0], xy[:, 1])) > 0.5)
+                if (lanes or 0) >= 2 or (vel or 0) >= 60 or t.get("lit") == "yes" or urbana \
+                        or t.get("sidewalk") not in (None, "no", "none", "separate") \
+                        or t.get("bridge") not in (None, "no") or t.get("tunnel") not in (None, "no"):
+                    sup[i], fijo[i] = "asphalt", True
+        en_nodo = {}              # por cada nodo, los tramos que llegan a él
+        for i, (nodes, _) in enumerate(raw):
+            for k in {nodes[0], nodes[-1]}:
+                en_nodo.setdefault(k, []).append(i)
+        nombre = lambda i: raw[i][1].get("name") or raw[i][1].get("ref")  # noqa: E731
+        # solo vale de testigo un tramo de la misma categoría o mayor: de casi toda carretera asfaltada salen
+        # brechas (highway=track), y eso no la hace de tierra
+        rango = lambda i: C.ROAD_CLASS.get(raw[i][1].get("highway"), C.ROAD_CLASS["road"])[5]  # noqa: E731
+        vecinos = 0
+        for _ in range(60):
+            nuevos = {}
+            for i in range(n):
+                if fijo[i]:
+                    continue
+                cont, ramal = [], []
+                for k in {raw[i][0][0], raw[i][0][-1]}:
+                    otros = [j for j in en_nodo[k] if j != i]
+                    sabidos = [j for j in otros if fuerte[j] and rango(j) >= rango(i)]
+                    cont += [j for j in sabidos if len(otros) == 1 or (nombre(i) and nombre(i) == nombre(j))]
+                    ramal += [j for j in sabidos if raw[j][1].get("highway") in C.CLASES_MENORES]
+                if cont:
+                    # continuación: el otro tramo de un nodo de dos, o el que lleva el mismo nombre
+                    if len({suelta(sup[j]) for j in cont}) == 1:
+                        nuevos[i] = sup[cont[0]]
+                elif ramal and all(suelta(sup[j]) for j in ramal):
+                    # ramal: todo lo menor que toca es de tierra (la salida de una brecha no es de asfalto)
+                    nuevos[i] = "unpaved"
+            if not nuevos:
+                break
+            for i, s in nuevos.items():
+                sup[i], fijo[i], fuerte[i] = s, True, True
+                vecinos += suelta(s)
+        region = 0
+        # sin mancha urbana no se sabe qué es pueblo: la regla regional pondría de tierra sus calles
+        # y solo a los caminos (unclassified, road): una calle con casas (residential, service) sin dato suele
+        # estar pavimentada aunque quede fuera de la mancha urbana (en Tepoztlán eran 10 km de calles del pueblo)
+        forzar = self.terraceria == "rural"
+        if forzar or (regions.active().rural_sin_asfalto and self.urban_fn is not None):
+            for i in range(n):
+                if not fijo[i] and (forzar or raw[i][1].get("highway") in ("unclassified", "road")):
+                    sup[i], region = "unpaved", region + 1
+        if vecinos or region:
+            self.log(f"  terracería deducida en {vecinos + region} tramos sin dato en OSM "
+                     f"({vecinos} por sus vecinos, {region} por ser caminos rurales)")
+        return [s if suelta(s) else None for s in sup]
+
+    def _attrs(self, e, deducida=None):
         t = e.tags
         lane_w, def_lanes, shoulder, speed, sigma, prio = C.ROAD_CLASS.get(e.cls, C.ROAD_CLASS["road"])
         e.oneway = t.get("oneway") in ("yes", "1", "true", "-1") or t.get("junction") == "roundabout" \
@@ -520,7 +828,7 @@ class RoadNetwork:
         e.lanes, e.lane_w, e.shoulder = lanes, lane_w * regions.active().lane_mult, shoulder
         e.speed = _velocidad(t.get("maxspeed")) or speed
         e.sigma, e.prio = sigma, prio
-        surf = t.get("surface")
+        surf = t.get("surface") if t.get("surface") in C.SURFACE_MAP else deducida
         if surf in C.SURFACE_MAP:
             e.mat = C.SURFACE_MAP[surf]
         elif e.cls == "track":
@@ -529,7 +837,7 @@ class RoadNetwork:
             e.mat = "adoquin"   # calle peatonal sin dato: losa o adoquín, no asfalto
         else:
             e.mat = "asfalto"
-        e.phys = C.PHYS_KEY[e.mat]
+        e.phys = C.PHYS_SUELTA.get(surf, "LOOSE") if e.mat == "terraceria" else C.PHYS_KEY[e.mat]
         e.bridge = t.get("bridge") not in (None, "no")
         e.tunnel = t.get("tunnel") not in (None, "no", "building_passage")
         e.layer = _layer(t.get("layer"))
@@ -951,10 +1259,19 @@ class RoadNetwork:
         c = float(np.dot(t1, t2) / max(np.linalg.norm(t1) * np.linalg.norm(t2), 1e-9))
         return c > -math.cos(math.radians(min_grados))      # saliendo del nodo: recto = direcciones opuestas
 
+    def acotar(self, zona):
+        """Limita lo que se construye al polígono `zona` (el corredor de un tramo largo), además del rectángulo."""
+        shapely.prepare(zona)
+        self.zona = zona
+        self._runs()
+
     def _runs(self):
         xmin, ymin, xmax, ymax = self.rect
+        zona = getattr(self, "zona", None)
         for e in self.edges:
             inside = (e.P[:, 0] > xmin) & (e.P[:, 0] < xmax) & (e.P[:, 1] > ymin) & (e.P[:, 1] < ymax)
+            if zona is not None:
+                inside &= shapely.contains_xy(zona, e.P[:, 0], e.P[:, 1])
             runs, start = [], None
             for i, ok in enumerate(inside):
                 if ok and start is None:
@@ -969,6 +1286,9 @@ class RoadNetwork:
     def node_inside(self, nid):
         x, y = self.node_xy[nid]
         xmin, ymin, xmax, ymax = self.rect
+        zona = getattr(self, "zona", None)
+        if zona is not None and not shapely.contains_xy(zona, x, y):
+            return False
         return xmin + 2 < x < xmax - 2 and ymin + 2 < y < ymax - 2
 
     def ranges(self, e, s_lo=None, s_hi=None):
@@ -998,6 +1318,13 @@ def _columnas(e):
     """Desplazamientos laterales de los vértices de la calzada: orillas, eje y, en las anchas, uno cada ~3 m. Con solo tres
     (orilla, eje, orilla) una calzada ancha no podía seguir la superficie común del repaso y dos calzadas que se
     montan seguían a distinta altura entre vértice y vértice."""
+    if e.perfil is not None and len(e.perfil[4]):
+        # camino con roderas: un vértice en el fondo de cada una y otro a cada lado, o la malla no las dibuja
+        cols = [-e.hw, e.hw, 0.0]
+        for r in e.perfil[4]:
+            cols += [r - 0.38, r, r + 0.38]
+        cols = np.sort(np.clip(cols, -e.hw, e.hw))
+        return cols[np.concatenate([[True], np.diff(cols) > 0.2])]
     return np.linspace(-e.hw, e.hw, 2 * max(1, int(math.ceil(e.hw / 3.6))) + 1)
 
 
@@ -1540,6 +1867,26 @@ def _puentes_bajos(net, log=print, alto_min=2.5):
         log(f"  {n} puentes a ras de suelo tratados como calle")
 
 
+def _solo_usados(pos, uv, faces):
+    """La malla sin los vértices que ninguna cara usa."""
+    usados = np.unique(faces)
+    remap = np.full(len(pos), -1)
+    remap[usados] = np.arange(len(usados))
+    return pos[usados], uv[usados], remap[faces]
+
+
+def _caras_en_vado(net, e, pos, faces):
+    """Caras de la tira de `e` que caen dentro de un vado (None si no hay ninguno cerca)."""
+    vados = getattr(net, "vados", None)
+    if not vados or e.mat != "terraceria" or not len(faces):
+        return None
+    cen = pos[faces][:, :, :2].mean(1)
+    dentro = np.zeros(len(faces), bool)
+    for x, y, _, r in vados:
+        dentro |= np.hypot(cen[:, 0] - x, cen[:, 1] - y) < r - 1.0
+    return dentro
+
+
 def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, urban_poly=None, log=print,
                 osm_guardrails=False, ortho=None, proj=None, rails=None, plazas=None):
     """Genera calzadas, cruces, rayas, topes, banquetas, defensas, puentes y túneles.
@@ -1580,7 +1927,13 @@ def build_roads(net: RoadNetwork, scene, buildings_poly=None, water_poly=None, u
                 mat = e.mat
                 ts = TEX_SCALE.get(e.mat, 4.0)
                 pos, uv, faces = strip(e, sv, offs, u_scale=ts, v_scale=ts)
-            _add_marcado(scene, "aparte" if (e.bridge or e.tunnel) else None, "calzada", mat, pos, uv, faces, e.phys)
+            mojadas = _caras_en_vado(net, e, pos, faces)
+            if mojadas is not None and mojadas.any():
+                # el trozo que va bajo el agua pisa distinto: frena y patina (antes el vado solo se veía)
+                _add_marcado(scene, None, "calzada", mat, *_solo_usados(pos, uv, faces[mojadas]), "MXVADO")
+                pos, uv, faces = _solo_usados(pos, uv, faces[~mojadas])
+            if len(faces):
+                _add_marcado(scene, "aparte" if (e.bridge or e.tunnel) else None, "calzada", mat, pos, uv, faces, e.phys)
             stats["km"] += (b - a) / 1000
             # faldón lateral (tapa huecos con el terreno): se añade al final, cuando ya se sabe
             # dónde hay otra calzada al lado (ahí el faldón asomaba como un muro en sierra)

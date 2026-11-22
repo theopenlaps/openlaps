@@ -573,14 +573,14 @@ def edge_fade(n=256, color=(122, 106, 86)):
     return Image.fromarray(a, "RGBA")
 
 
-def roadwear(n=256):
+def roadwear(n=256, alfa=46):
     """Huella de rodada: franja oscura y suave, casi transparente en las orillas."""
     a = np.zeros((n, n, 4), np.uint8)
     u = np.linspace(-1, 1, n)
     prof = np.exp(-(u / 0.45) ** 2)
     nz = tile_noise(n, 10, np.random.default_rng(9), 3)
     a[..., 0] = a[..., 1] = a[..., 2] = 30
-    a[..., 3] = np.clip(prof[None, :] * (0.5 + 0.5 * nz) * 46, 0, 255)
+    a[..., 3] = np.clip(prof[None, :] * (0.5 + 0.5 * nz) * alfa, 0, 255)
     return Image.fromarray(a, "RGBA")
 
 
@@ -784,6 +784,8 @@ def register_all(scene, season="seca", cc0=None):
     S.material("orilla", tex("orilla.png", edge_fade(256, (132, 122, 90) if _act().code != "mx" else (122, 106, 86))),
                blend=True, ambient=0.4, diffuse=0.4, specular=0.0)
     S.material("desgaste", tex("desgaste.png", roadwear(256)), blend=True, ambient=0.3, diffuse=0.3, specular=0.05)
+    # rodera de camino de tierra: la misma huella, más marcada (sobre tierra clara la del asfalto no se ve)
+    S.material("rodera", tex("rodera.png", roadwear(256, 120)), blend=True, ambient=0.3, diffuse=0.3, specular=0.0)
     # colisiones: textura totalmente transparente (con RGB opaco se veían como cajas negras)
     S.material("invisible", tex("transparente.png", Image.new("RGBA", (16, 16), (0, 0, 0, 0))), kind="invisible",
                ambient=0.0, diffuse=0.0)

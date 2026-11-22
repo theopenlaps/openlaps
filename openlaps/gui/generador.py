@@ -107,6 +107,10 @@ def argumentos(op, salida, nombre=None):
                 a.append(f"--sin-{k}")
     if op.get("temporada") in ("seca", "lluvias"):
         a += ["--temporada", op["temporada"]]
+    if op.get("terraceria") in ("osm", "rural"):
+        a += ["--terraceria", op["terraceria"]]
+    if op.get("veredas"):
+        a.append("--veredas")
     if op.get("region") and op["region"] != "auto":
         a += ["--region", str(op["region"])]
     if op.get("subregion") and op["subregion"] != "auto":

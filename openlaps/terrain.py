@@ -179,8 +179,10 @@ class Terrain:
     def z_plano(self, Zg, x, y):
         """Altura exacta de la malla del terreno (los mismos triángulos que build_mesh) en (x, y)."""
         x, y = np.asarray(x, float), np.asarray(y, float)
-        fx_ = (x - self.gx[0]) / self.res
-        fy_ = (y - self.gy[0]) / self.res
+        # el paso real de la rejilla: el área rara vez mide un múltiplo exacto de `res`, y con `res` la altura
+        # salía de un punto corrido hasta 1 m en el otro extremo de la pista
+        fx_ = (x - self.gx[0]) / (self.gx[1] - self.gx[0])
+        fy_ = (y - self.gy[0]) / (self.gy[1] - self.gy[0])
         i = np.clip(np.floor(fx_).astype(int), 0, len(self.gx) - 2)
         j = np.clip(np.floor(fy_).astype(int), 0, len(self.gy) - 2)
         fx, fy = fx_ - i, fy_ - j
@@ -296,6 +298,98 @@ class Terrain:
         if sub.any():
             self.Z[sub] = np.maximum(self.Z[sub], z_techo(GX[sub], GY[sub]) + 0.3 + tierra)
 
+    def cunetas(self, net, ocupado=None, evitar=None):
+        """Cunetas a los dos lados de los caminos sin asfalto: una zanja en V de CUNETA_ANCHO m pegada a la orilla.
+
+        La rejilla del terreno (2-4 m) no puede tallar una zanja de menos de 2 m, así que la cuneta es una franja de
+        malla propia, fina, y el terreno se recorta por donde pasa: sus triángulos se cortan con exactitud (como en
+        las bocas de túnel) y la franja se mete un poco por debajo del corte, sin rendijas. Lleva la textura y la
+        física del terreno. `ocupado`: todo lo construido (calzadas, cruces, banquetas); `evitar`: agua y edificios.
+        Llamar con el terreno ya tallado y antes de build_mesh. Devuelve los metros de cuneta."""
+        from rasterio import features
+        from rasterio.transform import Affine
+        from .roads import _svals, iter_polys, triangulate_polygon
+        if not hasattr(self, "parches"):
+            self.parches = []
+        prohibido = [g for g in (ocupado.buffer(0.25) if ocupado is not None else None, evitar) if g is not None]
+        prohibido = unary_union(prohibido) if prohibido else None
+        if prohibido is not None:
+            shapely.prepare(prohibido)
+        xmin, xmax, ymin, ymax = self.gx[0], self.gx[-1], self.gy[0], self.gy[-1]
+        franjas, cuadros, metros = [], [], 0.0
+        for e in net.edges:
+            if e.perfil is None or e.urban or e.bridge or e.tunnel or e.cls in C.VEREDAS:   # (una senda no lleva cuneta)
+                continue
+            for a, b in net.ranges(e):
+                sv = _svals(e, a, b)
+                sv = np.unique(np.concatenate([sv[::2], sv[-1:]]))
+                hondo = CUNETA_HONDO * e.fundido(sv)
+                for lado in (1.0, -1.0):
+                    orilla = e.at(sv, lado * e.hw)
+                    medio = e.at(sv, lado * (e.hw + CUNETA_FONDO))
+                    corte = e.at(sv, lado * (e.hw + CUNETA_ANCHO - CUNETA_SOLAPE))
+                    fuera = e.at(sv, lado * (e.hw + CUNETA_ANCHO))
+                    lejos = e.at(sv, lado * (e.hw + CUNETA_ANCHO + 0.5))
+                    vale = (hondo > 0.03) & (fuera[:, 0] > xmin + 1) & (fuera[:, 0] < xmax - 1) \
+                        & (fuera[:, 1] > ymin + 1) & (fuera[:, 1] < ymax - 1)
+                    if prohibido is not None:
+                        for q in (medio, corte, fuera):
+                            vale &= ~shapely.contains_xy(prohibido, q[:, 0], q[:, 1])
+                    orilla[:, 2] -= 0.03                      # bajo la orilla de la calzada: la tapa su faldón
+                    medio[:, 2] = np.minimum(self.z_plano(self.Z, medio[:, 0], medio[:, 1]), orilla[:, 2]) - hondo
+                    # el borde exterior asoma un poco sobre el terreno y luego se hunde bajo él: la franja va recta
+                    # entre fila y fila y el terreno no, y si acabara justo a ras quedaban rendijas por las que se
+                    # veía el cielo
+                    fuera[:, 2] = self.z_plano(self.Z, fuera[:, 0], fuera[:, 1]) + 0.08
+                    lejos[:, 2] = self.z_plano(self.Z, lejos[:, 0], lejos[:, 1]) - 0.35
+                    for i in np.flatnonzero(vale[:-1] & vale[1:]):
+                        j = i + 1
+                        fila = np.array([orilla[i], medio[i], fuera[i], lejos[i], orilla[j], medio[j], fuera[j], lejos[j]])
+                        caras = np.array([[0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6]])
+                        if np.cross(fila[1] - fila[0], fila[5] - fila[0])[2] < 0:
+                            caras = caras[:, ::-1]
+                        franjas.append(fila[caras].reshape(-1, 3))
+                        cuadros.append(shapely.Polygon([orilla[i, :2], corte[i, :2], corte[j, :2], orilla[j, :2]]))
+                        metros += float(sv[j] - sv[i])
+        if not franjas:
+            return 0.0
+        zona = unary_union(cuadros).buffer(0)
+        if ocupado is not None:
+            zona = zona.difference(ocupado)
+        if zona.is_empty:
+            return 0.0
+        # triángulos de la rejilla que toca la zona: fuera los de dentro, y los del borde se cortan
+        nx, ny = len(self.gx), len(self.gy)
+        if not hasattr(self, "quitar1"):
+            self.quitar1 = np.zeros((ny - 1, nx - 1), bool)
+            self.quitar2 = np.zeros((ny - 1, nx - 1), bool)
+        tr = Affine(self.gx[1] - self.gx[0], 0, self.gx[0], 0, self.gy[1] - self.gy[0], self.gy[0])
+        cerca = features.rasterize([(zona, 1)], out_shape=(ny - 1, nx - 1), transform=tr, fill=0, all_touched=True)
+        J, I = np.nonzero(cerca)
+        xa, xb, ya, yb = self.gx[I], self.gx[I + 1], self.gy[J], self.gy[J + 1]
+        shapely.prepare(zona)
+        resto = []
+        for k, (pa, pb, pc) in enumerate((((xa, ya), (xb, ya), (xb, yb)), ((xa, ya), (xb, yb), (xa, yb)))):
+            quitar = self.quitar1 if k == 0 else self.quitar2
+            coords = np.stack([np.column_stack(pa), np.column_stack(pb), np.column_stack(pc), np.column_stack(pa)], 1)
+            tri = shapely.polygons(coords)
+            toca = shapely.intersects(zona, tri) & ~quitar[J, I]      # (lo ya quitado, p. ej. un túnel, no se toca)
+            quitar[J[toca], I[toca]] = True
+            for g in tri[toca & ~shapely.contains(zona, tri)]:
+                for pp in iter_polys(g.difference(zona)):
+                    if pp.area > 1e-4:
+                        v, f = triangulate_polygon(pp, 1e9)
+                        if len(f):
+                            resto.append(v[f].reshape(-1, 2))
+        if resto:
+            v = np.concatenate(resto)
+            self.parches.append((np.column_stack([v, self.z_plano(self.Z, v[:, 0], v[:, 1])]),
+                                 np.arange(len(v)).reshape(-1, 3)))
+        v = np.concatenate(franjas)
+        self.parches.append((v, np.arange(len(v)).reshape(-1, 3)))
+        self.log(f"  cunetas: {metros / 1000:.1f} km a los lados de los caminos sin asfalto ({len(v) // 3} triángulos)")
+        return metros
+
     def height(self, x, y):
         """Altura de la malla final (bilineal)."""
         x = np.asarray(x, float)
@@ -310,7 +404,7 @@ class Terrain:
         return n / np.linalg.norm(n, axis=2, keepdims=True)
 
     # ------------------------------------------------------------------ teselas
-    def build_mesh(self, scene, painter, tile_m=128.0, mpp=0.5):
+    def build_mesh(self, scene, painter, tile_m=128.0, mpp=0.5, cobertura=None):
         N = self.normals()
         p = self.proj
         nx, ny = len(self.gx), len(self.gy)
@@ -329,6 +423,9 @@ class Terrain:
                 x0, x1, y0, y1 = xs[0], xs[-1], ys[0], ys[-1]
                 solo = getattr(self, "solo", None)    # modo en vivo: solo las teselas del centro del pedazo
                 if solo is not None and not (solo[0] <= (x0 + x1) / 2 <= solo[2] and solo[1] <= (y0 + y1) / 2 <= solo[3]):
+                    continue
+                zona = getattr(self, "zona", None)    # tramo largo: solo las teselas que toca el corredor
+                if zona is not None and not zona.intersects(shapely.box(x0, y0, x1, y1)):
                     continue
                 uv = np.column_stack([(GX.ravel() - x0) / (x1 - x0), (y1 - GY.ravel()) / (y1 - y0)])
                 w, h = len(xs), len(ys)
@@ -355,7 +452,11 @@ class Terrain:
                                       "detail_nm": "det_nm.png", "mult": rep,
                                       "props": {"magicMult": 1.0, "fresnelC": 0.0, "fresnelEXP": 4.0, "fresnelMaxLevel": 0.0,
                                                 "detailNMMult": [0.0, 1.0, rep, 0, 0, 0, 0, 0, 0, 0]}})
-                scene.add("terreno", name, pos, uv, faces, normals=nrm, phys="GRASS")
+                for fis, sel in fisica_del_suelo(pos, faces, cobertura):
+                    usados = np.unique(sel)
+                    remap = np.full(len(pos), -1)
+                    remap[usados] = np.arange(len(usados))
+                    scene.add("terreno", name, pos[usados], uv[usados], remap[sel], normals=nrm[usados], phys=fis)
                 # tapa y franja de los túneles que caen en esta tesela, con su misma textura
                 for ppos, pf in getattr(self, "parches", []):
                     cen = ppos[pf].mean(1)
@@ -374,6 +475,48 @@ class Terrain:
                         scene.add("terreno", name, q, quv, ff, phys="GRASS")
                 ti += 1
         self.log(f"  terreno: {ti} teselas de {tile_m:.0f} m con textura horneada a {mpp} m/px")
+
+
+CUNETA_ANCHO = 1.6        # m desde la orilla de la calzada hasta donde la cuneta vuelve al terreno
+CUNETA_FONDO = 0.7        # m de la orilla al fondo de la zanja
+CUNETA_HONDO = 0.25       # m de hondura (crece desde cero al salir de los cruces, como el perfil del camino)
+CUNETA_SOLAPE = 0.2       # m que el terreno recortado monta sobre el borde exterior de la franja
+
+# Física de Assetto Corsa del suelo según lo que hay en cada sitio (clases de cobertura.py). Antes todo el terreno
+# era pasto: salirse a una playa, a un pedregal o a un lago se sentía igual.
+FISICA_SUELO = {1: "WATER", 2: "WATER", 3: "GRASS", 4: "SAND", 5: "DIRT", 6: "GRASS", 7: "GRASS", 8: "GRASS",
+                9: "MXROCA", 10: "SAND", 11: "GRASS", 12: "DIRT"}
+PENDIENTE_ROCA = 38.0     # grados: más inclinado que esto el suelo se pinta de roca, y pisa como roca
+PARCHE_MIN = 12           # triángulos: un parche menor dentro de una tesela no merece malla propia
+
+
+def fisica_del_suelo(pos, faces, cobertura):
+    """Parte los triángulos de una tesela de terreno por su física: [(clave, caras)]. Sin mapa de cobertura,
+    todo pasto salvo la roca de las pendientes."""
+    if not len(faces):
+        return []
+    tri = pos[faces]
+    cen = tri.mean(1)
+    claves = ["GRASS", "DIRT", "SAND", "MXROCA", "WATER"]
+    k = np.zeros(len(faces), np.int64)
+    if cobertura is not None:
+        xmin, ymin, xmax, ymax = cobertura.rect
+        col = np.floor((cen[:, 0] - xmin) / cobertura.res).astype(np.int64)
+        fil = np.floor((ymax - cen[:, 1]) / cobertura.res).astype(np.int64)
+        dentro = (col >= 0) & (col < cobertura.W) & (fil >= 0) & (fil < cobertura.H)
+        lut = np.zeros(256, np.int64)
+        for clase, fis in FISICA_SUELO.items():
+            lut[clase] = claves.index(fis)
+        k[dentro] = lut[cobertura.cls[fil[dentro], col[dentro]]]
+    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    pend = np.degrees(np.arctan2(np.hypot(n[:, 0], n[:, 1]), np.abs(n[:, 2])))
+    k[(pend > PENDIENTE_ROCA) & (k != claves.index("WATER"))] = claves.index("MXROCA")
+    cuenta = np.bincount(k, minlength=len(claves))
+    mayor = int(np.argmax(cuenta))
+    for i in range(len(claves)):
+        if 0 < cuenta[i] < PARCHE_MIN and i != mayor:
+            k[k == i] = mayor
+    return [(claves[i], faces[k == i]) for i in range(len(claves)) if (k == i).any()]
 
 
 # --------------------------------------------------------------------------------------

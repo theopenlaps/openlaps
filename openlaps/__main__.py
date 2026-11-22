@@ -20,6 +20,9 @@ def parser():
     p.add_argument("--tam", type=float, default=1000, help="lado del área en metros (con --centro)")
     p.add_argument("--modo", choices=["libre", "tramo", "circuito"], default="libre")
     p.add_argument("--ruta", help='puntos "lat,lon;lat,lon;..." para tramo o circuito')
+    p.add_argument("--corredor", default="auto",
+                   help="tramo o circuito: metros a cada lado de la ruta que se generan (auto: 220 en zonas de más "
+                        "de 24 km²; 0: el rectángulo entero)")
     p.add_argument("--dem", help="GeoTIFF local de elevación (p. ej. INEGI CEM 3.0 o LiDAR)")
     p.add_argument("--dem-es-superficie", action="store_true", help="el MDE local incluye árboles/techos")
     p.add_argument("--temporada", choices=["seca", "lluvias"], default="seca")
@@ -36,6 +39,12 @@ def parser():
     p.add_argument("--sin-satelite", action="store_true", help="no usar imagen Sentinel-2 en el suelo")
     p.add_argument("--sin-dosel", action="store_true", help="no usar altura de dosel (árboles reales)")
     p.add_argument("--sin-horizonte", action="store_true", help="no generar el relieve lejano")
+    p.add_argument("--terraceria", choices=["auto", "osm", "rural"], default="auto",
+                   help="caminos sin asfalto: auto deduce los que OSM no etiqueta (tracktype, vecinos y región), "
+                        "osm usa solo lo etiquetado, rural pone de tierra todo camino menor fuera de poblado")
+    p.add_argument("--sin-cunetas", action="store_true", help="no tallar cunetas a los lados de los caminos sin asfalto")
+    p.add_argument("--veredas", action="store_true",
+                   help="offroad: las sendas de monte de OSM (path, bridleway) salen como brechas de tierra conducibles")
     p.add_argument("--tuneles", choices=["principales", "todos", "ninguno"], default="principales",
                    help="qué túneles se construyen: principales = vías primarias para arriba (por defecto; los urbanos "
                         "menores bajan en trinchera y su boca salía en medio de la calle), todos, ninguno")

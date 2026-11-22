@@ -55,6 +55,7 @@ class Region:
     ortho_mpp: float = 0.25         # resolución a la que se pide la ortofoto (m/px)
     # calle y ciudad
     lane_mult: float = 1.0          # multiplicador del ancho de carril por defecto
+    rural_sin_asfalto: bool = False  # fuera de poblado, un camino menor sin `surface` en OSM es de tierra
     sidewalk_w: float = 1.8         # ancho de banqueta (m)
     center_double: bool = False     # raya central doble continua donde no se puede rebasar (EE. UU.)
     parking_default: bool = False   # en ciudad, estacionamiento en ambos lados si OSM no dice nada
@@ -80,6 +81,7 @@ MX = Region(
                    (110, 160, 90), (232, 140, 110), (180, 170, 150)],
     levels_default=(1, 1, 2, 2, 3),
     species=("encino", "pino", "arbusto", "tropical", "palma", "organo", "maguey"),
+    rural_sin_asfalto=True,
 )
 
 ES = Region(

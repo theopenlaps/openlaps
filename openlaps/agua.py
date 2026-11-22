@@ -17,15 +17,23 @@ from .roads import iter_polys, triangulate_polygon
 
 BAJO_LAMINA = 0.25      # la lámina de un río queda este tanto por debajo del fondo suavizado del valle
 MAX_HUNDIDO = 1.2       # ...pero nunca más de esto bajo el terreno original (arroyos a media ladera)
+VADO_FUNDIDO = 20.0     # m en los que la lámina vuelve de la cota del vado a la suya
 ORILLA = 4.0            # m de franja de orilla que se rebaja hasta el agua
 
 
 class Agua:
-    def __init__(self, cob, terr, calles_sin_puente=None, log=print):
+    def __init__(self, cob, terr, calles_sin_puente=None, log=print, vados=None):
         self.terr = terr
+        self.vados = list(vados or [])      # (x, y, cota del agua, radio): ver roads.RoadNetwork.vadear
         excl = calles_sin_puente.buffer(1.0) if calles_sin_puente is not None and not calles_sin_puente.is_empty else None
+        excl_corriente = excl
+        if excl is not None and self.vados:
+            # en un vado el agua que corre sí pasa por encima de la calzada (la quieta no: un lago tiene su cota
+            # y puede quedar muy por encima del camino)
+            excl_corriente = excl.difference(unary_union([shapely.Point(x, y).buffer(r) for x, y, _, r in self.vados]))
+            excl_corriente = None if excl_corriente.is_empty else excl_corriente
         self.quieta, self.corriente = [], []
-        for lst, out in ((cob.quieta, self.quieta), (cob.corriente, self.corriente)):
+        for lst, out, excl in ((cob.quieta, self.quieta, excl), (cob.corriente, self.corriente, excl_corriente)):
             for g in lst:
                 if excl is not None and g.intersects(excl):
                     g = g.difference(excl)
@@ -53,7 +61,16 @@ class Agua:
         c = (np.asarray(x) - gx[0]) / (gx[1] - gx[0])
         r = (np.asarray(y) - gy[0]) / (gy[1] - gy[0])
         f = map_coordinates(self.fondo, [np.ravel(r), np.ravel(c)], order=1, mode="nearest").reshape(np.shape(x))
-        return np.maximum(f - BAJO_LAMINA, self.terr.z(x, y) - MAX_HUNDIDO)
+        return self._en_vados(x, y, np.maximum(f - BAJO_LAMINA, self.terr.z(x, y) - MAX_HUNDIDO))
+
+    def _en_vados(self, x, y, z):
+        """Cerca de un vado la lámina va a la cota que pide el camino (y vuelve a la suya en VADO_FUNDIDO m)."""
+        x, y, z = np.asarray(x, float), np.asarray(y, float), np.array(z, float)
+        for vx, vy, vz, r in self.vados:
+            t = np.clip(1.0 - (np.hypot(x - vx, y - vy) - r) / VADO_FUNDIDO, 0.0, 1.0)
+            w = t * t * (3 - 2 * t)
+            z = z * (1 - w) + vz * w
+        return z
 
     def tallar(self):
         """Hunde el terreno bajo el agua y rebaja la orilla. Llamar antes de terrain.build_mesh."""
@@ -69,7 +86,7 @@ class Agua:
             u = unary_union(self.corriente)
             shapely.prepare(u)
             m = shapely.contains_xy(u, GX, GY) & np.isnan(W)
-            W[m] = np.maximum(self.fondo[m] - BAJO_LAMINA, terr.Z0[m] - MAX_HUNDIDO)
+            W[m] = self._en_vados(GX[m], GY[m], np.maximum(self.fondo[m] - BAJO_LAMINA, terr.Z0[m] - MAX_HUNDIDO))
         dentro = ~np.isnan(W)
         if not dentro.any():
             return

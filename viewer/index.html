@@ -192,7 +192,7 @@ const TX = {
     triangulos: "triángulos", cruza: "Cruza la salida",
     vivo_titulo: "Tramo en vivo", vivo_gen: "Generando los primeros pedazos alrededor de la salida (la primera vez tarda un poco: hay que bajar los datos)…",
     vivo_espera: "esperando terreno", vivo_en_vivo: "en vivo", vivo_pedazos: "pedazos", vivo_generando: "generando", vivo_sin: "Sin servidor del tramo en vivo", vivo_zona: "zona lista",
-    sup: { ROAD: "Asfalto", MXCOBBLE: "Empedrado", LOOSE: "Tierra", MXDIRT: "Tierra", PAVEMENT: "Acera", GRASS: "Hierba / tierra" },
+    sup: { ROAD: "Asfalto", MXCOBBLE: "Empedrado", LOOSE: "Terracería", MXGRAVA: "Grava", MXTIERRA: "Tierra", MXARENA: "Arena", MXPASTO: "Pasto", MXVADO: "Vado", MXDIRT: "Tierra", PAVEMENT: "Acera", GRASS: "Hierba", DIRT: "Tierra suelta", SAND: "Arena", MXROCA: "Roca", WATER: "Agua" },
   },
   en: {
     escena: "3D track scene", conducir: "Explore", libre: "Free view", modo_t: "Switch between road camera and free view (V key)",
@@ -206,7 +206,7 @@ const TX = {
     triangulos: "triangles", cruza: "Cross the start line",
     vivo_titulo: "Live stage", vivo_gen: "Generating the first pieces around the start (the first time takes a while: the data has to be downloaded)…",
     vivo_espera: "waiting for terrain", vivo_en_vivo: "live", vivo_pedazos: "pieces", vivo_generando: "generating", vivo_sin: "No live stage server", vivo_zona: "area ready",
-    sup: { ROAD: "Asphalt", MXCOBBLE: "Cobblestone", LOOSE: "Dirt", MXDIRT: "Dirt", PAVEMENT: "Sidewalk", GRASS: "Grass / dirt" },
+    sup: { ROAD: "Asphalt", MXCOBBLE: "Cobblestone", LOOSE: "Unpaved", MXGRAVA: "Gravel", MXTIERRA: "Dirt", MXARENA: "Sand", MXPASTO: "Grass", MXVADO: "Ford", MXDIRT: "Dirt", PAVEMENT: "Sidewalk", GRASS: "Grass", DIRT: "Loose dirt", SAND: "Sand", MXROCA: "Rock", WATER: "Water" },
   },
 }[LANG];
 document.documentElement.lang = LANG;
@@ -271,8 +271,8 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const $ = (id) => document.getElementById(id);
 const SUPERFICIES = TX.sup;
-const VMAX = { ROAD: 50, MXCOBBLE: 30, LOOSE: 33, MXDIRT: 33, PAVEMENT: 25, GRASS: 16 };   // m/s según superficie
-const AGARRE = { ROAD: 1.0, MXCOBBLE: 0.85, LOOSE: 0.72, MXDIRT: 0.7, PAVEMENT: 0.9, GRASS: 0.5 };
+const VMAX = { ROAD: 50, MXCOBBLE: 30, LOOSE: 33, MXGRAVA: 31, MXTIERRA: 30, MXARENA: 22, MXPASTO: 22, MXVADO: 12, MXDIRT: 33, PAVEMENT: 25, GRASS: 16, DIRT: 18, SAND: 12, MXROCA: 14, WATER: 5 };   // m/s según superficie
+const AGARRE = { ROAD: 1.0, MXCOBBLE: 0.85, LOOSE: 0.72, MXGRAVA: 0.68, MXTIERRA: 0.66, MXARENA: 0.55, MXPASTO: 0.55, MXVADO: 0.45, MXDIRT: 0.7, PAVEMENT: 0.9, GRASS: 0.5, DIRT: 0.55, SAND: 0.45, MXROCA: 0.7, WATER: 0.25 };
 
 const canvas = $("lienzo");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });

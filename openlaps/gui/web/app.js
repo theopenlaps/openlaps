@@ -18,7 +18,7 @@ const S = {
   modo: "libre", centro: null, ancho: 800, alto: 800, ruta: [],
   calidad: "normal", nombre: "", nombreAuto: "", ac: true, jugar: false, trafico: true,
   maxKm2: 24, csp: false, vivo: null, vivoModo: false,
-  temporada: "seca", region: "auto", subregion: "auto", vegetacion: 1, usar: Object.fromEntries(FUENTES.map((k) => [k, true])), dem: null,
+  temporada: "seca", terraceria: "auto", veredas: false, region: "auto", subregion: "auto", vegetacion: 1, usar: Object.fromEntries(FUENTES.map((k) => [k, true])), dem: null,
   lugar: "", lugarElegido: false, lugarEsPunto: false, regionInfo: null, osm: null,
   asistente: false, paso: 1,
   trabajo: null, trabajoId: null, t0: 0, registro: [], ultimaPista: null, borradorGlb: null,
@@ -769,7 +769,7 @@ function opciones() {
     modo: S.modo, centro: S.centro, ancho: S.ancho, alto: S.alto, ruta: S.ruta, calidad: S.calidad, nombre: nombreFinal(),
     vivo: esVivo(),
     titulo: S.lugar && !S.lugarEsPunto ? S.lugar : "", ac: S.ac, trafico: S.trafico,
-    temporada: S.temporada, region: S.region, subregion: S.subregion, vegetacion: S.vegetacion,
+    temporada: S.temporada, terraceria: S.terraceria, veredas: S.veredas, region: S.region, subregion: S.subregion, vegetacion: S.vegetacion,
     sin: FUENTES.filter((k) => !S.usar[k]), dem: S.dem,
   };
 }

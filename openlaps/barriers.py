@@ -111,8 +111,17 @@ def build(scene, barriers, proj, terrain, rect, road_union=None):
     return meters
 
 
-def boundary(scene, terrain, rect, height=6.0, step=4.0):
-    """Muro invisible (solo colisión) en el borde del área generada."""
+def boundary(scene, terrain, rect, zona=None, height=6.0, step=4.0):
+    """Muro invisible (solo colisión) en el borde del área generada (o del corredor `zona` de un tramo largo)."""
+    if zona is not None:
+        import shapely
+        for pg in (zona.geoms if hasattr(zona, "geoms") else [zona]):
+            for anillo in [pg.exterior, *pg.interiors]:
+                c = np.asarray(shapely.segmentize(anillo.simplify(1.0), step).coords)
+                pts = np.column_stack([c, terrain.height(c[:, 0], c[:, 1]) - 2.0])
+                p, uv, f = wall_strip(pts, height + 2.0, both=True)
+                scene.add("col", "invisible", p, uv, f, phys="WALL")
+        return
     xmin, ymin, xmax, ymax = rect
     corners = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax), (xmin, ymin)]
     for (x0, y0), (x1, y1) in zip(corners[:-1], corners[1:]):

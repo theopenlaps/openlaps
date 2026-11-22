@@ -23,6 +23,9 @@ NETWORK = DRIVABLE | PAVED_PATHS
 
 # Caminos a pie que solo se pintan en la textura del suelo (veredas)
 PATHS = {"footway", "path", "steps", "cycleway", "bridleway"}
+# ...salvo estas, que con --veredas entran a la red como brechas angostas de tierra (offroad): las sendas de
+# monte. Las aceras y carriles bici (footway, cycleway) y las escaleras nunca.
+VEREDAS = {"path", "bridleway"}
 
 # Vías en túnel que NO se construyen: rampas y pasillos de estacionamientos subterráneos (en el centro de una
 # ciudad hay decenas y cada una dejaba una boca de túnel en medio de la calle); los túneles de verdad
@@ -48,6 +51,9 @@ ROAD_CLASS = {
     "service":       (3.00,  1,       0.00,  30, 8.0,  2),
     "track":         (3.20,  1,       0.00,  30, 9.0,  1),
     "pedestrian":    (3.00,  2,       0.00,  20, 6.0,  0),
+    # veredas conducibles: una senda real mide menos de 1 m; se ensancha a lo justo para un coche
+    "path":          (2.60,  1,       0.00,  20, 5.0,  0),
+    "bridleway":     (2.60,  1,       0.00,  20, 5.0,  0),
     "motorway_link": (3.75,  1,       1.50,  60, 25.0, 8),
     "trunk_link":    (3.75,  1,       1.00,  50, 20.0, 7),
     "primary_link":  (3.50,  1,       0.50,  50, 16.0, 6),
@@ -78,6 +84,17 @@ SURFACE_MAP = {
 }
 PHYS_KEY = {"asfalto": "ROAD", "concreto": "ROAD", "adoquin": "MXCOBBLE",
             "empedrado": "MXCOBBLE", "terraceria": "LOOSE"}
+# Caminos sin asfalto: todos llevan el material visual "terraceria", pero cada superficie de OSM pisa distinto.
+# LOOSE queda para lo compactado o sin detalle (unpaved, compacted); las claves no pueden empezar por otra
+# clave de surfaces.ini (AC las busca por prefijo en el nombre de la malla).
+PHYS_SUELTA = {"gravel": "MXGRAVA", "fine_gravel": "MXGRAVA", "pebblestone": "MXGRAVA",
+               "dirt": "MXTIERRA", "earth": "MXTIERRA", "ground": "MXTIERRA", "mud": "MXTIERRA",
+               "sand": "MXARENA", "grass": "MXPASTO"}
+FISICAS_SUELTAS = ("LOOSE", "MXGRAVA", "MXTIERRA", "MXARENA", "MXPASTO")
+# tracktype de OSM -> superficie cuando falta `surface` (grade1 es firme: asfalto o muy compactado)
+TRACKTYPE = {"grade2": "gravel", "grade3": "dirt", "grade4": "ground", "grade5": "grass"}
+# clases menores: las únicas a las que se les deduce terracería si OSM no dice de qué son
+CLASES_MENORES = {"unclassified", "road", "residential", "living_street", "service", "track"}
 
 # --- Banquetas y edificios ------------------------------------------------------
 SIDEWALK_WIDTH = 1.8         # m

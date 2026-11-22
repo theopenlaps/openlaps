@@ -205,9 +205,27 @@ SURFACE_DEFS = [
     ("GRAVEL", 0.62, 0.2, "sand.wav", 0, "NULL", 1, 0, 0.05, 0.5, 0, 0, 0),
     ("WATER", 0.25, 1, "", 0, "NULL", 0, 0, 0, 0, 0, 0, 0),
     ("WALL", 0.8, 0, "", 0, "NULL", 0, 0, 0, 0, 0, 0, 0),
-    ("LOOSE", 0.8, 0, "sand.wav", 0, "NULL", 0.3, 1, 0, 0, 0, 0.15, 0.4),
+    # caminos sin asfalto (C.FISICAS_SUELTAS): pista válida, fricción por debajo de 0.9 (por encima las llantas
+    # chillan como en asfalto) y DIRT_ADDITIVE alto para el polvo y las roderas de CSP
+    ("LOOSE", 0.88, 0, "gravel.wav", 0, "NULL", 0.75, 1, 0.006, 0.6, 0, 0.15, 0.4),
+    ("MXGRAVA", 0.84, 0.02, "gravel.wav", 0, "NULL", 1, 1, 0.012, 0.5, 0, 0.25, 0.4),
+    ("MXTIERRA", 0.82, 0.02, "sand.wav", 0, "NULL", 0.9, 1, 0.015, 0.8, 0, 0.2, 0.5),
+    ("MXARENA", 0.7, 0.15, "sand.wav", 0, "NULL", 1, 1, 0.02, 0.9, 0, 0, 0),
+    ("MXPASTO", 0.7, 0.03, "grass.wav", 0, "NULL", 0.8, 1, 0.02, 0.6, 0, 0.2, 0.6),
     ("MXCOBBLE", 0.9, 0, "", 0, "NULL", 0, 1, 0.006, 0.25, 0, 0.6, 0.3),
+    # roca y pedregal fuera del camino: agarra más que el pasto, pero sacude
+    # vado: el camino bajo un palmo de agua. Frena (DAMPING) y agarra poco; pista válida
+    ("MXVADO", 0.6, 0.35, "", 0, "NULL", 0, 1, 0.01, 0.8, 0, 0.2, 0.5),
+    ("MXROCA", 0.82, 0, "", 0, "NULL", 0.1, 0, 0.03, 1.2, 0, 0.5, 0.4),
 ]
+# Tipo de superficie de CSP (grava, arena y pasto con su física y sus efectos) y ruido Perlin en vez del seno
+# para los baches. Sin CSP estas líneas se ignoran y quedan la fricción y el seno de arriba.
+SURFACE_EXT = {
+    "LOOSE": ("GRAVEL", "FIRM"), "MXGRAVA": ("GRAVEL", "REGULAR"), "MXTIERRA": ("GRAVEL", "LOOSE"),
+    "MXARENA": ("SAND", "REGULAR"), "MXPASTO": ("GRASS", "FIRM"),
+    # el suelo fuera del camino (terrain.FISICA_SUELO)
+    "GRASS": ("GRASS", "REGULAR"), "SAND": ("SAND", "LOOSE"), "DIRT": ("GRAVEL", "LOOSE"),
+}
 
 
 def surfaces_ini(extendido=True, nuevos_modos=False):
@@ -219,6 +237,10 @@ def surfaces_ini(extendido=True, nuevos_modos=False):
         out.append(f"[SURFACE_{i}]\nKEY={k}\nFRICTION={fr}\nDAMPING={dm}\nWAV={wav}\nWAV_PITCH={wp_i}\nFF_EFFECT={ff}\n"
                    f"DIRT_ADDITIVE={dirt}\nBLACK_FLAG_TIME=0\nIS_VALID_TRACK={valid}\nSIN_HEIGHT={sh}\nSIN_LENGTH={sl}\n"
                    f"IS_PITLANE={pit}\nVIBRATION_GAIN={vg}\nVIBRATION_LENGTH={vl}\n")
+        if k in SURFACE_EXT:
+            tipo, firmeza = SURFACE_EXT[k]
+            out[-1] += (f"_EXT_SURFACE_TYPE={tipo}\n_EXT_SURFACE_TYPE_MODIFIER={firmeza}\n_EXT_PERLIN_NOISE=1\n"
+                        "_EXT_PERLIN_OCTAVES=3\n_EXT_PERLIN_PERSISTENCE=0.5\n")
     if extendido:
         out.append("[_SCRIPTING_PHYSICS]\nALLOW_TRACK_SCRIPTS=1\n" + ("ALLOW_NEW_MODE_SCRIPTS=1\n" if nuevos_modos else ""))
     return "\n".join(out)
@@ -353,6 +375,19 @@ def write_track(scene, out_dir, track_id, info, map_lines, route=None, log=print
         V.escribir_lua(root, "", "", float(info["lat"]), float(info["lon"]),
                        modo_espera=True, rect_horneado=info.get("rect"), pista=track_id)
         ext_txt = ext_txt.rstrip() + "\n\n[SCRIPT_0]\nSCRIPT=vivo.lua\n"
+    # notas de copiloto del tramo: libro de ruta, datos y el script que las canta en el juego
+    from . import notas as N
+    rutas_notas = [os.path.join(root, "NOTAS.txt"), os.path.join(root, "data", "notas.json"),
+                   os.path.join(root, "extension", "notas.lua")]
+    if info.get("notas"):
+        w("NOTAS.txt", N.libro_de_ruta(info["notas"], info.get("name", "")))
+        w(os.path.join("data", "notas.json"), json.dumps(info["notas"], ensure_ascii=False, indent=1))
+        w(os.path.join("extension", "notas.lua"), N.lua(info["notas"]))
+        ext_txt = ext_txt.rstrip() + "\n\n[SCRIPT_1]\nSCRIPT=notas.lua\n"
+    else:
+        for f in rutas_notas:           # la pista se regeneró sin ruta: fuera las notas de la vez anterior
+            if os.path.exists(f):
+                os.remove(f)
     w(os.path.join("extension", "ext_config.ini"), ext_txt)
     if scene.cameras:
         w(os.path.join("data", "cameras.ini"), cameras_ini(scene.cameras))

@@ -8,7 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import shapely
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
+from shapely.geometry import box as sbox
 from shapely.ops import unary_union
 
 from . import config as C
@@ -18,7 +19,7 @@ from . import roadside as RS
 from .geo import BBox, LocalProjection
 from .mesh import Scene
 from .sources import osm as OSM, rasters, msbuildings, catastro, overture
-from . import export_glb, export_ac, regions, trafico
+from . import export_glb, export_ac, notas, regions, trafico
 
 ATTRIBUTION = """Atribuciones de datos de esta pista
 - Calles, edificios y usos de suelo: (c) OpenStreetMap contributors, ODbL 1.0
@@ -101,7 +102,9 @@ def red_de_calles(args, proj, osm, log=lambda m: None):
         urbano = unary_union(partes)
         shapely.prepare(urbano)
         urban_fn = lambda x, y: shapely.contains_xy(urbano, x, y)  # noqa: E731
-    return roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log, tuneles=getattr(args, "tuneles", "principales"))
+    return roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log, tuneles=getattr(args, "tuneles", "principales"),
+                              terraceria=getattr(args, "terraceria", "auto"),
+                              veredas=getattr(args, "veredas", False))
 
 
 def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_data=None, extension=None):
@@ -126,6 +129,14 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     area_km2 = (proj.xmax - proj.xmin) * (proj.ymax - proj.ymin) / 1e6
     res = args.res or (2.0 if area_km2 <= 2.5 else (3.0 if area_km2 <= 8 else 4.0))
     log(f"Área: {area_km2:.2f} km² centrada en {proj.lat0:.5f}, {proj.lon0:.5f} (UTM EPSG:{proj.epsg})")
+    corredor = ancho_corredor(args, area_km2) if pedazo is None else 0.0
+    if corredor:
+        log(f"  tramo largo: solo se genera un corredor de {corredor:.0f} m a cada lado de la ruta "
+            "(el resto de la zona queda como relieve lejano)")
+        if area_km2 > CORREDOR_DESDE_KM2:
+            # lo que se descarga a 25 cm o 1 m por pixel para todo el rectángulo no cabe en una zona así
+            args.sin_orto = args.sin_dosel = True
+            log("  (zona grande: sin ortofoto ni altura de dosel)")
 
     # ------------------------------------------------------------ datos
     # Todas las descargas van en paralelo: son independientes y casi todo el tiempo es espera de
@@ -244,7 +255,21 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
 
     # ------------------------------------------------------------ carreteras
     log("4/7 Red de carreteras…")
-    net = roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log, tuneles=getattr(args, "tuneles", "principales"))
+    net = roads.RoadNetwork(osm, proj, terr.z, urban_fn, rect, log=log, tuneles=getattr(args, "tuneles", "principales"),
+                              terraceria=getattr(args, "terraceria", "auto"),
+                              veredas=getattr(args, "veredas", False))
+    vados = net.vadear(cob.corriente)
+    zona = None
+    if corredor:
+        ruta0, _, _ = roads.route(net, puntos_ruta(args, proj), closed=args.modo == "circuito")
+        zona = LineString(ruta0[:, :2]).buffer(corredor, quad_segs=4).intersection(sbox(*rect))
+        net.acotar(zona)
+        osm = solo_en_zona(osm, proj, zona.buffer(30.0))
+        antes = len(blds)
+        blds = [b for b in blds if b["poly"].intersects(zona)]
+        cob.quieta = [g for g in cob.quieta if g.intersects(zona)]
+        cob.corriente = [g for g in cob.corriente if g.intersects(zona)]
+        log(f"  corredor: {zona.area / 1e6:.2f} km² de {area_km2:.1f} ({len(blds)} de {antes} edificios)")
     blds_poly_pre = unary_union([b["poly"] for b in blds]) if blds else None
     has_gr = any(b["tags"].get("barrier") == "guard_rail" for b in osm.get("barriers", []))
     rails = []
@@ -275,17 +300,18 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
 
     # ------------------------------------------------------------ modo de juego
     route = route_hw = None
+    notas_ruta = []
     info_run, length = "free roam", 0.0
     if args.modo in ("tramo", "circuito"):
-        wps = []
-        for tok in args.ruta.split(";"):
-            la, lo = (float(v) for v in tok.split(","))
-            x, y = proj.to_local([lo], [la])
-            wps.append((float(x[0]), float(y[0])))
-        route, route_hw, legs = roads.route(net, wps, closed=args.modo == "circuito")
+        route, route_hw, legs = roads.route(net, puntos_ruta(args, proj), closed=args.modo == "circuito")
         length = float(np.sum(np.linalg.norm(np.diff(route[:, :2], axis=0), axis=1)))
         log(f"  ruta de {args.modo}: {length / 1000:.2f} km por {len(legs)} tramos de calle")
         _place_stage(scene, net, route, route_hw, legs, closed=args.modo == "circuito", log=log)
+        notas_ruta = notas.calcular(route, legs, vados, cerrada=args.modo == "circuito")
+        curvas = [n for n in notas_ruta if n["tipo"] == "curva"]
+        log(f"  notas de copiloto: {len(notas_ruta)} ({len(curvas)} curvas, "
+            f"{sum(1 for n in curvas if n.get('horquilla'))} horquillas, "
+            f"{sum(1 for n in notas_ruta if n['tipo'] == 'rasante')} rasantes)")
         X.tv_cameras(scene, route)
         info_run = "clockwise" if args.modo == "circuito" else "A-B"
     elif pedazo is None:
@@ -301,7 +327,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
                      if rd["road_polys"] else None)
     terr.cubrir_tuneles(rd.get("tunnel_poly"), rd.get("tunnel_bocas", []), rd["tunnel"], scene)
     sin_puente = [p for p, e in rd["road_polys"] if not e.bridge]
-    agua = AG.Agua(cob, terr, unary_union(sin_puente) if sin_puente else None, log=log)
+    agua = AG.Agua(cob, terr, unary_union(sin_puente) if sin_puente else None, log=log, vados=vados)
     agua.tallar()
     paths = []
     for w in osm["ways"]:
@@ -313,9 +339,14 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     paths += [(c, w) for c, w in cob.secos]     # cauces secos (ramblas, arroyos intermitentes)
     painter = T.GroundPainter(lc, proj, args.temporada, rd["road_polys"], paths, areas, blds_poly, water_poly, s2=s2,
                               ortho=orto)
+    if not getattr(args, "sin_cunetas", False):
+        terr.cunetas(net, rd["ground_union"] if rd.get("sidewalks_core") is None or rd["ground_union"] is None
+                     else unary_union([rd["ground_union"], rd["sidewalks_core"]]),
+                     unary_union([g for g in (water_poly, blds_poly) if g is not None]) if (water_poly or blds_poly) else None)
     if pedazo is not None:
         terr.solo = pedazo
-    terr.build_mesh(scene, painter, tile_m=args.tesela, mpp=mpp)
+    terr.zona = zona
+    terr.build_mesh(scene, painter, tile_m=args.tesela, mpp=mpp, cobertura=cob)
     plazas_peatonales(scene, plazas, terr, rd["road_polys"], blds_poly, log=log)
     agua.construir(scene)
 
@@ -323,7 +354,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     if m:
         log("  barreras de OSM: " + ", ".join(f"{k} {v:.0f} m" for k, v in m.items()))
     if pedazo is None:
-        BR.boundary(scene, terr, rect)
+        BR.boundary(scene, terr, rect, zona)
     ns = RS.power_lines(scene, osm, proj, terr, rect)
     fm = RS.fences(scene, osm, proj, terr, rect, rd["road_union"])
     if ns or fm:
@@ -348,6 +379,8 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
         excl.append(water_poly)
     if rd.get("tunnel_poly") is not None:      # ni árboles sobre la tapa del túnel ni en sus bocas
         excl.append(rd["tunnel_poly"].buffer(2.0))
+    if zona is not None:
+        excl.append(sbox(*rect).difference(zona))        # fuera del corredor, nada de vegetación
     exclude = unary_union(excl) if excl else None
     if exclude is not None:
         shapely.prepare(exclude)
@@ -366,7 +399,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
         try:
             dem_far = f_far_dem.result()
             s2_far = f_far_s2.result() if f_far_s2 else None
-            nf = X.horizon(scene, proj, dem_far, s2_far, rect, terrain=terr)
+            nf = X.horizon(scene, proj, dem_far, s2_far, rect, terrain=terr, zona=zona)
             log(f"  horizonte: {nf:,} triángulos hasta 5 km")
         except Exception as e:  # noqa: BLE001
             log(f"  aviso: sin horizonte ({e})")
@@ -421,7 +454,7 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
                 "tags": [t for t in (R.code, R.sub, "openlaps", args.modo) if t], "length": length or rd["stats"]["km"] * 1000, "run": info_run,
                 "pitboxes": 8, "preview_png": bio.getvalue(),
                 "ai_hw": route_hw, "width": int(round(float(np.median(route_hw)) * 2)) if route_hw is not None else "",
-                "closed": args.modo == "circuito",
+                "closed": args.modo == "circuito", "notas": notas_ruta,
                 "rect": [float(proj.xmin), float(proj.ymin), float(proj.xmax), float(proj.ymax)],
                 "vivo_opc": {"res": getattr(args, "res", None), "mpp": getattr(args, "mpp", None),
                              "region": args.region, "subregion": getattr(args, "subregion", "auto"),
@@ -438,6 +471,54 @@ def run(args, log=print, proj=None, scene=None, osm_data=None, pedazo=None, cat_
     pool.shutdown(wait=False, cancel_futures=True)
     log(f"Listo en {time.time() - t0:.0f} s")
     return glb
+
+
+CORREDOR_DESDE_KM2 = 24.0     # un tramo o circuito en una zona mayor que esto se genera como corredor
+CORREDOR_ANCHO = 220.0        # m a cada lado de la ruta
+
+
+def ancho_corredor(args, area_km2):
+    """Metros de corredor a cada lado de la ruta, o 0 si se genera el rectángulo entero. `--corredor auto` (por
+    defecto): solo los tramos y circuitos en zonas grandes; un número lo fuerza y 0 lo quita."""
+    if getattr(args, "modo", "libre") not in ("tramo", "circuito") or not getattr(args, "ruta", None):
+        return 0.0
+    v = str(getattr(args, "corredor", "auto") or "auto")
+    if v == "auto":
+        return CORREDOR_ANCHO if area_km2 > CORREDOR_DESDE_KM2 else 0.0
+    return max(60.0, float(v)) if float(v) > 0 else 0.0
+
+
+def puntos_ruta(args, proj):
+    """Los puntos de --ruta ("lat,lon;lat,lon;...") en coordenadas locales."""
+    wps = []
+    for tok in args.ruta.split(";"):
+        la, lo = (float(v) for v in tok.split(","))
+        x, y = proj.to_local([lo], [la])
+        wps.append((float(x[0]), float(y[0])))
+    return wps
+
+
+def solo_en_zona(osm, proj, zona):
+    """Los datos de OSM sin lo que cae fuera de `zona` (corredor de un tramo largo): barreras, tendido, vías de
+    tren, nodos y veredas. Las calles se quedan todas (la red ya las recorta) y las áreas también (solo se pintan
+    en las teselas que se construyen)."""
+    shapely.prepare(zona)
+
+    def dentro(coords):
+        c = np.asarray(coords, float)
+        if len(c) > 12:
+            c = c[np.linspace(0, len(c) - 1, 12).astype(int)]
+        x, y = proj.to_local(c[:, 0], c[:, 1])
+        return bool(shapely.contains_xy(zona, x, y).any())
+    out = dict(osm)
+    for k in ("barriers", "power", "rails"):
+        out[k] = [el for el in osm.get(k, []) if dentro(el["coords"])]
+    out["ways"] = [w for w in osm["ways"] if w["tags"].get("highway") in C.NETWORK | C.VEREDAS or dentro(w["coords"])]
+    if osm["nodes"]:
+        x, y = proj.to_local([n["lon"] for n in osm["nodes"]], [n["lat"] for n in osm["nodes"]])
+        ok = shapely.contains_xy(zona, x, y)
+        out["nodes"] = [n for n, k in zip(osm["nodes"], ok) if k]
+    return out
 
 
 def precargar(args, proj, log=print):
